@@ -7,7 +7,6 @@ on:
 
 env:
   REGISTRY_HOST: 192.168.0.79:3333
-  REGISTRY_URL: http://192.168.0.79:3333
   IMAGE_OWNER: dadmin
   IMAGE_NAME: fpl-data-relay
 
@@ -19,12 +18,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to Gitea registry
+      - name: Configure Gitea registry credentials
         run: |
-          echo "${{ secrets.CONTAINER_REGISTRY_TOKEN }}" \
-            | docker login "$REGISTRY_URL" \
-              --username "${{ secrets.CONTAINER_REGISTRY_USER }}" \
-              --password-stdin
+          mkdir -p "$HOME/.docker"
+          AUTH="$(printf '%s:%s' \
+            "${{ secrets.CONTAINER_REGISTRY_USER }}" \
+            "${{ secrets.CONTAINER_REGISTRY_TOKEN }}" \
+            | base64 \
+            | tr -d '\n')"
+
+          cat > "$HOME/.docker/config.json" <<EOF
+          {
+            "auths": {
+              "$REGISTRY_HOST": {
+                "auth": "$AUTH"
+              }
+            }
+          }
+          EOF
 
       - name: Build and push image
         run: |
