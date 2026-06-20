@@ -1,0 +1,39 @@
+name: Build and publish image
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: 192.168.0.79:3333
+  IMAGE_OWNER: dadmin
+  IMAGE_NAME: fpl-data-relay
+
+jobs:
+  build:
+    runs-on: docker-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Gitea registry
+        run: |
+          echo "${{ secrets.CONTAINER_REGISTRY_TOKEN }}" \
+            | docker login "$REGISTRY" \
+              --username "${{ secrets.CONTAINER_REGISTRY_USER }}" \
+              --password-stdin
+
+      - name: Build and push image
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          FULL_IMAGE="$REGISTRY/$IMAGE_OWNER/$IMAGE_NAME"
+
+          docker build \
+            --tag "$FULL_IMAGE:latest" \
+            --tag "$FULL_IMAGE:$SHORT_SHA" \
+            .
+
+          docker push "$FULL_IMAGE:latest"
+          docker push "$FULL_IMAGE:$SHORT_SHA"
