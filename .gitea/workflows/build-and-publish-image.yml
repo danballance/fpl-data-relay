@@ -9,6 +9,8 @@ env:
   REGISTRY_HOST: 192.168.0.79:3333
   IMAGE_OWNER: dadmin
   IMAGE_NAME: fpl-data-relay
+  DOCKER_HOST: tcp://127.0.0.1:2375
+  DOCKER_TLS_CERTDIR: ""
 
 jobs:
   build:
