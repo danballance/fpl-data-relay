@@ -6,7 +6,8 @@ on:
       - main
 
 env:
-  REGISTRY: 192.168.0.79:3333
+  REGISTRY_HOST: 192.168.0.79:3333
+  REGISTRY_URL: http://192.168.0.79:3333
   IMAGE_OWNER: dadmin
   IMAGE_NAME: fpl-data-relay
 
@@ -21,14 +22,14 @@ jobs:
       - name: Log in to Gitea registry
         run: |
           echo "${{ secrets.CONTAINER_REGISTRY_TOKEN }}" \
-            | docker login "$REGISTRY" \
+            | docker login "$REGISTRY_URL" \
               --username "${{ secrets.CONTAINER_REGISTRY_USER }}" \
               --password-stdin
 
       - name: Build and push image
         run: |
           SHORT_SHA="$(git rev-parse --short HEAD)"
-          FULL_IMAGE="$REGISTRY/$IMAGE_OWNER/$IMAGE_NAME"
+          FULL_IMAGE="$REGISTRY_HOST/$IMAGE_OWNER/$IMAGE_NAME"
 
           docker build \
             --tag "$FULL_IMAGE:latest" \
