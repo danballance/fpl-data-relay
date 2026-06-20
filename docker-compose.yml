@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      FPL_API_BASE_URL: ${FPL_API_BASE_URL:?FPL_API_BASE_URL is required}
+      FPL_CLIENT_USER_AGENT: ${FPL_CLIENT_USER_AGENT:?FPL_CLIENT_USER_AGENT is required}
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:?HTTP_TIMEOUT_SECONDS is required}
+      REFERENCE_POLL_SECONDS: ${REFERENCE_POLL_SECONDS:?REFERENCE_POLL_SECONDS is required}
+      LIVE_POLL_SECONDS: ${LIVE_POLL_SECONDS:?LIVE_POLL_SECONDS is required}
+      IDLE_POLL_SECONDS: ${IDLE_POLL_SECONDS:?IDLE_POLL_SECONDS is required}
+      SSE_HEARTBEAT_SECONDS: ${SSE_HEARTBEAT_SECONDS:?SSE_HEARTBEAT_SECONDS is required}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+

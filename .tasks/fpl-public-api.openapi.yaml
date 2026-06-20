@@ -1,0 +1,1186 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Fantasy Premier League Public API
+  version: 0.1.0
+  summary: Unofficial OpenAPI description of public Fantasy Premier League GET endpoints used for live FPL data ingestion.
+  description: |
+    This is an unofficial OpenAPI 3.1 description of the public, unauthenticated
+    Fantasy Premier League HTTP/JSON endpoints commonly used to fetch FPL reference,
+    fixture, live Gameweek, manager-picks, and public-league data.
+
+    The Premier League does not publish a formal developer API contract or SLA for
+    these endpoints. Treat schemas as representative rather than exhaustive: FPL may
+    add, remove, rename, or change fields without notice. Client implementations
+    should preserve unknown properties and tolerate nulls.
+
+    This spec intentionally excludes private/session endpoints such as `/me/` and
+    `/my-team/{entry_id}/`, which require cookies/authentication.
+  contact:
+    name: Unofficial community schema
+  license:
+    name: Unlicensed / informational only
+servers:
+  - url: https://fantasy.premierleague.com/api
+    description: Fantasy Premier League API base URL
+tags:
+  - name: Reference
+    description: Season-wide reference data and player metadata.
+  - name: Fixtures
+    description: Fixture lists, match status, scores, and fixture-level stats.
+  - name: Live
+    description: Live/provisional Gameweek scoring state.
+  - name: Entries
+    description: Public manager/team data and locked Gameweek picks.
+  - name: Leagues
+    description: Public league standings.
+paths:
+  /bootstrap-static/:
+    get:
+      tags: [Reference]
+      operationId: getBootstrapStatic
+      summary: Get season-wide FPL reference data
+      description: |
+        Returns the large season bootstrap document containing Gameweeks, teams,
+        players/elements, element types, scoring settings, and global game settings.
+        Use this as the primary lookup table for player IDs, team IDs, positions,
+        deadlines, and current-event resolution.
+      responses:
+        '200':
+          description: Season-wide bootstrap data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapStatic'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /fixtures/:
+    get:
+      tags: [Fixtures]
+      operationId: getFixtures
+      summary: Get fixtures, optionally filtered by Gameweek
+      description: |
+        Returns fixtures. Supplying `event` filters results to a single Gameweek.
+        During live match windows this endpoint is useful for fixture status,
+        started/finished flags, minutes, scores, and fixture stat context.
+      parameters:
+        - name: event
+          in: query
+          required: false
+          description: FPL Gameweek/event ID to filter fixtures by.
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+      responses:
+        '200':
+          description: Fixture list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Fixture'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /event-status/:
+    get:
+      tags: [Live]
+      operationId: getEventStatus
+      summary: Get Gameweek status flags
+      description: |
+        Returns status information for recent/current Gameweek days, including
+        whether bonus points have been added and whether league updates have run.
+        Useful for deciding when provisional live data has settled enough to reduce
+        polling or trigger post-match reconciliation.
+      responses:
+        '200':
+          description: Event status information.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventStatusResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /event/{event_id}/live/:
+    get:
+      tags: [Live]
+      operationId: getEventLive
+      summary: Get live/provisional player scoring data for a Gameweek
+      description: |
+        Core public endpoint for official FPL live Gameweek state. Returns an
+        `elements` array keyed by player/element ID. Each element includes live
+        stats and an `explain` breakdown used to derive provisional FPL points.
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200':
+          description: Live Gameweek player data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventLiveResponse'
+        '404':
+          description: Gameweek/event not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /element-summary/{element_id}/:
+    get:
+      tags: [Reference]
+      operationId: getElementSummary
+      summary: Get detailed summary for a player/element
+      description: |
+        Returns a player's upcoming fixtures, current-season history, and historical
+        season summaries. This is enrichment data, not the primary live feed.
+      parameters:
+        - $ref: '#/components/parameters/ElementId'
+      responses:
+        '200':
+          description: Player summary data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElementSummary'
+        '404':
+          description: Player/element not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /entry/{entry_id}/:
+    get:
+      tags: [Entries]
+      operationId: getEntry
+      summary: Get public manager entry metadata
+      description: |
+        Returns public metadata for a manager/team entry. This endpoint is useful
+        when enriching live manager-score views with entry names and public profile
+        information.
+      parameters:
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Public entry metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entry'
+        '404':
+          description: Entry not found or not public.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /entry/{entry_id}/event/{event_id}/picks/:
+    get:
+      tags: [Entries, Live]
+      operationId: getEntryEventPicks
+      summary: Get a public entry's locked picks for a Gameweek
+      description: |
+        Returns an entry's Gameweek picks, captain/vice-captain metadata, automatic
+        substitutions, active chip, and entry history for the Gameweek. This is the
+        key join endpoint for computing manager-specific live scores from
+        `/event/{event_id}/live/`.
+      parameters:
+        - $ref: '#/components/parameters/EntryId'
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200':
+          description: Entry picks for the Gameweek.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntryEventPicks'
+        '404':
+          description: Entry or Gameweek not found, or picks not publicly available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /entry/{entry_id}/history/:
+    get:
+      tags: [Entries]
+      operationId: getEntryHistory
+      summary: Get public entry season history
+      description: |
+        Returns a public entry's current-season Gameweek history, chip usage, and
+        past-season summaries. Useful for backfilling manager context and verifying
+        cumulative totals.
+      parameters:
+        - $ref: '#/components/parameters/EntryId'
+      responses:
+        '200':
+          description: Entry history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntryHistory'
+        '404':
+          description: Entry not found or not public.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+  /leagues-classic/{league_id}/standings/:
+    get:
+      tags: [Leagues]
+      operationId: getClassicLeagueStandings
+      summary: Get public classic league standings
+      description: |
+        Returns standings for a public classic league. Use `page_standings` for
+        pagination and `phase` to select the league phase where needed. Live league
+        positions should be treated as provisional while a Gameweek is active.
+      parameters:
+        - $ref: '#/components/parameters/LeagueId'
+        - name: page_standings
+          in: query
+          required: false
+          description: One-based standings page number.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: phase
+          in: query
+          required: false
+          description: FPL phase ID. Omit for the default/current phase.
+          schema:
+            type: integer
+            minimum: 1
+          example: 1
+      responses:
+        '200':
+          description: Classic league standings page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassicLeagueStandings'
+        '404':
+          description: League not found or not public.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+
+components:
+  parameters:
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      description: FPL Gameweek/event ID.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1
+    ElementId:
+      name: element_id
+      in: path
+      required: true
+      description: FPL player/element ID from `bootstrap-static.elements[].id`.
+      schema:
+        type: integer
+        minimum: 1
+      example: 302
+    EntryId:
+      name: entry_id
+      in: path
+      required: true
+      description: FPL manager/team entry ID.
+      schema:
+        type: integer
+        minimum: 1
+      example: 123456
+    LeagueId:
+      name: league_id
+      in: path
+      required: true
+      description: FPL classic league ID.
+      schema:
+        type: integer
+        minimum: 1
+      example: 313
+
+  responses:
+    TooManyRequests:
+      description: Too many requests. The public FPL API does not publish a formal rate-limit contract; clients should back off conservatively.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnexpectedError:
+      description: Unexpected error or undocumented response shape.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        detail:
+          type: string
+        error:
+          type: string
+        message:
+          type: string
+
+    BootstrapStatic:
+      type: object
+      additionalProperties: true
+      required:
+        - events
+        - teams
+        - elements
+        - element_types
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        game_settings:
+          type: object
+          additionalProperties: true
+        phases:
+          type: array
+          items:
+            $ref: '#/components/schemas/Phase'
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/Team'
+        total_players:
+          type: integer
+        elements:
+          type: array
+          items:
+            $ref: '#/components/schemas/Element'
+        element_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElementStatDefinition'
+        element_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElementType'
+
+    Event:
+      type: object
+      additionalProperties: true
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          example: Gameweek 1
+        deadline_time:
+          type: string
+          format: date-time
+        average_entry_score:
+          type: [integer, 'null']
+        finished:
+          type: boolean
+        data_checked:
+          type: boolean
+        highest_scoring_entry:
+          type: [integer, 'null']
+        deadline_time_epoch:
+          type: integer
+        deadline_time_game_offset:
+          type: integer
+        highest_score:
+          type: [integer, 'null']
+        is_previous:
+          type: boolean
+        is_current:
+          type: boolean
+        is_next:
+          type: boolean
+
+    Phase:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        start_event:
+          type: integer
+        stop_event:
+          type: integer
+
+    Team:
+      type: object
+      additionalProperties: true
+      required: [id, name, short_name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        short_name:
+          type: string
+        code:
+          type: integer
+        strength:
+          type: integer
+        strength_overall_home:
+          type: integer
+        strength_overall_away:
+          type: integer
+        strength_attack_home:
+          type: integer
+        strength_attack_away:
+          type: integer
+        strength_defence_home:
+          type: integer
+        strength_defence_away:
+          type: integer
+        pulse_id:
+          type: [integer, 'null']
+
+    ElementType:
+      type: object
+      additionalProperties: true
+      required: [id, singular_name, singular_name_short]
+      properties:
+        id:
+          type: integer
+        singular_name:
+          type: string
+          example: Midfielder
+        singular_name_short:
+          type: string
+          example: MID
+        squad_select:
+          type: integer
+        squad_min_play:
+          type: integer
+        squad_max_play:
+          type: integer
+        ui_shirt_specific:
+          type: boolean
+        sub_positions_locked:
+          type: array
+          items:
+            type: integer
+        element_count:
+          type: integer
+
+    ElementStatDefinition:
+      type: object
+      additionalProperties: true
+      properties:
+        label:
+          type: string
+        name:
+          type: string
+
+    Element:
+      type: object
+      additionalProperties: true
+      required: [id, first_name, second_name, web_name, team, element_type]
+      properties:
+        id:
+          type: integer
+        code:
+          type: integer
+        first_name:
+          type: string
+        second_name:
+          type: string
+        web_name:
+          type: string
+        team:
+          type: integer
+          description: Team ID.
+        team_code:
+          type: integer
+        element_type:
+          type: integer
+          description: Position/element type ID.
+        status:
+          type: string
+          description: FPL availability status code.
+        news:
+          type: string
+        news_added:
+          type: [string, 'null']
+          format: date-time
+        now_cost:
+          type: integer
+          description: Price in tenths, e.g. 85 means £8.5m.
+        selected_by_percent:
+          type: string
+        total_points:
+          type: integer
+        chance_of_playing_next_round:
+          type: [integer, 'null']
+        chance_of_playing_this_round:
+          type: [integer, 'null']
+        form:
+          type: string
+        minutes:
+          type: integer
+        goals_scored:
+          type: integer
+        assists:
+          type: integer
+        clean_sheets:
+          type: integer
+        goals_conceded:
+          type: integer
+        own_goals:
+          type: integer
+        penalties_saved:
+          type: integer
+        penalties_missed:
+          type: integer
+        yellow_cards:
+          type: integer
+        red_cards:
+          type: integer
+        saves:
+          type: integer
+        bonus:
+          type: integer
+        bps:
+          type: integer
+        influence:
+          type: string
+        creativity:
+          type: string
+        threat:
+          type: string
+        ict_index:
+          type: string
+        expected_goals:
+          type: string
+        expected_assists:
+          type: string
+        expected_goal_involvements:
+          type: string
+        expected_goals_conceded:
+          type: string
+
+    Fixture:
+      type: object
+      additionalProperties: true
+      required: [id, team_h, team_a, started, finished]
+      properties:
+        id:
+          type: integer
+        code:
+          type: integer
+        event:
+          type: [integer, 'null']
+          description: FPL Gameweek/event ID.
+        finished:
+          type: boolean
+        finished_provisional:
+          type: boolean
+        kickoff_time:
+          type: [string, 'null']
+          format: date-time
+        minutes:
+          type: integer
+        provisional_start_time:
+          type: boolean
+        started:
+          type: boolean
+        team_a:
+          type: integer
+        team_a_score:
+          type: [integer, 'null']
+        team_h:
+          type: integer
+        team_h_score:
+          type: [integer, 'null']
+        stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/FixtureStat'
+        pulse_id:
+          type: [integer, 'null']
+
+    FixtureStat:
+      type: object
+      additionalProperties: true
+      properties:
+        identifier:
+          type: string
+          example: goals_scored
+        a:
+          type: array
+          description: Away-team stat entries.
+          items:
+            $ref: '#/components/schemas/FixtureStatEntry'
+        h:
+          type: array
+          description: Home-team stat entries.
+          items:
+            $ref: '#/components/schemas/FixtureStatEntry'
+
+    FixtureStatEntry:
+      type: object
+      additionalProperties: true
+      properties:
+        value:
+          type: [integer, number, string, 'null']
+        element:
+          type: [integer, 'null']
+          description: Player/element ID, when applicable.
+
+    EventStatusResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        status:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventStatusDay'
+        leagues:
+          type: string
+          description: League-update status, when present.
+
+    EventStatusDay:
+      type: object
+      additionalProperties: true
+      properties:
+        event:
+          type: integer
+        bonus_added:
+          type: boolean
+        date:
+          type: string
+          format: date
+        leagues_updated:
+          type: boolean
+
+    EventLiveResponse:
+      type: object
+      additionalProperties: true
+      required: [elements]
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveElement'
+
+    LiveElement:
+      type: object
+      additionalProperties: true
+      required: [id, stats, explain]
+      properties:
+        id:
+          type: integer
+          description: Player/element ID.
+        stats:
+          $ref: '#/components/schemas/LiveElementStats'
+        explain:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveElementExplain'
+
+    LiveElementStats:
+      type: object
+      additionalProperties:
+        type: [integer, number, string, boolean, 'null']
+      properties:
+        minutes:
+          type: integer
+        goals_scored:
+          type: integer
+        assists:
+          type: integer
+        clean_sheets:
+          type: integer
+        goals_conceded:
+          type: integer
+        own_goals:
+          type: integer
+        penalties_saved:
+          type: integer
+        penalties_missed:
+          type: integer
+        yellow_cards:
+          type: integer
+        red_cards:
+          type: integer
+        saves:
+          type: integer
+        bonus:
+          type: integer
+        bps:
+          type: integer
+        influence:
+          type: string
+        creativity:
+          type: string
+        threat:
+          type: string
+        ict_index:
+          type: string
+        starts:
+          type: integer
+        expected_goals:
+          type: string
+        expected_assists:
+          type: string
+        expected_goal_involvements:
+          type: string
+        expected_goals_conceded:
+          type: string
+        defensive_contribution:
+          type: integer
+        total_points:
+          type: integer
+        in_dreamteam:
+          type: boolean
+
+    LiveElementExplain:
+      type: object
+      additionalProperties: true
+      properties:
+        fixture:
+          type: integer
+        stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveElementExplainStat'
+
+    LiveElementExplainStat:
+      type: object
+      additionalProperties: true
+      properties:
+        identifier:
+          type: string
+          example: goals_scored
+        points:
+          type: integer
+        value:
+          type: [integer, number, string, boolean, 'null']
+
+    ElementSummary:
+      type: object
+      additionalProperties: true
+      properties:
+        fixtures:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElementSummaryFixture'
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElementSummaryHistory'
+        history_past:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElementSummaryHistoryPast'
+
+    ElementSummaryFixture:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        code:
+          type: integer
+        team_h:
+          type: integer
+        team_h_score:
+          type: [integer, 'null']
+        team_a:
+          type: integer
+        team_a_score:
+          type: [integer, 'null']
+        event:
+          type: [integer, 'null']
+        finished:
+          type: boolean
+        minutes:
+          type: integer
+        provisional_start_time:
+          type: boolean
+        kickoff_time:
+          type: [string, 'null']
+          format: date-time
+        event_name:
+          type: string
+        is_home:
+          type: boolean
+        difficulty:
+          type: integer
+
+    ElementSummaryHistory:
+      type: object
+      additionalProperties: true
+      properties:
+        element:
+          type: integer
+        fixture:
+          type: integer
+        opponent_team:
+          type: integer
+        total_points:
+          type: integer
+        was_home:
+          type: boolean
+        kickoff_time:
+          type: string
+          format: date-time
+        team_h_score:
+          type: [integer, 'null']
+        team_a_score:
+          type: [integer, 'null']
+        round:
+          type: integer
+        minutes:
+          type: integer
+        goals_scored:
+          type: integer
+        assists:
+          type: integer
+        bonus:
+          type: integer
+        bps:
+          type: integer
+
+    ElementSummaryHistoryPast:
+      type: object
+      additionalProperties: true
+      properties:
+        season_name:
+          type: string
+        element_code:
+          type: integer
+        start_cost:
+          type: integer
+        end_cost:
+          type: integer
+        total_points:
+          type: integer
+        minutes:
+          type: integer
+        goals_scored:
+          type: integer
+        assists:
+          type: integer
+
+    Entry:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        joined_time:
+          type: string
+          format: date-time
+        started_event:
+          type: integer
+        favourite_team:
+          type: [integer, 'null']
+        player_first_name:
+          type: string
+        player_last_name:
+          type: string
+        player_region_id:
+          type: [integer, 'null']
+        player_region_name:
+          type: [string, 'null']
+        player_region_iso_code_short:
+          type: [string, 'null']
+        player_region_iso_code_long:
+          type: [string, 'null']
+        summary_overall_points:
+          type: integer
+        summary_overall_rank:
+          type: integer
+        summary_event_points:
+          type: integer
+        summary_event_rank:
+          type: integer
+        current_event:
+          type: integer
+        leagues:
+          type: object
+          additionalProperties: true
+        name:
+          type: string
+          description: Entry/team name, when present.
+
+    EntryEventPicks:
+      type: object
+      additionalProperties: true
+      required: [picks]
+      properties:
+        active_chip:
+          type: [string, 'null']
+        automatic_subs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutomaticSubstitution'
+        entry_history:
+          $ref: '#/components/schemas/EntryEventHistory'
+        picks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Pick'
+
+    Pick:
+      type: object
+      additionalProperties: true
+      required: [element, position, multiplier, is_captain, is_vice_captain]
+      properties:
+        element:
+          type: integer
+          description: Player/element ID.
+        position:
+          type: integer
+          description: Squad position, usually 1-15.
+        multiplier:
+          type: integer
+          description: Points multiplier, e.g. 2 for captain, 0 for bench.
+        is_captain:
+          type: boolean
+        is_vice_captain:
+          type: boolean
+
+    AutomaticSubstitution:
+      type: object
+      additionalProperties: true
+      properties:
+        entry:
+          type: integer
+        element_in:
+          type: integer
+        element_out:
+          type: integer
+        event:
+          type: integer
+
+    EntryEventHistory:
+      type: object
+      additionalProperties: true
+      properties:
+        points:
+          type: integer
+        total_points:
+          type: integer
+        rank:
+          type: [integer, 'null']
+        rank_sort:
+          type: [integer, 'null']
+        overall_rank:
+          type: [integer, 'null']
+        percentile_rank:
+          type: [integer, 'null']
+        bank:
+          type: integer
+        value:
+          type: integer
+        event_transfers:
+          type: integer
+        event_transfers_cost:
+          type: integer
+        points_on_bench:
+          type: integer
+
+    EntryHistory:
+      type: object
+      additionalProperties: true
+      properties:
+        current:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntryHistoryCurrent'
+        past:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntryHistoryPast'
+        chips:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChipUsage'
+
+    EntryHistoryCurrent:
+      type: object
+      additionalProperties: true
+      properties:
+        event:
+          type: integer
+        points:
+          type: integer
+        total_points:
+          type: integer
+        rank:
+          type: [integer, 'null']
+        rank_sort:
+          type: [integer, 'null']
+        overall_rank:
+          type: [integer, 'null']
+        bank:
+          type: integer
+        value:
+          type: integer
+        event_transfers:
+          type: integer
+        event_transfers_cost:
+          type: integer
+        points_on_bench:
+          type: integer
+
+    EntryHistoryPast:
+      type: object
+      additionalProperties: true
+      properties:
+        season_name:
+          type: string
+        total_points:
+          type: integer
+        rank:
+          type: integer
+
+    ChipUsage:
+      type: object
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+        time:
+          type: string
+          format: date-time
+        event:
+          type: integer
+
+    ClassicLeagueStandings:
+      type: object
+      additionalProperties: true
+      properties:
+        has_next:
+          type: boolean
+        page:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClassicLeagueStandingResult'
+        league:
+          $ref: '#/components/schemas/ClassicLeague'
+        new_entries:
+          type: object
+          additionalProperties: true
+        last_updated_data:
+          type: [string, 'null']
+          format: date-time
+
+    ClassicLeague:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        created:
+          type: string
+          format: date-time
+        closed:
+          type: boolean
+        max_entries:
+          type: [integer, 'null']
+        league_type:
+          type: string
+        scoring:
+          type: string
+        admin_entry:
+          type: [integer, 'null']
+        start_event:
+          type: integer
+        code_privacy:
+          type: string
+        has_cup:
+          type: boolean
+        cup_league:
+          type: [integer, 'null']
+        rank:
+          type: [integer, 'null']
+
+    ClassicLeagueStandingResult:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: integer
+        entry:
+          type: integer
+          description: Manager/team entry ID.
+        entry_name:
+          type: string
+        has_next:
+          type: boolean
+        player_name:
+          type: string
+        rank:
+          type: integer
+        last_rank:
+          type: integer
+        rank_sort:
+          type: integer
+        total:
+          type: integer
+
+x-client-notes:
+  upstream_contract: Unofficial and undocumented; tolerate unknown fields and nulls.
+  recommended_live_polling:
+    bootstrap-static: Cache aggressively; refresh every 15-60 minutes or around deadlines.
+    fixtures: Poll `/fixtures/?event={event_id}` every 15-30 seconds during live windows.
+    event-live: Poll `/event/{event_id}/live/` every 15-30 seconds during live windows.
+    event-status: Poll periodically to detect bonus/league-update settlement.
+    picks: Cache per entry per Gameweek after deadline; avoid hot-loop polling.
+  provisionality: Live points, bonus, ranks, and league standings can change during and after match windows.

@@ -1,0 +1,57 @@
+[project]
+name = "fpl-data-relay"
+version = "0.1.0"
+description = "Self-hosted relay for public Fantasy Premier League data."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "asyncpg>=0.30.0",
+    "fastapi>=0.135.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.12.0",
+    "typer>=0.20.0",
+    "uvicorn[standard]>=0.38.0",
+]
+
+[project.scripts]
+fpl-relay = "fpl_data_relay.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.0",
+    "ty>=0.0.1a23",
+]
+
+[build-system]
+requires = ["setuptools>=80.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fpl_data_relay*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+ignore = [
+    "COM812",
+    "D",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["fpl_data_relay"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
