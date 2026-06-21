@@ -1,5 +1,7 @@
 """Production object factory for the relay application."""
 
+from typing import Any
+
 import asyncpg
 from fastapi import FastAPI
 
@@ -7,7 +9,7 @@ from fpl_data_relay.api import create_app
 from fpl_data_relay.config import Settings, load_settings_from_environment
 from fpl_data_relay.fpl_client import FplClient
 from fpl_data_relay.ingestion import IngestionService
-from fpl_data_relay.store import PostgresStore, ResourceStore
+from fpl_data_relay.store import PostgresStore
 
 
 async def build_postgres_store(*, settings: Settings) -> PostgresStore:
@@ -21,7 +23,7 @@ async def build_postgres_store(*, settings: Settings) -> PostgresStore:
 def build_ingestion_service(
     *,
     settings: Settings,
-    store: ResourceStore,
+    store: Any,
 ) -> IngestionService:
     """Wire the FPL HTTP client to the ingestion service."""
     client = FplClient(

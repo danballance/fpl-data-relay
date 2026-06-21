@@ -1,22 +1,22 @@
-"""Ingestion orchestration and polling scheduler for FPL resources."""
+"""Ingestion orchestration and polling scheduler for normalised FPL entities."""
 
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
 from fpl_data_relay.fpl_client import model_to_payload
-from fpl_data_relay.hashing import payload_sha256
-from fpl_data_relay.resources import EVENT_NAMES, ResourceKey
-from fpl_data_relay.store import ResourceStore, ResourceWrite, UpsertOutcome
-from fpl_data_relay.upstream_models import (
+from fpl_data_relay.fpl_models import (
     BootstrapStatic,
     EventLiveResponse,
     EventStatusResponse,
     Fixture,
 )
+from fpl_data_relay.hashing import payload_sha256
+from fpl_data_relay.resources import IngestionSourceKey
+from fpl_data_relay.store import FplStore, IngestionMetadata, UpsertOutcome
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class FplApiClient(Protocol):
 
 
 class IngestionResult(BaseModel):
-    """Summary of resource changes produced by one ingestion cycle."""
+    """Summary of entity-family changes produced by one ingestion cycle."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -61,12 +61,12 @@ class IngestionResult(BaseModel):
 
 
 class IngestionService:
-    """Fetch upstream resources, hash payloads, and persist detected changes."""
+    """Fetch upstream resources, validate, split, and persist FPL entities."""
 
-    def __init__(self, *, client: FplApiClient, store: ResourceStore) -> None:
+    def __init__(self, *, client: FplApiClient, store: Any) -> None:
         """Create an ingestion service from client and store interfaces."""
         self._client = client
-        self._store = store
+        self._store = cast("FplStore", store)
 
     async def close(self) -> None:
         """Close resources owned by the upstream client."""
@@ -98,17 +98,23 @@ class IngestionService:
         )
         current_event_id = select_current_event_id(bootstrap=bootstrap)
         outcomes = [
-            await self._upsert(
-                resource_key=ResourceKey.BOOTSTRAP,
-                payload=model_to_payload(model=bootstrap),
-                event_id=None,
-                fetched_at=fetched_at,
+            await self._store.upsert_bootstrap(
+                bootstrap=bootstrap,
+                metadata=metadata_for_payload(
+                    source_key=IngestionSourceKey.BOOTSTRAP,
+                    event_id=None,
+                    payload=model_to_payload(model=bootstrap),
+                    fetched_at=fetched_at,
+                ),
             ),
-            await self._upsert(
-                resource_key=ResourceKey.FIXTURES,
-                payload=model_to_payload(model=fixtures),
-                event_id=None,
-                fetched_at=fetched_at,
+            await self._store.upsert_fixtures(
+                fixtures=fixtures,
+                metadata=metadata_for_payload(
+                    source_key=IngestionSourceKey.FIXTURES,
+                    event_id=None,
+                    payload=model_to_payload(model=fixtures),
+                    fetched_at=fetched_at,
+                ),
             ),
         ]
         return result_from_outcomes(
@@ -119,13 +125,12 @@ class IngestionService:
 
     async def _ingest_live_unlocked(self) -> IngestionResult:
         """Fetch and store live resources while a lock is already held."""
-        bootstrap_resource = await self._store.get_resource(
-            resource_key=ResourceKey.BOOTSTRAP,
-        )
-        if bootstrap_resource is None:
-            raise RuntimeError("Cannot ingest live resources before bootstrap exists.")
-        bootstrap = BootstrapStatic.model_validate(bootstrap_resource.payload)
-        current_event_id = select_current_event_id(bootstrap=bootstrap)
+        current_event = await self._store.get_current_event()
+        if current_event is None:
+            raise RuntimeError(
+                "Cannot ingest live resources before reference data exists.",
+            )
+        current_event_id = current_event.id
         fetched_at = utc_now()
         event_status, current_fixtures, event_live = await asyncio.gather(
             self._client.fetch_event_status(),
@@ -133,23 +138,33 @@ class IngestionService:
             self._client.fetch_event_live(event_id=current_event_id),
         )
         outcomes = [
-            await self._upsert(
-                resource_key=ResourceKey.EVENT_STATUS,
-                payload=model_to_payload(model=event_status),
-                event_id=current_event_id,
-                fetched_at=fetched_at,
+            await self._store.upsert_event_status(
+                status=event_status,
+                metadata=metadata_for_payload(
+                    source_key=IngestionSourceKey.EVENT_STATUS,
+                    event_id=current_event_id,
+                    payload=model_to_payload(model=event_status),
+                    fetched_at=fetched_at,
+                ),
             ),
-            await self._upsert(
-                resource_key=ResourceKey.CURRENT_FIXTURES,
-                payload=model_to_payload(model=current_fixtures),
-                event_id=current_event_id,
-                fetched_at=fetched_at,
+            await self._store.upsert_fixtures(
+                fixtures=current_fixtures,
+                metadata=metadata_for_payload(
+                    source_key=IngestionSourceKey.CURRENT_FIXTURES,
+                    event_id=current_event_id,
+                    payload=model_to_payload(model=current_fixtures),
+                    fetched_at=fetched_at,
+                ),
             ),
-            await self._upsert(
-                resource_key=ResourceKey.EVENT_LIVE,
-                payload=model_to_payload(model=event_live),
+            await self._store.upsert_event_live(
                 event_id=current_event_id,
-                fetched_at=fetched_at,
+                live=event_live,
+                metadata=metadata_for_payload(
+                    source_key=IngestionSourceKey.EVENT_LIVE,
+                    event_id=current_event_id,
+                    payload=model_to_payload(model=event_live),
+                    fetched_at=fetched_at,
+                ),
             ),
         ]
         return result_from_outcomes(
@@ -157,27 +172,6 @@ class IngestionService:
             current_event_id=current_event_id,
             has_active_fixture=has_active_fixture(fixtures=current_fixtures),
         )
-
-    async def _upsert(
-        self,
-        *,
-        resource_key: ResourceKey,
-        payload: object,
-        event_id: int | None,
-        fetched_at: datetime,
-    ) -> UpsertOutcome:
-        """Create a resource write with canonical hash metadata."""
-        payload_hash = payload_sha256(payload=payload)
-        write = ResourceWrite(
-            resource_key=resource_key,
-            event_name=EVENT_NAMES[resource_key],
-            event_id=event_id,
-            payload=payload,
-            payload_hash=payload_hash,
-            fetched_at=fetched_at,
-            checked_at=utc_now(),
-        )
-        return await self._store.upsert_resource(resource=write)
 
 
 class IngestionRunner(Protocol):
@@ -277,6 +271,23 @@ def utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+def metadata_for_payload(
+    *,
+    source_key: IngestionSourceKey,
+    event_id: int | None,
+    payload: object,
+    fetched_at: datetime,
+) -> IngestionMetadata:
+    """Create canonical hash metadata for a fetched upstream source."""
+    return IngestionMetadata(
+        source_key=source_key,
+        event_id=event_id,
+        payload_hash=payload_sha256(payload=payload),
+        fetched_at=fetched_at,
+        checked_at=utc_now(),
+    )
+
+
 def select_current_event_id(*, bootstrap: BootstrapStatic) -> int:
     """Select the single current FPL event from bootstrap data."""
     current_events = [event for event in bootstrap.events if event.is_current]
@@ -298,8 +309,8 @@ def result_from_outcomes(
     has_active_fixture: bool,
 ) -> IngestionResult:
     """Summarize changed and unchanged writes for one ingestion phase."""
-    changed_count = sum(1 for outcome in outcomes if outcome.changed)
-    unchanged_count = len(outcomes) - changed_count
+    changed_count = sum(len(outcome.change_events) for outcome in outcomes)
+    unchanged_count = sum(1 for outcome in outcomes if not outcome.changed)
     return IngestionResult(
         changed_count=changed_count,
         unchanged_count=unchanged_count,

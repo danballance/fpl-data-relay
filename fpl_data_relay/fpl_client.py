@@ -4,15 +4,16 @@ from collections.abc import Sequence
 from typing import cast
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-from fpl_data_relay.json_types import JsonValue
-from fpl_data_relay.upstream_models import (
+from fpl_data_relay.fpl_models import (
     BootstrapStatic,
     EventLiveResponse,
     EventStatusResponse,
     Fixture,
 )
+from fpl_data_relay.fpl_validation import validate_fpl_model, validate_fpl_model_list
+from fpl_data_relay.json_types import JsonValue
 
 
 class UpstreamFetchError(RuntimeError):
@@ -45,12 +46,20 @@ class FplClient:
     async def fetch_bootstrap_static(self) -> BootstrapStatic:
         """Fetch the season bootstrap document."""
         payload = await self._fetch_json(path="/bootstrap-static/")
-        return BootstrapStatic.model_validate(payload)
+        return validate_fpl_model(
+            model=BootstrapStatic,
+            payload=payload,
+            endpoint="/bootstrap-static/",
+        )
 
     async def fetch_fixtures(self) -> list[Fixture]:
         """Fetch all season fixtures."""
         payload = await self._fetch_json(path="/fixtures/")
-        return validate_model_list(model=Fixture, payload=payload)
+        return validate_fpl_model_list(
+            model=Fixture,
+            payload=payload,
+            endpoint="/fixtures/",
+        )
 
     async def fetch_current_fixtures(self, *, event_id: int) -> list[Fixture]:
         """Fetch fixtures for the supplied gameweek event id."""
@@ -58,17 +67,29 @@ class FplClient:
             path="/fixtures/",
             params={"event": event_id},
         )
-        return validate_model_list(model=Fixture, payload=payload)
+        return validate_fpl_model_list(
+            model=Fixture,
+            payload=payload,
+            endpoint="/fixtures/?event={event_id}",
+        )
 
     async def fetch_event_status(self) -> EventStatusResponse:
         """Fetch event status metadata from the upstream API."""
         payload = await self._fetch_json(path="/event-status/")
-        return EventStatusResponse.model_validate(payload)
+        return validate_fpl_model(
+            model=EventStatusResponse,
+            payload=payload,
+            endpoint="/event-status/",
+        )
 
     async def fetch_event_live(self, *, event_id: int) -> EventLiveResponse:
         """Fetch live player data for the supplied gameweek event id."""
         payload = await self._fetch_json(path=f"/event/{event_id}/live/")
-        return EventLiveResponse.model_validate(payload)
+        return validate_fpl_model(
+            model=EventLiveResponse,
+            payload=payload,
+            endpoint="/event/{event_id}/live/",
+        )
 
     async def _fetch_json(self, *, path: str) -> JsonValue:
         """Fetch a JSON document from an upstream path."""
@@ -101,20 +122,12 @@ def validate_model_list[ModelT: BaseModel](
     model: type[ModelT],
     payload: JsonValue,
 ) -> list[ModelT]:
-    """Validate a JSON array into a list of Pydantic models."""
-    if not isinstance(payload, list):
-        raise ValidationError.from_exception_data(
-            title=f"{model.__name__}List",
-            line_errors=[
-                {
-                    "type": "list_type",
-                    "loc": (),
-                    "input": payload,
-                    "ctx": {},
-                },
-            ],
-        )
-    return [model.model_validate(item) for item in payload]
+    """Compatibility wrapper for validating model lists."""
+    return validate_fpl_model_list(
+        model=model,
+        payload=payload,
+        endpoint=model.__name__,
+    )
 
 
 def model_to_payload(*, model: BaseModel | Sequence[BaseModel]) -> JsonValue:

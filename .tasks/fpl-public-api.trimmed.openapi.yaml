@@ -321,6 +321,38 @@ components:
         pulse_id:
           type: [integer, "null"]
 
+    ElementType:
+      type: object
+      additionalProperties: true
+      required: [id, singular_name, singular_name_short]
+      properties:
+        id:
+          type: integer
+        singular_name:
+          type: string
+          example: Midfielder
+        singular_name_short:
+          type: string
+          example: MID
+        plural_name:
+          type: string
+        plural_name_short:
+          type: string
+        squad_select:
+          type: integer
+        squad_min_play:
+          type: integer
+        squad_max_play:
+          type: integer
+        ui_shirt_specific:
+          type: boolean
+        sub_positions_locked:
+          type: array
+          items:
+            type: integer
+        element_count:
+          type: integer
+
     ElementStatDefinition:
       type: object
       additionalProperties: true
@@ -614,204 +646,6 @@ components:
           type: integer
         value:
           type: [integer, number, string, boolean, "null"]
-
-    ElementSummary:
-      type: object
-      additionalProperties: true
-      properties:
-        fixtures:
-          type: array
-          items:
-            $ref: "#/components/schemas/ElementSummaryFixture"
-        history:
-          type: array
-          items:
-            $ref: "#/components/schemas/ElementSummaryHistory"
-        history_past:
-          type: array
-          items:
-            $ref: "#/components/schemas/ElementSummaryHistoryPast"
-
-    ElementSummaryFixture:
-      type: object
-      additionalProperties: true
-      properties:
-        id:
-          type: integer
-        code:
-          type: integer
-        team_h:
-          type: integer
-        team_h_score:
-          type: [integer, "null"]
-        team_a:
-          type: integer
-        team_a_score:
-          type: [integer, "null"]
-        event:
-          type: [integer, "null"]
-        finished:
-          type: boolean
-        minutes:
-          type: integer
-        provisional_start_time:
-          type: boolean
-        kickoff_time:
-          type: [string, "null"]
-          format: date-time
-        event_name:
-          type: string
-        is_home:
-          type: boolean
-        difficulty:
-          type: integer
-
-    ElementSummaryHistory:
-      type: object
-      additionalProperties: true
-      properties:
-        element:
-          type: integer
-        fixture:
-          type: integer
-        opponent_team:
-          type: integer
-        total_points:
-          type: integer
-        was_home:
-          type: boolean
-        kickoff_time:
-          type: string
-          format: date-time
-        team_h_score:
-          type: [integer, "null"]
-        team_a_score:
-          type: [integer, "null"]
-        round:
-          type: integer
-        minutes:
-          type: integer
-        goals_scored:
-          type: integer
-        assists:
-          type: integer
-        bonus:
-          type: integer
-        bps:
-          type: integer
-
-    ElementSummaryHistoryPast:
-      type: object
-      additionalProperties: true
-      properties:
-        season_name:
-          type: string
-        element_code:
-          type: integer
-        start_cost:
-          type: integer
-        end_cost:
-          type: integer
-        total_points:
-          type: integer
-        minutes:
-          type: integer
-        goals_scored:
-          type: integer
-        assists:
-          type: integer
-
-    Entry:
-      type: object
-      additionalProperties: true
-      properties:
-        id:
-          type: integer
-        joined_time:
-          type: string
-          format: date-time
-        started_event:
-          type: integer
-        favourite_team:
-          type: [integer, "null"]
-        player_first_name:
-          type: string
-        player_last_name:
-          type: string
-        player_region_id:
-          type: [integer, "null"]
-        player_region_name:
-          type: [string, "null"]
-        player_region_iso_code_short:
-          type: [string, "null"]
-        player_region_iso_code_long:
-          type: [string, "null"]
-        summary_overall_points:
-          type: integer
-        summary_overall_rank:
-          type: integer
-        summary_event_points:
-          type: integer
-        summary_event_rank:
-          type: integer
-        current_event:
-          type: integer
-        leagues:
-          type: object
-          additionalProperties: true
-        name:
-          type: string
-          description: Entry/team name, when present.
-
-    EntryEventPicks:
-      type: object
-      additionalProperties: true
-      required: [picks]
-      properties:
-        active_chip:
-          type: [string, "null"]
-        automatic_subs:
-          type: array
-          items:
-            $ref: "#/components/schemas/AutomaticSubstitution"
-        entry_history:
-          $ref: "#/components/schemas/EntryEventHistory"
-        picks:
-          type: array
-          items:
-            $ref: "#/components/schemas/Pick"
-
-    Pick:
-      type: object
-      additionalProperties: true
-      required: [element, position, multiplier, is_captain, is_vice_captain]
-      properties:
-        element:
-          type: integer
-          description: Player/element ID.
-        position:
-          type: integer
-          description: Squad position, usually 1-15.
-        multiplier:
-          type: integer
-          description: Points multiplier, e.g. 2 for captain, 0 for bench.
-        is_captain:
-          type: boolean
-        is_vice_captain:
-          type: boolean
-
-    AutomaticSubstitution:
-      type: object
-      additionalProperties: true
-      properties:
-        entry:
-          type: integer
-        element_in:
-          type: integer
-        element_out:
-          type: integer
-        event:
-          type: integer
 
 x-client-notes:
   upstream_contract: Unofficial and undocumented; tolerate unknown fields and nulls.
