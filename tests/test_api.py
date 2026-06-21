@@ -15,7 +15,7 @@ from fpl_data_relay.api import (
 from fpl_data_relay.config import Settings
 from fpl_data_relay.ingestion import IngestionService
 from fpl_data_relay.resources import ResourceKey
-from fpl_data_relay.store import ChangeEvent, StoredResource
+from fpl_data_relay.store import ChangeEvent
 from tests.conftest import FakeClient, InMemoryStore
 
 
@@ -44,7 +44,7 @@ def test_rest_returns_503_before_first_successful_fetch() -> None:
         start_scheduler=False,
     )
     with TestClient(app) as client:
-        response = client.get("/v1/bootstrap-static")
+        response = client.get("/v1/events/current")
     assert response.status_code == 503
     assert "has not been ingested" in response.json()["detail"]
 
@@ -61,20 +61,70 @@ def test_healthz_returns_schema_version() -> None:
     with TestClient(app) as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json()["schema_version"] == 1
+    assert response.json()["schema_version"] == 2
 
 
-def test_rest_returns_source_payload_and_metadata_headers() -> None:
+@pytest.mark.asyncio
+async def test_rest_returns_normalised_events() -> None:
     store = InMemoryStore()
-    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
-    store.resources[ResourceKey.BOOTSTRAP] = StoredResource(
-        resource_key=ResourceKey.BOOTSTRAP,
-        event_id=None,
-        payload={"events": []},
-        payload_hash="a" * 64,
-        fetched_at=timestamp,
-        checked_at=timestamp,
+    service = IngestionService(client=FakeClient(), store=store)
+    await service.ingest_reference_once()
+    app = create_app(
+        settings=settings(),
+        store=store,
+        ingestion_service=service,
+        start_scheduler=False,
     )
+    with TestClient(app) as client:
+        response = client.get("/v1/events")
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_entity_endpoints_return_normalised_data() -> None:
+    store = InMemoryStore()
+    service = IngestionService(client=FakeClient(), store=store)
+    await service.ingest_reference_once()
+    await service.ingest_live_once(target_event_id=None, fixture_id=None)
+    app = create_app(
+        settings=settings(),
+        store=store,
+        ingestion_service=service,
+        start_scheduler=False,
+    )
+    with TestClient(app) as client:
+        assert client.get("/v1/events/current").json()["id"] == 1
+        assert client.get("/v1/events/1").json()["name"] == "Gameweek 1"
+        assert client.get("/v1/phases").json() == []
+        assert client.get("/v1/teams").json()[0]["short_name"] == "TST"
+        assert client.get("/v1/teams/1").json()["name"] == "Team"
+        assert client.get("/v1/element-types").json()[0]["id"] == 1
+        assert client.get("/v1/elements").json()[0]["web_name"] == "Player"
+        assert client.get("/v1/elements/1").json()["first_name"] == "First"
+        assert client.get("/v1/fixtures").json()[0]["id"] == 1
+        assert client.get("/v1/events/1/fixtures").json()[0]["event"] == 1
+        assert client.get("/v1/event-status").json()["status"][0]["event"] == 1
+        live_elements = client.get("/v1/events/1/live-elements").json()
+        assert live_elements[0]["stats"]["total_points"] == 4
+        live_element = client.get("/v1/events/1/live-elements/1").json()
+        assert live_element["id"] == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "detail"),
+    [
+        ("/v1/events/999", "Event not found."),
+        ("/v1/teams/999", "Team not found."),
+        ("/v1/elements/999", "Element not found."),
+        ("/v1/events/1/live-elements/999", "Live element not found."),
+    ],
+)
+def test_entity_endpoints_return_404_for_missing_rows(
+    path: str,
+    detail: str,
+) -> None:
+    store = InMemoryStore()
     service = IngestionService(client=FakeClient(), store=store)
     app = create_app(
         settings=settings(),
@@ -83,11 +133,9 @@ def test_rest_returns_source_payload_and_metadata_headers() -> None:
         start_scheduler=False,
     )
     with TestClient(app) as client:
-        response = client.get("/v1/bootstrap-static")
-    assert response.status_code == 200
-    assert response.json() == {"events": []}
-    assert response.headers["etag"] == f'"{"a" * 64}"'
-    assert response.headers["x-fpl-relay-resource-key"] == "bootstrap"
+        response = client.get(path)
+    assert response.status_code == 404
+    assert response.json()["detail"] == detail
 
 
 def test_change_events_endpoint_filters_by_after_id() -> None:

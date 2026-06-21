@@ -5,6 +5,8 @@ import os
 from pydantic import Field, HttpUrl, PositiveFloat, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+POSTGRES_MAINTENANCE_DATABASE_URL = "POSTGRES_MAINTENANCE_DATABASE_URL"
+
 REQUIRED_ENV_VARS = [
     "DATABASE_URL",
     "FPL_API_BASE_URL",
@@ -48,3 +50,19 @@ def load_settings_from_environment() -> Settings:
         raise RuntimeError(f"Missing required environment variables: {joined_names}")
     env_values = {name: os.environ[name] for name in REQUIRED_ENV_VARS}
     return Settings.model_validate(env_values)
+
+
+def load_postgres_maintenance_database_url_from_environment() -> str:
+    """Load the maintenance database URL required by the drop command."""
+    if POSTGRES_MAINTENANCE_DATABASE_URL not in os.environ:
+        raise RuntimeError(
+            "Missing required environment variable: "
+            f"{POSTGRES_MAINTENANCE_DATABASE_URL}",
+        )
+    value = os.environ[POSTGRES_MAINTENANCE_DATABASE_URL]
+    if value.strip() == "":
+        raise RuntimeError(
+            "Environment variable must not be empty: "
+            f"{POSTGRES_MAINTENANCE_DATABASE_URL}",
+        )
+    return value

@@ -29,11 +29,11 @@ def test_current_event_selection_fails_without_exactly_one_current_event(
 
 
 @pytest.mark.asyncio
-async def test_ingest_all_once_writes_five_resources() -> None:
+async def test_ingest_all_once_writes_normalised_entity_events() -> None:
     store = InMemoryStore()
     service = IngestionService(client=FakeClient(), store=store)
     result = await service.ingest_all_once()
-    assert result.changed_count == 5
+    assert result.changed_count == 10
     assert result.unchanged_count == 0
     assert result.current_event_id == 1
     assert result.has_active_fixture is True
@@ -45,8 +45,8 @@ async def test_reference_and_live_ingestion_can_run_separately() -> None:
     store = InMemoryStore()
     service = IngestionService(client=FakeClient(), store=store)
     reference = await service.ingest_reference_once()
-    live = await service.ingest_live_once()
-    assert reference.changed_count == 2
+    live = await service.ingest_live_once(target_event_id=None, fixture_id=None)
+    assert reference.changed_count == 7
     assert live.changed_count == 3
     assert ResourceKey.EVENT_LIVE in store.resources
 
@@ -54,8 +54,44 @@ async def test_reference_and_live_ingestion_can_run_separately() -> None:
 @pytest.mark.asyncio
 async def test_live_ingestion_fails_before_bootstrap_exists() -> None:
     service = IngestionService(client=FakeClient(), store=InMemoryStore())
-    with pytest.raises(RuntimeError, match="before bootstrap exists"):
-        await service.ingest_live_once()
+    with pytest.raises(RuntimeError, match="before reference data exists"):
+        await service.ingest_live_once(target_event_id=None, fixture_id=None)
+
+
+@pytest.mark.asyncio
+async def test_live_ingestion_uses_explicit_target_event_id() -> None:
+    client = FakeClient()
+    service = IngestionService(client=client, store=InMemoryStore())
+    result = await service.ingest_live_once(target_event_id=2, fixture_id=None)
+    assert result.current_event_id == 2
+    assert client.current_fixture_event_ids == [2]
+    assert client.live_event_ids == [2]
+
+
+@pytest.mark.asyncio
+async def test_live_ingestion_resolves_fixture_id_to_event_id() -> None:
+    store = InMemoryStore()
+    client = FakeClient()
+    service = IngestionService(client=client, store=store)
+    await service.ingest_reference_once()
+    result = await service.ingest_live_once(target_event_id=None, fixture_id=1)
+    assert result.current_event_id == 1
+    assert client.current_fixture_event_ids == [1]
+    assert client.live_event_ids == [1]
+
+
+@pytest.mark.asyncio
+async def test_live_ingestion_rejects_conflicting_targets() -> None:
+    service = IngestionService(client=FakeClient(), store=InMemoryStore())
+    with pytest.raises(ValueError, match="either target_event_id or fixture_id"):
+        await service.ingest_live_once(target_event_id=1, fixture_id=1)
+
+
+@pytest.mark.asyncio
+async def test_live_ingestion_rejects_unknown_fixture_id() -> None:
+    service = IngestionService(client=FakeClient(), store=InMemoryStore())
+    with pytest.raises(RuntimeError, match="fixture does not exist"):
+        await service.ingest_live_once(target_event_id=None, fixture_id=999)
 
 
 @pytest.mark.asyncio
@@ -64,10 +100,10 @@ async def test_same_payload_hash_does_not_duplicate_change_events() -> None:
     service = IngestionService(client=FakeClient(), store=store)
     first = await service.ingest_all_once()
     second = await service.ingest_all_once()
-    assert first.changed_count == 5
+    assert first.changed_count == 10
     assert second.changed_count == 0
     assert second.unchanged_count == 5
-    assert len(store.events) == 5
+    assert len(store.events) == 10
 
 
 @pytest.mark.asyncio
@@ -79,7 +115,7 @@ async def test_changed_payload_creates_new_change_event() -> None:
     client.bootstrap_current_id = 2
     result = await service.ingest_all_once()
     assert result.changed_count >= 2
-    assert len(store.events) > 5
+    assert len(store.events) > 10
 
 
 def test_has_active_fixture_detects_started_unfinished_fixture() -> None:
@@ -116,7 +152,13 @@ async def test_scheduler_cycles_return_idle_result_on_live_failure() -> None:
         async def ingest_reference_once(self) -> IngestionResult:
             raise RuntimeError("reference failed")
 
-        async def ingest_live_once(self) -> IngestionResult:
+        async def ingest_live_once(
+            self,
+            *,
+            target_event_id: int | None,
+            fixture_id: int | None,
+        ) -> IngestionResult:
+            del target_event_id, fixture_id
             raise RuntimeError("live failed")
 
     scheduler = RelayScheduler(

@@ -76,7 +76,10 @@ class IngestionService:
         """Run reference and live ingestion under one store-level lock."""
         async with self._store.ingestion_lock():
             reference_result = await self._ingest_reference_unlocked()
-            live_result = await self._ingest_live_unlocked()
+            live_result = await self._ingest_live_unlocked(
+                target_event_id=None,
+                fixture_id=None,
+            )
         return combine_results(first=reference_result, second=live_result)
 
     async def ingest_reference_once(self) -> IngestionResult:
@@ -84,10 +87,18 @@ class IngestionService:
         async with self._store.ingestion_lock():
             return await self._ingest_reference_unlocked()
 
-    async def ingest_live_once(self) -> IngestionResult:
-        """Ingest current event resources that change during live play."""
+    async def ingest_live_once(
+        self,
+        *,
+        target_event_id: int | None,
+        fixture_id: int | None,
+    ) -> IngestionResult:
+        """Ingest event-scoped live resources for a resolved target event."""
         async with self._store.ingestion_lock():
-            return await self._ingest_live_unlocked()
+            return await self._ingest_live_unlocked(
+                target_event_id=target_event_id,
+                fixture_id=fixture_id,
+            )
 
     async def _ingest_reference_unlocked(self) -> IngestionResult:
         """Fetch and store reference resources while a lock is already held."""
@@ -123,14 +134,17 @@ class IngestionService:
             has_active_fixture=False,
         )
 
-    async def _ingest_live_unlocked(self) -> IngestionResult:
+    async def _ingest_live_unlocked(
+        self,
+        *,
+        target_event_id: int | None,
+        fixture_id: int | None,
+    ) -> IngestionResult:
         """Fetch and store live resources while a lock is already held."""
-        current_event = await self._store.get_current_event()
-        if current_event is None:
-            raise RuntimeError(
-                "Cannot ingest live resources before reference data exists.",
-            )
-        current_event_id = current_event.id
+        current_event_id = await self._resolve_live_target_event_id(
+            target_event_id=target_event_id,
+            fixture_id=fixture_id,
+        )
         fetched_at = utc_now()
         event_status, current_fixtures, event_live = await asyncio.gather(
             self._client.fetch_event_status(),
@@ -173,6 +187,37 @@ class IngestionService:
             has_active_fixture=has_active_fixture(fixtures=current_fixtures),
         )
 
+    async def _resolve_live_target_event_id(
+        self,
+        *,
+        target_event_id: int | None,
+        fixture_id: int | None,
+    ) -> int:
+        """Resolve CLI live-ingestion target options to an FPL event id."""
+        if target_event_id is not None and fixture_id is not None:
+            raise ValueError("Provide either target_event_id or fixture_id, not both.")
+        if target_event_id is not None:
+            return target_event_id
+        if fixture_id is not None:
+            fixture = await self._store.get_fixture(fixture_id=fixture_id)
+            if fixture is None:
+                raise RuntimeError(
+                    f"Cannot ingest live resources for fixture {fixture_id}: "
+                    "fixture does not exist. Run reference ingestion first.",
+                )
+            if fixture.event is None:
+                raise RuntimeError(
+                    f"Cannot ingest live resources for fixture {fixture_id}: "
+                    "fixture has no event id.",
+                )
+            return fixture.event
+        current_event = await self._store.get_current_event()
+        if current_event is None:
+            raise RuntimeError(
+                "Cannot ingest live resources before reference data exists.",
+            )
+        return current_event.id
+
 
 class IngestionRunner(Protocol):
     """Scheduler-facing ingestion interface."""
@@ -181,7 +226,12 @@ class IngestionRunner(Protocol):
         """Run one reference ingestion cycle."""
         ...
 
-    async def ingest_live_once(self) -> IngestionResult:
+    async def ingest_live_once(
+        self,
+        *,
+        target_event_id: int | None,
+        fixture_id: int | None,
+    ) -> IngestionResult:
         """Run one live ingestion cycle."""
         ...
 
@@ -255,7 +305,10 @@ class RelayScheduler:
     async def _run_live_cycle(self) -> IngestionResult:
         """Run live ingestion and return an idle result if the cycle fails."""
         try:
-            return await self._ingestion_service.ingest_live_once()
+            return await self._ingestion_service.ingest_live_once(
+                target_event_id=None,
+                fixture_id=None,
+            )
         except Exception:
             LOGGER.exception("Live ingestion cycle failed.")
             return IngestionResult(

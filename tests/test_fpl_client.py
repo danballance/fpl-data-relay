@@ -25,11 +25,11 @@ def test_response_json_fails_for_non_200() -> None:
         response_json(response=response, path="/bootstrap-static/")
 
 
-def test_upstream_models_preserve_unknown_fields() -> None:
+def test_upstream_models_ignore_unknown_fields() -> None:
     model = BootstrapStatic.model_validate(bootstrap_payload(current_ids=[1]))
     dumped = model.model_dump(mode="json")
     event = dumped["events"][0]
-    assert event["unknown_event_field"] == "kept"
+    assert "unknown_event_field" not in event
 
 
 def test_upstream_models_fail_on_missing_required_core_fields() -> None:
@@ -47,7 +47,14 @@ async def test_fpl_client_fetches_all_core_documents() -> None:
         if request.url.path == "/api/fixtures/":
             return httpx.Response(
                 200,
-                json=[fixture_payload(fixture_id=1, started=True, finished=False)],
+                json=[
+                    fixture_payload(
+                        fixture_id=1,
+                        event=1,
+                        started=True,
+                        finished=False,
+                    ),
+                ],
             )
         if request.url.path == "/api/event-status/":
             return httpx.Response(
@@ -128,7 +135,7 @@ def test_event_status_accepts_current_upstream_shape() -> None:
         },
     )
     dumped = status.model_dump(mode="json")
-    assert dumped["status"][0]["points"] == "r"
+    assert "points" not in dumped["status"][0]
 
 
 def test_model_to_payload_handles_model_and_model_lists() -> None:
@@ -146,7 +153,12 @@ def test_model_to_payload_handles_model_and_model_lists() -> None:
     )
     fixtures = [
         Fixture.model_validate(
-            fixture_payload(fixture_id=1, started=False, finished=False),
+            fixture_payload(
+                fixture_id=1,
+                event=1,
+                started=False,
+                finished=False,
+            ),
         ),
     ]
     status_payload = cast("dict[str, object]", model_to_payload(model=status))

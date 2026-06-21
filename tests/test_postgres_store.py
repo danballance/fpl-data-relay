@@ -55,7 +55,7 @@ async def test_postgres_store_upsert_get_list_and_notify() -> None:
     assert outcome.changed is True
     assert outcome.change_event is not None
     assert stored is not None
-    assert stored.payload == {"resource": "bootstrap"}
+    assert stored.payload == {"resource": "bootstrap-static"}
     assert len(events) == 1
     assert pool.notifications == ["1"]
 
@@ -72,7 +72,7 @@ async def test_postgres_store_updates_checked_at_for_same_hash() -> None:
     outcome = await store.upsert_resource(resource=second)
     assert outcome.changed is False
     assert len(pool.events) == 1
-    assert pool.resources["event_status"]["checked_at"] == second.checked_at
+    assert pool.resources["event-status"]["checked_at"] == second.checked_at
 
 
 @pytest.mark.asyncio

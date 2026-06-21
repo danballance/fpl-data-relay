@@ -7,20 +7,27 @@ from typing import cast
 import pytest
 
 from fpl_data_relay.json_types import JsonValue
-from fpl_data_relay.resources import EVENT_NAMES, ResourceKey
+from fpl_data_relay.resources import EVENT_NAMES, EntityFamily, ResourceKey
 from fpl_data_relay.schemas import SCHEMA_VERSION
 from fpl_data_relay.store import (
     ChangeEvent,
     IngestionLockError,
+    IngestionMetadata,
     ResourceWrite,
     StoredResource,
     UpsertOutcome,
 )
 from fpl_data_relay.upstream_models import (
     BootstrapStatic,
+    Element,
+    ElementType,
+    Event,
     EventLiveResponse,
     EventStatusResponse,
     Fixture,
+    LiveElement,
+    Phase,
+    Team,
 )
 
 
@@ -45,7 +52,16 @@ class FakeLock:
 class InMemoryStore:
     def __init__(self) -> None:
         self.resources: dict[ResourceKey, StoredResource] = {}
+        self.source_hashes: dict[ResourceKey, str] = {}
         self.events: list[ChangeEvent] = []
+        self.fpl_events: list[Event] = []
+        self.phases: list[Phase] = []
+        self.teams: list[Team] = []
+        self.element_types: list[ElementType] = []
+        self.elements: list[Element] = []
+        self.fixtures: dict[int, Fixture] = {}
+        self.event_status: EventStatusResponse | None = None
+        self.live_elements: dict[int, EventLiveResponse] = {}
         self.locked = False
         self.schema_applied = False
         self.closed = False
@@ -54,8 +70,127 @@ class InMemoryStore:
         self.schema_applied = True
 
     async def check_schema_version(self, *, expected_version: int) -> None:
-        if expected_version != 1:
+        if expected_version != SCHEMA_VERSION:
             raise RuntimeError("Unexpected schema version.")
+
+    async def upsert_bootstrap(
+        self,
+        *,
+        bootstrap: BootstrapStatic,
+        metadata: IngestionMetadata,
+    ) -> UpsertOutcome:
+        self.fpl_events = bootstrap.events
+        self.phases = bootstrap.phases
+        self.teams = bootstrap.teams
+        self.element_types = bootstrap.element_types
+        self.elements = bootstrap.elements
+        return self._record_source(
+            metadata=metadata,
+            families=[
+                EntityFamily.EVENTS,
+                EntityFamily.PHASES,
+                EntityFamily.TEAMS,
+                EntityFamily.ELEMENT_TYPES,
+                EntityFamily.ELEMENT_STATS,
+                EntityFamily.ELEMENTS,
+            ],
+        )
+
+    async def upsert_fixtures(
+        self,
+        *,
+        fixtures: list[Fixture],
+        metadata: IngestionMetadata,
+    ) -> UpsertOutcome:
+        for fixture in fixtures:
+            self.fixtures[fixture.id] = fixture
+        return self._record_source(
+            metadata=metadata,
+            families=[EntityFamily.FIXTURES],
+        )
+
+    async def upsert_event_status(
+        self,
+        *,
+        status: EventStatusResponse,
+        metadata: IngestionMetadata,
+    ) -> UpsertOutcome:
+        self.event_status = status
+        return self._record_source(
+            metadata=metadata,
+            families=[EntityFamily.EVENT_STATUS],
+        )
+
+    async def upsert_event_live(
+        self,
+        *,
+        event_id: int,
+        live: EventLiveResponse,
+        metadata: IngestionMetadata,
+    ) -> UpsertOutcome:
+        self.live_elements[event_id] = live
+        return self._record_source(
+            metadata=metadata,
+            families=[EntityFamily.EVENT_LIVE],
+        )
+
+    async def get_current_event(self) -> Event | None:
+        current_events = [event for event in self.fpl_events if event.is_current]
+        if len(current_events) != 1:
+            return None
+        return current_events[0]
+
+    async def list_events(self) -> list[Event]:
+        return self.fpl_events
+
+    async def get_event(self, *, event_id: int) -> Event | None:
+        return next((event for event in self.fpl_events if event.id == event_id), None)
+
+    async def list_phases(self) -> list[Phase]:
+        return self.phases
+
+    async def list_teams(self) -> list[Team]:
+        return self.teams
+
+    async def get_team(self, *, team_id: int) -> Team | None:
+        return next((team for team in self.teams if team.id == team_id), None)
+
+    async def list_element_types(self) -> list[ElementType]:
+        return self.element_types
+
+    async def list_elements(self) -> list[Element]:
+        return self.elements
+
+    async def get_element(self, *, element_id: int) -> Element | None:
+        return next(
+            (element for element in self.elements if element.id == element_id),
+            None,
+        )
+
+    async def list_fixtures(self, *, event_id: int | None) -> list[Fixture]:
+        fixtures = list(self.fixtures.values())
+        if event_id is None:
+            return fixtures
+        return [fixture for fixture in fixtures if fixture.event == event_id]
+
+    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
+        return self.fixtures.get(fixture_id)
+
+    async def get_event_status(self) -> EventStatusResponse | None:
+        return self.event_status
+
+    async def list_live_elements(self, *, event_id: int) -> list[LiveElement]:
+        response = self.live_elements.get(event_id)
+        return [] if response is None else response.elements
+
+    async def get_live_element(
+        self,
+        *,
+        event_id: int,
+        element_id: int,
+    ) -> LiveElement | None:
+        elements = await self.list_live_elements(event_id=event_id)
+        return next((element for element in elements if element.id == element_id), None)
 
     async def get_resource(
         self,
@@ -105,6 +240,46 @@ class InMemoryStore:
         self.events.append(event)
         return UpsertOutcome(changed=True, change_event=event)
 
+    def _record_source(
+        self,
+        *,
+        metadata: IngestionMetadata,
+        families: list[EntityFamily],
+    ) -> UpsertOutcome:
+        resource_key = ResourceKey(metadata.source_key.value)
+        existing_hash = self.source_hashes.get(resource_key)
+        if existing_hash == metadata.payload_hash:
+            return UpsertOutcome(changed=False, change_events=[])
+        self.source_hashes[resource_key] = metadata.payload_hash
+        self.resources[resource_key] = StoredResource(
+            resource_key=resource_key,
+            event_id=metadata.event_id,
+            payload=cast("JsonValue", {"source_key": resource_key.value}),
+            payload_hash=metadata.payload_hash,
+            fetched_at=metadata.fetched_at,
+            checked_at=metadata.checked_at,
+        )
+        events: list[ChangeEvent] = []
+        for family in families:
+            event = ChangeEvent(
+                id=len(self.events) + 1,
+                entity_family=family,
+                event_name=EVENT_NAMES[family],
+                source_key=metadata.source_key,
+                resource_key=resource_key,
+                event_id=metadata.event_id,
+                payload_hash=metadata.payload_hash,
+                fetched_at=metadata.fetched_at,
+                created_at=datetime.now(tz=UTC),
+            )
+            self.events.append(event)
+            events.append(event)
+        return UpsertOutcome(
+            changed=True,
+            change_events=events,
+            change_event=events[0],
+        )
+
     def ingestion_lock(self) -> FakeLock:
         return FakeLock(store=self)
 
@@ -127,6 +302,8 @@ class FakeClient:
     def __init__(self) -> None:
         self.bootstrap_current_id = 1
         self.fixture_started = True
+        self.current_fixture_event_ids: list[int] = []
+        self.live_event_ids: list[int] = []
         self.closed = False
 
     async def close(self) -> None:
@@ -140,15 +317,22 @@ class FakeClient:
     async def fetch_fixtures(self) -> list[Fixture]:
         return [
             Fixture.model_validate(
-                fixture_payload(fixture_id=1, started=False, finished=False),
+                fixture_payload(
+                    fixture_id=1,
+                    event=1,
+                    started=False,
+                    finished=False,
+                ),
             ),
         ]
 
     async def fetch_current_fixtures(self, *, event_id: int) -> list[Fixture]:
+        self.current_fixture_event_ids.append(event_id)
         return [
             Fixture.model_validate(
                 fixture_payload(
                     fixture_id=event_id,
+                    event=event_id,
                     started=self.fixture_started,
                     finished=False,
                 ),
@@ -170,6 +354,7 @@ class FakeClient:
         )
 
     async def fetch_event_live(self, *, event_id: int) -> EventLiveResponse:
+        self.live_event_ids.append(event_id)
         return EventLiveResponse.model_validate(
             {
                 "elements": [
@@ -219,11 +404,13 @@ def bootstrap_payload(*, current_ids: list[int]) -> dict[str, object]:
 def fixture_payload(
     *,
     fixture_id: int,
+    event: int | None,
     started: bool,
     finished: bool,
 ) -> dict[str, object]:
     return {
         "id": fixture_id,
+        "event": event,
         "team_h": 1,
         "team_a": 2,
         "started": started,

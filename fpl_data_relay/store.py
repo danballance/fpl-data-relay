@@ -312,6 +312,10 @@ class FplStore(Protocol):
         """Return fixtures, optionally filtered by event id."""
         ...
 
+    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
+        """Return one fixture with nested stat entries."""
+        ...
+
     async def get_event_status(self) -> EventStatusResponse | None:
         """Return the latest event-status aggregate."""
         ...
@@ -657,6 +661,22 @@ class PostgresStore(FplStore):
                 )
                 fixtures[index] = fixture.model_copy(update={"stats": stats})
         return fixtures
+
+    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
+        """Return one fixture with its nested stat entries."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM fpl_fixtures WHERE id = $1",
+                fixture_id,
+            )
+            if row is None:
+                return None
+            fixture = fixture_from_row(row=row)
+            stats = await fetch_fixture_stats(
+                connection=connection,
+                fixture_id=fixture.id,
+            )
+        return fixture.model_copy(update={"stats": stats})
 
     async def get_event_status(self) -> EventStatusResponse | None:
         """Return latest event status aggregate, if ingested."""
