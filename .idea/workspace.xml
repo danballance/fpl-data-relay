@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
   <component name="ChangeListManager">
     <list default="true" id="6fae81a9-dfae-4fd2-a606-70703e3188a7" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/fpl-data-relay.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/fpl-data-relay.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/fpl_data_relay/store.py" beforeDir="false" afterPath="$PROJECT_DIR$/fpl_data_relay/store.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -10,6 +14,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
+    <option name="cachedIndexableFilesCount" value="52" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="Git.Settings">
@@ -19,10 +24,69 @@
     <commands />
     <urls />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 2,
-  "fromUser": false
-}]]></component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.0" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.0" />
+      <entry key="S5" value="1.0" />
+      <entry key="S10" value="1.0" />
+      <entry key="S30" value="1.000000670002994" />
+      <entry key="S60" value="1.0075635358049666" />
+      <entry key="M2" value="2.023529357717835" />
+      <entry key="M5" value="23.179377297325583" />
+      <entry key="M10" value="64.3369535592416" />
+      <entry key="M15" value="91.09462553488396" />
+      <entry key="M30" value="129.32152651246767" />
+      <entry key="H1" value="154.21700672989436" />
+      <entry key="H2" value="168.4410812053272" />
+      <entry key="H4" value="176.0460482122724" />
+      <entry key="D1" value="182.64942935870704" />
+      <entry key="W1" value="183.80644221886854" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.08717147914690035" />
+      <entry key="MS500" value="0.6138678419575302" />
+      <entry key="S2" value="0.8851537645795451" />
+      <entry key="S5" value="0.952373907319402" />
+      <entry key="S10" value="0.9758964634219155" />
+      <entry key="S30" value="0.9919000558554965" />
+      <entry key="S60" value="0.995941793407374" />
+      <entry key="M2" value="0.9979688338857953" />
+      <entry key="M5" value="0.9991870379410045" />
+      <entry key="M10" value="0.9995934363234907" />
+      <entry key="M15" value="0.9997289391796718" />
+      <entry key="M30" value="0.999864460404345" />
+      <entry key="H1" value="0.9999322279056441" />
+      <entry key="H2" value="0.9999661133786705" />
+      <entry key="H4" value="0.9999830565457949" />
+      <entry key="D1" value="0.9999971760710294" />
+      <entry key="W1" value="0.9999995965810874" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.08717149922224506" />
+      <entry key="MS500" value="0.6427435473464934" />
+      <entry key="S2" value="1.2973776482135992" />
+      <entry key="S5" value="1.6539152348145558" />
+      <entry key="S10" value="1.8134771028203882" />
+      <entry key="S30" value="1.934532792117866" />
+      <entry key="S60" value="1.9743819258567015" />
+      <entry key="M2" value="3.0054113855794604" />
+      <entry key="M5" value="24.159380461466615" />
+      <entry key="M10" value="65.31453271761876" />
+      <entry key="M15" value="92.07432151188738" />
+      <entry key="M30" value="130.3075652107441" />
+      <entry key="H1" value="155.2087904757796" />
+      <entry key="H2" value="169.436620866503" />
+      <entry key="H4" value="177.04372399566682" />
+      <entry key="D1" value="183.64902838900602" />
+      <entry key="W1" value="184.80638459719097" />
+    </decayedShown>
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 2,
+  &quot;fromUser&quot;: false
+}</component>
   <component name="ProjectId" id="3FQx3cHF22WlhMT5mbTr9VZ3WIN" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -30,20 +94,31 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "RunOnceActivity.MCP Project settings loaded": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "codeWithMe.voiceChat.enabledByDefault": "false",
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
     "git-widget-placeholder": "main",
     "junie.onboarding.icon.badge.shown": "true",
     "last_opened_file_path": "/home/anoni/Code/python/fpl-data-relay",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
     "settings.editor.selected.configurable": "com.intellij.python.ty.TyConfigurable",
     "to.speed.mode.migration.done": "true",
     "vue.rearranger.settings.migration": "true"
+  },
+  "keyToStringList": {
+    "DatabaseDriversLRU": [
+      "postgresql"
+    ]
   }
 }]]></component>
   <component name="SharedIndexes">
@@ -61,8 +136,12 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1782020895993</updated>
-      <workItem from="1782020897854" duration="46000" />
+      <workItem from="1782020897854" duration="1264000" />
+      <workItem from="1782034793899" duration="367000" />
     </task>
     <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
   </component>
 </project>
