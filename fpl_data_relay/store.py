@@ -209,7 +209,7 @@ class ResourceStore(Protocol):
         ...
 
 
-class PostgresStore:
+class PostgresStore(ResourceStore):
     """Resource store implementation backed by asyncpg and Postgres."""
 
     def __init__(self, *, pool: PoolProtocol) -> None:
