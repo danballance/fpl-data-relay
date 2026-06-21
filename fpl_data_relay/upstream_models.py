@@ -69,7 +69,6 @@ class EventStatusDay(UpstreamModel):
     event: int
     bonus_added: bool
     date: str
-    leagues_updated: bool
 
 
 class EventStatusResponse(UpstreamModel):

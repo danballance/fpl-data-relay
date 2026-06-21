@@ -1,6 +1,10 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
+from asyncpg import Record
+from asyncpg.protocol import protocol
 
 from fpl_data_relay.resources import ResourceKey
 from fpl_data_relay.schemas import SCHEMA_VERSION
@@ -103,3 +107,12 @@ async def test_postgres_store_watch_replays_then_heartbeats() -> None:
 def test_row_values_rejects_unknown_row_shape() -> None:
     with pytest.raises(TypeError, match="Unsupported database row type"):
         row_values(row=object())
+
+
+def test_row_values_accepts_asyncpg_record() -> None:
+    create_record = cast(
+        "Callable[[dict[str, int], tuple[object, ...]], Record]",
+        vars(protocol)["_create_record"],
+    )
+    row = create_record({"id": 0, "resource_key": 1}, (1, "bootstrap"))
+    assert row_values(row=row) == {"id": 1, "resource_key": "bootstrap"}

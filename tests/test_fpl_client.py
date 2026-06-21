@@ -114,6 +114,23 @@ def test_validate_model_list_rejects_non_list_payload() -> None:
         validate_model_list(model=Fixture, payload={"id": 1})
 
 
+def test_event_status_accepts_current_upstream_shape() -> None:
+    status = EventStatusResponse.model_validate(
+        {
+            "status": [
+                {
+                    "event": 38,
+                    "bonus_added": True,
+                    "date": "2026-06-20",
+                    "points": "r",
+                },
+            ],
+        },
+    )
+    dumped = status.model_dump(mode="json")
+    assert dumped["status"][0]["points"] == "r"
+
+
 def test_model_to_payload_handles_model_and_model_lists() -> None:
     status = EventStatusResponse.model_validate(
         {

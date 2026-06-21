@@ -8,6 +8,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol, cast
 
+from asyncpg import Record
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from fpl_data_relay.hashing import parse_json_payload
@@ -441,6 +442,8 @@ def change_event_from_row(*, row: object) -> ChangeEvent:
 
 def row_values(*, row: object) -> dict[str, object]:
     """Normalize a mapping-like database row into a plain dictionary."""
+    if isinstance(row, Record):
+        return {key: value for key, value in row.items()}
     if isinstance(row, Mapping):
         mapping = cast("Mapping[str, object]", row)
         return {key: mapping[key] for key in mapping}
