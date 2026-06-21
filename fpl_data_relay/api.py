@@ -1,3 +1,5 @@
+"""HTTP application and SSE endpoints for stored FPL relay data."""
+
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Protocol
@@ -15,7 +17,11 @@ ResourceGetter = Callable[[ResourceKey], Awaitable[JSONResponse]]
 
 
 class DisconnectWatcher(Protocol):
-    async def is_disconnected(self) -> bool: ...
+    """Minimal request interface needed by the SSE stream."""
+
+    async def is_disconnected(self) -> bool:
+        """Return whether the client has closed the response stream."""
+        ...
 
 RESOURCE_ROUTES: dict[str, ResourceKey] = {
     "/v1/bootstrap-static": ResourceKey.BOOTSTRAP,
@@ -33,8 +39,11 @@ def create_app(
     ingestion_service: IngestionService,
     start_scheduler: bool,
 ) -> FastAPI:
+    """Build the FastAPI app around an injected store and ingestion service."""
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Validate dependencies, start optional polling, and close resources."""
         await store.check_schema_version(expected_version=SCHEMA_VERSION)
         scheduler = RelayScheduler(
             ingestion_service=ingestion_service,
@@ -55,9 +64,11 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, int | str]:
+        """Report service liveness and the schema version expected by the app."""
         return {"status": "ok", "schema_version": SCHEMA_VERSION}
 
     async def get_resource(resource_key: ResourceKey) -> JSONResponse:
+        """Return the latest stored payload for one source-shaped resource."""
         stored_resource = await store.get_resource(resource_key=resource_key)
         if stored_resource is None:
             message = f"Resource {resource_key.value!r} has not been ingested yet."
@@ -82,6 +93,7 @@ def create_app(
         after_id: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=1000),
     ) -> dict[str, list[dict[str, int | str | None]]]:
+        """List stored change-event metadata after a known event id."""
         events = await store.list_change_events(after_id=after_id, limit=limit)
         return {"events": [event.to_public_dict() for event in events]}
 
@@ -90,6 +102,7 @@ def create_app(
         request: Request,
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
+        """Stream change events as Server-Sent Events with replay support."""
         after_id = parse_last_event_id(last_event_id=last_event_id)
         generator = sse_generator(
             request=request,
@@ -111,7 +124,10 @@ def _resource_endpoint(
     resource_key: ResourceKey,
     get_resource: ResourceGetter,
 ) -> Callable[[], Awaitable[JSONResponse]]:
+    """Create a uniquely named FastAPI endpoint for a resource key."""
+
     async def endpoint() -> JSONResponse:
+        """Delegate resource retrieval to the shared resource getter."""
         return await get_resource(resource_key)
 
     endpoint.__name__ = f"get_{resource_key.value}"
@@ -119,6 +135,7 @@ def _resource_endpoint(
 
 
 def resource_headers(*, stored_resource: StoredResource) -> dict[str, str]:
+    """Build response headers that expose relay metadata for a resource."""
     return {
         "ETag": f'"{stored_resource.payload_hash}"',
         "X-FPL-Relay-Fetched-At": stored_resource.fetched_at.isoformat(),
@@ -128,6 +145,7 @@ def resource_headers(*, stored_resource: StoredResource) -> dict[str, str]:
 
 
 def parse_last_event_id(*, last_event_id: str | None) -> int:
+    """Parse and validate the SSE Last-Event-ID header."""
     if last_event_id is None or last_event_id == "":
         return 0
     try:
@@ -149,6 +167,7 @@ async def sse_generator(
     after_id: int,
     heartbeat_seconds: int,
 ) -> AsyncIterator[str]:
+    """Yield SSE frames from stored change events and heartbeat intervals."""
     async for event in store.watch_change_events(
         after_id=after_id,
         heartbeat_seconds=heartbeat_seconds,
@@ -162,6 +181,7 @@ async def sse_generator(
 
 
 def encode_sse_event(*, change_event: ChangeEvent) -> str:
+    """Encode one change-event model as an SSE event frame."""
     data = change_event.model_dump_json()
     return (
         f"id: {change_event.id}\n"

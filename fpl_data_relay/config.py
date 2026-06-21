@@ -1,3 +1,5 @@
+"""Environment-backed runtime configuration for the relay."""
+
 import os
 
 from pydantic import Field, HttpUrl, PositiveFloat, PositiveInt
@@ -16,6 +18,8 @@ REQUIRED_ENV_VARS = [
 
 
 class Settings(BaseSettings):
+    """Validated application settings loaded from explicit environment names."""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -37,6 +41,7 @@ class Settings(BaseSettings):
 
 
 def load_settings_from_environment() -> Settings:
+    """Load settings after checking that every required variable is present."""
     missing_names = [name for name in REQUIRED_ENV_VARS if name not in os.environ]
     if missing_names:
         joined_names = ", ".join(missing_names)

@@ -1,7 +1,11 @@
+"""Canonical resource keys and public change-event names."""
+
 from enum import StrEnum
 
 
 class ResourceKey(StrEnum):
+    """Stored resource identifiers used across routes, ingestion, and storage."""
+
     BOOTSTRAP = "bootstrap"
     FIXTURES = "fixtures"
     CURRENT_FIXTURES = "current_fixtures"
@@ -16,4 +20,3 @@ EVENT_NAMES: dict[ResourceKey, str] = {
     ResourceKey.EVENT_STATUS: "event_status.updated",
     ResourceKey.EVENT_LIVE: "event_live.updated",
 }
-

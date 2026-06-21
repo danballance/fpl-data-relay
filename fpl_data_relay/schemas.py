@@ -1,3 +1,5 @@
+"""Database schema constants for the Postgres resource store."""
+
 SCHEMA_VERSION = 1
 NOTIFY_CHANNEL = "relay_change_events"
 ADVISORY_LOCK_ID = 9_722_024_001
@@ -45,4 +47,3 @@ VALUES (true, {SCHEMA_VERSION})
 ON CONFLICT (id)
 DO UPDATE SET version = EXCLUDED.version, applied_at = now();
 """
-

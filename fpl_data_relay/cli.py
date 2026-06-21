@@ -1,3 +1,5 @@
+"""Typer command line interface for relay operations."""
+
 import asyncio
 
 import typer
@@ -12,22 +14,26 @@ app = typer.Typer(no_args_is_help=True)
 
 @app.command("config-check")
 def config_check() -> None:
+    """Validate required environment configuration."""
     load_settings_from_environment()
     typer.echo("configuration ok")
 
 
 @app.command("db-apply")
 def db_apply() -> None:
+    """Apply the database schema and verify its version."""
     asyncio.run(_db_apply())
 
 
 @app.command("ingest-once")
 def ingest_once() -> None:
+    """Run one reference and live ingestion cycle."""
     asyncio.run(_ingest_once())
 
 
 @app.command("serve")
 def serve() -> None:
+    """Start the production FastAPI server."""
     uvicorn.run(
         "fpl_data_relay.factory:create_production_app",
         factory=True,
@@ -38,6 +44,7 @@ def serve() -> None:
 
 
 async def _db_apply() -> None:
+    """Async implementation for applying schema migrations."""
     settings = load_settings_from_environment()
     store = await build_postgres_store(settings=settings)
     try:
@@ -49,6 +56,7 @@ async def _db_apply() -> None:
 
 
 async def _ingest_once() -> None:
+    """Async implementation for one full ingestion run."""
     settings = load_settings_from_environment()
     store = await build_postgres_store(settings=settings)
     service = build_ingestion_service(settings=settings, store=store)
