@@ -53,7 +53,7 @@ def load_settings_from_environment() -> Settings:
 
 
 def load_postgres_maintenance_database_url_from_environment() -> str:
-    """Load the maintenance database URL required by the drop command."""
+    """Load the maintenance database URL required by drop-and-create."""
     if POSTGRES_MAINTENANCE_DATABASE_URL not in os.environ:
         raise RuntimeError(
             "Missing required environment variable: "

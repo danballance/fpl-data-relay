@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fpl-data-relay = "fpl_data_relay.cli:app"
+fpl-relay = "fpl_data_relay.cli:app"
 
 [dependency-groups]
 dev = [

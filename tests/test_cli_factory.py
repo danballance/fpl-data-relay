@@ -72,14 +72,16 @@ async def test_cli_db_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     assert store.closed is True
 
 
-def test_cli_db_drop_requires_yes() -> None:
-    result = CliRunner().invoke(cli.app, ["db", "drop"])
+def test_cli_db_drop_and_create_requires_yes() -> None:
+    result = CliRunner().invoke(cli.app, ["db", "drop-and-create"])
     assert result.exit_code == 1
     assert "without --yes" in result.stderr
 
 
 @pytest.mark.asyncio
-async def test_cli_db_drop_invokes_drop_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cli_db_drop_and_create_invokes_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     set_required_env(monkeypatch=monkeypatch)
     monkeypatch.setenv(
         "POSTGRES_MAINTENANCE_DATABASE_URL",
@@ -87,7 +89,7 @@ async def test_cli_db_drop_invokes_drop_helper(monkeypatch: pytest.MonkeyPatch) 
     )
     calls: list[dict[str, str]] = []
 
-    async def fake_drop_database(
+    async def fake_drop_and_create_database(
         *,
         database_url: str,
         maintenance_database_url: str,
@@ -99,8 +101,12 @@ async def test_cli_db_drop_invokes_drop_helper(monkeypatch: pytest.MonkeyPatch) 
             },
         )
 
-    monkeypatch.setattr(cli, "drop_database", fake_drop_database)
-    await cli._db_drop()
+    monkeypatch.setattr(
+        cli,
+        "drop_and_create_database",
+        fake_drop_and_create_database,
+    )
+    await cli._db_drop_and_create()
     assert calls == [
         {
             "database_url": "postgresql://relay:relay@localhost:5432/relay",
@@ -112,7 +118,7 @@ async def test_cli_db_drop_invokes_drop_helper(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_drop_database_uses_maintenance_connection(
+async def test_drop_and_create_database_uses_maintenance_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeMaintenanceConnection:
@@ -138,12 +144,13 @@ async def test_drop_database_uses_maintenance_connection(
         return connection
 
     monkeypatch.setattr(db_admin.asyncpg, "connect", fake_connect)
-    await db_admin.drop_database(
+    await db_admin.drop_and_create_database(
         database_url="postgresql://relay:relay@localhost:5432/relay-db",
         maintenance_database_url="postgresql://relay:relay@localhost:5432/postgres",
     )
     assert connection.closed is True
-    assert connection.executed[-1][0] == 'DROP DATABASE "relay-db"'
+    assert connection.executed[-2][0] == 'DROP DATABASE IF EXISTS "relay-db"'
+    assert connection.executed[-1][0] == 'CREATE DATABASE "relay-db"'
 
 
 @pytest.mark.asyncio

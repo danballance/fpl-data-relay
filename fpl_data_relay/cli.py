@@ -10,7 +10,7 @@ from fpl_data_relay.config import (
     load_postgres_maintenance_database_url_from_environment,
     load_settings_from_environment,
 )
-from fpl_data_relay.db_admin import drop_database
+from fpl_data_relay.db_admin import drop_and_create_database
 from fpl_data_relay.factory import build_ingestion_service, build_postgres_store
 from fpl_data_relay.ingestion import IngestionResult
 from fpl_data_relay.schemas import SCHEMA_VERSION
@@ -35,22 +35,22 @@ def db_apply() -> None:
     asyncio.run(_db_apply())
 
 
-@db_app.command("drop")
-def db_drop(
+@db_app.command("drop-and-create")
+def db_drop_and_create(
     *,
     yes: Annotated[
         bool,
         typer.Option(
             "--yes",
-            help="Confirm irreversible database drop.",
+            help="Confirm irreversible database drop and create.",
         ),
     ] = False,
 ) -> None:
-    """Drop the configured application database."""
+    """Drop and recreate the configured application database."""
     if not yes:
-        typer.echo("Refusing to drop database without --yes.", err=True)
+        typer.echo("Refusing to drop and create database without --yes.", err=True)
         raise typer.Exit(code=1)
-    asyncio.run(_db_drop())
+    asyncio.run(_db_drop_and_create())
 
 
 @ingest_app.command("reference")
@@ -110,15 +110,15 @@ async def _db_apply() -> None:
         await store.close()
 
 
-async def _db_drop() -> None:
-    """Async implementation for dropping the configured app database."""
+async def _db_drop_and_create() -> None:
+    """Async implementation for recreating the configured app database."""
     settings = load_settings_from_environment()
     maintenance_database_url = load_postgres_maintenance_database_url_from_environment()
-    await drop_database(
+    await drop_and_create_database(
         database_url=settings.database_url,
         maintenance_database_url=maintenance_database_url,
     )
-    typer.echo("database dropped")
+    typer.echo("database dropped and created")
 
 
 async def _ingest_reference() -> None:

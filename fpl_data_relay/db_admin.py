@@ -22,12 +22,12 @@ class MaintenanceConnection(Protocol):
         ...
 
 
-async def drop_database(
+async def drop_and_create_database(
     *,
     database_url: str,
     maintenance_database_url: str,
 ) -> None:
-    """Drop the application database using a maintenance database connection."""
+    """Drop and recreate the application database via maintenance DB."""
     target_database = parse_database_name(database_url=database_url)
     connection = cast(
         "MaintenanceConnection",
@@ -48,7 +48,8 @@ async def drop_database(
         )
         if not isinstance(quoted_database, str):
             raise RuntimeError("Failed to quote target database name.")
-        await connection.execute(f"DROP DATABASE {quoted_database}")
+        await connection.execute(f"DROP DATABASE IF EXISTS {quoted_database}")
+        await connection.execute(f"CREATE DATABASE {quoted_database}")
     finally:
         await connection.close()
 

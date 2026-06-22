@@ -22,14 +22,14 @@
 Use grouped Typer commands:
 
 ```bash
-uv run fpl-data-relay config-check
-uv run fpl-data-relay db apply
-uv run fpl-data-relay db drop --yes
-uv run fpl-data-relay ingest reference
-uv run fpl-data-relay ingest live
-uv run fpl-data-relay ingest live --target-id 5
-uv run fpl-data-relay ingest live --fixture-id 123
-uv run fpl-data-relay serve
+uv run fpl-relay config-check
+uv run fpl-relay db apply
+uv run fpl-relay db drop-and-create --yes
+uv run fpl-relay ingest reference
+uv run fpl-relay ingest live
+uv run fpl-relay ingest live --target-id 5
+uv run fpl-relay ingest live --fixture-id 123
+uv run fpl-relay serve
 ```
 
 ## Database commands
@@ -47,9 +47,9 @@ Expected behaviour:
 5. Print a concise success message.
 6. Close the store.
 
-### `db drop --yes`
+### `db drop-and-create --yes`
 
-Drops the configured application database.
+Drops and recreates the configured application database.
 
 Because PostgreSQL cannot drop the database currently being used by the connection, this command must not use the normal app store pool. It should connect to a separate maintenance database.
 
@@ -67,8 +67,9 @@ Expected behaviour:
 4. Connect to the maintenance database.
 5. Terminate active connections to the target app database.
 6. Drop the target app database.
-7. Print a concise success message.
-8. Close the maintenance connection.
+7. Create a new empty target app database with the same name.
+8. Print a concise success message.
+9. Close the maintenance connection.
 
 Safety rules:
 
@@ -108,8 +109,8 @@ Default behaviour:
 Targeting options:
 
 ```bash
-uv run fpl-data-relay ingest live --target-id 5
-uv run fpl-data-relay ingest live --fixture-id 123
+uv run fpl-relay ingest live --target-id 5
+uv run fpl-relay ingest live --fixture-id 123
 ```
 
 `--target-id`:
@@ -173,7 +174,7 @@ This supports `--fixture-id` resolution without embedding SQL in the ingestion s
 Add a database-drop helper outside `PostgresStore`, because it connects to the maintenance database rather than the app database:
 
 ```python
-async def drop_database(
+async def drop_and_create_database(
     *,
     database_url: str,
     maintenance_database_url: str,
@@ -185,13 +186,13 @@ async def drop_database(
 
 Keep the existing required app settings unchanged for normal commands.
 
-Add a command-specific loader for the maintenance database URL used by `db drop`:
+Add a command-specific loader for the maintenance database URL used by `db drop-and-create`:
 
 ```python
 POSTGRES_MAINTENANCE_DATABASE_URL
 ```
 
-This should be required only for `db drop`, not for serving or ingestion.
+This should be required only for `db drop-and-create`, not for serving or ingestion.
 
 ## Testing plan
 
@@ -199,9 +200,9 @@ Add or update tests for:
 
 - CLI exposes grouped `db` and `ingest` commands.
 - `db apply` applies and verifies schema.
-- `db drop` fails without `--yes`.
-- `db drop` fails without maintenance DSN.
-- `db drop` connects to maintenance DB and drops the parsed target DB.
+- `db drop-and-create` fails without `--yes`.
+- `db drop-and-create` fails without maintenance DSN.
+- `db drop-and-create` connects to maintenance DB and drops and recreates the parsed target DB.
 - `ingest reference` runs only reference ingestion.
 - `ingest live` defaults to current event.
 - `ingest live --target-id N` uses the provided event id.
