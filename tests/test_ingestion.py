@@ -1,9 +1,12 @@
+from typing import cast
+
 import pytest
 
 from fpl_data_relay.ingestion import (
     IngestionResult,
     IngestionService,
     RelayScheduler,
+    derive_season,
     has_active_fixture,
     select_current_event_id,
 )
@@ -15,6 +18,25 @@ from tests.conftest import FakeClient, InMemoryStore, bootstrap_payload
 def test_current_event_selection_succeeds_with_one_current_event() -> None:
     bootstrap = BootstrapStatic.model_validate(bootstrap_payload(current_ids=[2]))
     assert select_current_event_id(bootstrap=bootstrap) == 2
+
+
+def test_season_derivation_uses_event_deadline_years() -> None:
+    bootstrap = BootstrapStatic.model_validate(bootstrap_payload(current_ids=[2]))
+    season = derive_season(bootstrap=bootstrap)
+    assert season.id == "2025-26"
+    assert season.start_year == 2025
+    assert season.end_year == 2026
+
+
+def test_season_derivation_fails_without_complete_deadlines() -> None:
+    payload = bootstrap_payload(current_ids=[1])
+    events = payload["events"]
+    assert isinstance(events, list)
+    first_event = cast("dict[str, object]", events[0])
+    first_event["deadline_time"] = None
+    bootstrap = BootstrapStatic.model_validate(payload)
+    with pytest.raises(ValueError, match="deadline_time missing"):
+        derive_season(bootstrap=bootstrap)
 
 
 @pytest.mark.parametrize("current_ids", [[], [1, 2]])
@@ -35,6 +57,7 @@ async def test_ingest_all_once_writes_normalised_entity_events() -> None:
     result = await service.ingest_all_once()
     assert result.changed_count == 10
     assert result.unchanged_count == 0
+    assert result.season_id == "2025-26"
     assert result.current_event_id == 1
     assert result.has_active_fixture is True
     assert set(store.resources) == set(ResourceKey)
@@ -48,6 +71,8 @@ async def test_reference_and_live_ingestion_can_run_separately() -> None:
     live = await service.ingest_live_once(target_event_id=None, fixture_id=None)
     assert reference.changed_count == 7
     assert live.changed_count == 3
+    assert reference.season_id == "2025-26"
+    assert live.season_id == "2025-26"
     assert ResourceKey.EVENT_LIVE in store.resources
 
 
@@ -61,8 +86,11 @@ async def test_live_ingestion_fails_before_bootstrap_exists() -> None:
 @pytest.mark.asyncio
 async def test_live_ingestion_uses_explicit_target_event_id() -> None:
     client = FakeClient()
-    service = IngestionService(client=client, store=InMemoryStore())
+    store = InMemoryStore()
+    service = IngestionService(client=client, store=store)
+    await service.ingest_reference_once()
     result = await service.ingest_live_once(target_event_id=2, fixture_id=None)
+    assert result.season_id == "2025-26"
     assert result.current_event_id == 2
     assert client.current_fixture_event_ids == [2]
     assert client.live_event_ids == [2]
@@ -89,7 +117,9 @@ async def test_live_ingestion_rejects_conflicting_targets() -> None:
 
 @pytest.mark.asyncio
 async def test_live_ingestion_rejects_unknown_fixture_id() -> None:
-    service = IngestionService(client=FakeClient(), store=InMemoryStore())
+    store = InMemoryStore()
+    service = IngestionService(client=FakeClient(), store=store)
+    await service.ingest_reference_once()
     with pytest.raises(RuntimeError, match="fixture does not exist"):
         await service.ingest_live_once(target_event_id=None, fixture_id=999)
 

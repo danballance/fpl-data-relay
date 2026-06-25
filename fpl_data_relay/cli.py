@@ -11,7 +11,11 @@ from fpl_data_relay.config import (
     load_settings_from_environment,
 )
 from fpl_data_relay.db_admin import drop_and_create_database
-from fpl_data_relay.factory import build_ingestion_service, build_postgres_store
+from fpl_data_relay.factory import (
+    build_ingestion_service,
+    build_postgres_store,
+    create_production_app,
+)
 from fpl_data_relay.ingestion import IngestionResult
 from fpl_data_relay.schemas import SCHEMA_VERSION
 
@@ -89,13 +93,20 @@ def ingest_live(
 @app.command("serve")
 def serve() -> None:
     """Start the production FastAPI server."""
-    uvicorn.run(
-        "fpl_data_relay.factory:create_production_app",
-        factory=True,
+    asyncio.run(_serve())
+
+
+async def _serve() -> None:
+    """Create and serve the production app in one event loop."""
+    api_app = await create_production_app()
+    config = uvicorn.Config(
+        app=api_app,
         host="0.0.0.0",
         port=8000,
         workers=1,
     )
+    server = uvicorn.Server(config=config)
+    await server.serve()
 
 
 async def _db_apply() -> None:
@@ -158,5 +169,6 @@ def echo_ingestion_result(*, label: str, result: IngestionResult) -> None:
         f"{label} "
         f"changed={result.changed_count} "
         f"unchanged={result.unchanged_count} "
+        f"season_id={result.season_id} "
         f"current_event_id={result.current_event_id}",
     )

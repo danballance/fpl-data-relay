@@ -29,32 +29,57 @@ def test_cli_config_check(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "configuration ok" in result.stdout
 
 
-def test_cli_serve_invokes_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, object]] = []
+def test_cli_serve_runs_async_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
 
-    def fake_run(
-        app_path: str,
-        *,
-        factory: bool,
-        host: str,
-        port: int,
-        workers: int,
-    ) -> None:
-        calls.append(
-            {
-                "app_path": app_path,
-                "factory": factory,
-                "host": host,
-                "port": port,
-                "workers": workers,
-            },
-        )
+    async def fake_serve() -> None:
+        calls.append("served")
 
-    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setattr(cli, "_serve", fake_serve)
     result = CliRunner().invoke(cli.app, ["serve"])
     assert result.exit_code == 0
-    assert calls[0]["factory"] is True
-    assert calls[0]["port"] == 8000
+    assert calls == ["served"]
+
+
+@pytest.mark.asyncio
+async def test_cli_async_server_uses_production_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production_app = object()
+    calls: list[object] = []
+
+    async def fake_create_production_app() -> object:
+        calls.append("app-created")
+        return production_app
+
+    class FakeConfig:
+        def __init__(
+            self,
+            *,
+            app: object,
+            host: str,
+            port: int,
+            workers: int,
+        ) -> None:
+            calls.append((app, host, port, workers))
+
+    class FakeServer:
+        def __init__(self, *, config: FakeConfig) -> None:
+            calls.append(config)
+
+        async def serve(self) -> None:
+            calls.append("served")
+
+    monkeypatch.setattr(cli, "create_production_app", fake_create_production_app)
+    monkeypatch.setattr(cli.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(cli.uvicorn, "Server", FakeServer)
+
+    await cli._serve()
+
+    assert calls[0] == "app-created"
+    assert calls[1] == (production_app, "0.0.0.0", 8000, 1)
+    assert isinstance(calls[2], FakeConfig)
+    assert calls[3] == "served"
 
 
 @pytest.mark.asyncio

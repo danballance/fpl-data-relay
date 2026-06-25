@@ -67,18 +67,20 @@ docker compose run --rm app uv run --no-dev fpl-relay ingest live
 
 ## Targeted Live Ingestion
 
-Live data from the upstream FPL API is event/gameweek scoped. The live ingestion
-command therefore accepts either an event id directly or a fixture id that is
-already stored in the database and can be resolved to its event id:
+Live data from the upstream FPL API is event/gameweek scoped, and the relay
+stores those ids inside a derived season such as `2025-26`. The live ingestion
+command therefore requires stored reference data, then accepts either an event
+id in the current season or a fixture id that is already stored in the database
+and can be resolved to its event id:
 
 ```fish
 docker compose run --rm app uv run --no-dev fpl-relay ingest live --target-id 5
 docker compose run --rm app uv run --no-dev fpl-relay ingest live --fixture-id 123
 ```
 
-If neither option is supplied, the command uses the current event from stored
-bootstrap/reference data. `--target-id` and `--fixture-id` are mutually
-exclusive.
+If neither option is supplied, the command uses the current season and current
+event from stored bootstrap/reference data. `--target-id` and `--fixture-id`
+are mutually exclusive.
 
 ## Dropping and Recreating the Database
 

@@ -13,6 +13,19 @@ class FplModel(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
 
+class Season(BaseModel):
+    """Derived relay season metadata for one active FPL season."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    start_year: int
+    end_year: int
+    first_deadline_time: datetime
+    last_deadline_time: datetime
+    is_current: bool
+
+
 class Event(FplModel):
     """FPL gameweek/event metadata from bootstrap-static."""
 
@@ -88,6 +101,7 @@ class Element(FplModel):
     first_name: str
     second_name: str
     web_name: str
+    photo: str | None = None
     team: int
     team_code: int | None = None
     element_type: int

@@ -9,6 +9,7 @@ from fpl_data_relay.fpl_models import (
     EventLiveResponse,
     EventStatusResponse,
     Fixture,
+    Season,
 )
 from fpl_data_relay.resources import IngestionSourceKey
 from fpl_data_relay.store import IngestionMetadata, PostgresStore
@@ -29,8 +30,9 @@ class NormalisedTransaction:
 
 class NormalisedConnection:
     def __init__(self) -> None:
-        self.sources: dict[str, dict[str, object]] = {}
+        self.sources: dict[tuple[str, str, int | None], dict[str, object]] = {}
         self.tables: dict[str, dict[object, dict[str, object]]] = {
+            "fpl_seasons": {},
             "fpl_events": {},
             "fpl_phases": {},
             "fpl_teams": {},
@@ -51,72 +53,101 @@ class NormalisedConnection:
         return NormalisedTransaction()
 
     async def execute(self, query: str, *arguments: object) -> str:
+        if "UPDATE fpl_seasons" in query and "is_current = false" in query:
+            current_season_id = cast("str", arguments[0])
+            for season_id, season in self.tables["fpl_seasons"].items():
+                if season_id != current_season_id:
+                    season["is_current"] = False
+                    season["row_hash"] = ""
+            return "UPDATE"
         if "UPDATE relay_ingestion_sources" in query:
-            source_key = cast("str", arguments[0])
-            self.sources[source_key]["checked_at"] = arguments[1]
+            source_identity = (
+                cast("str", arguments[0]),
+                cast("str", arguments[1]),
+                cast("int | None", arguments[2]),
+            )
+            self.sources[source_identity]["checked_at"] = arguments[3]
             return "UPDATE 1"
         if "INSERT INTO relay_ingestion_sources" in query:
-            source_key = cast("str", arguments[0])
-            self.sources[source_key] = {
+            source_key = cast("str", arguments[1])
+            source_identity = (
+                cast("str", arguments[0]),
+                source_key,
+                cast("int | None", arguments[2]),
+            )
+            self.sources[source_identity] = {
+                "season_id": arguments[0],
                 "source_key": source_key,
-                "event_id": arguments[1],
+                "event_id": arguments[2],
+                "payload_hash": arguments[3],
+                "fetched_at": arguments[4],
+                "checked_at": arguments[5],
+            }
+            return "INSERT 0 1"
+        if "INSERT INTO fpl_event_status (" in query:
+            self.event_status = {
+                "season_id": arguments[0],
+                "leagues": arguments[1],
                 "payload_hash": arguments[2],
                 "fetched_at": arguments[3],
                 "checked_at": arguments[4],
             }
             return "INSERT 0 1"
-        if "INSERT INTO fpl_event_status (" in query:
-            self.event_status = {
-                "id": True,
-                "leagues": arguments[0],
-                "payload_hash": arguments[1],
-                "fetched_at": arguments[2],
-                "checked_at": arguments[3],
-            }
-            return "INSERT 0 1"
         if "DELETE FROM fpl_fixture_stat_entries" in query:
-            fixture_id = arguments[0]
+            season_id = arguments[0]
+            fixture_id = arguments[1]
             self.fixture_stat_entries = [
                 row
                 for row in self.fixture_stat_entries
-                if row["fixture_id"] != fixture_id
+                if not (
+                    row["season_id"] == season_id and row["fixture_id"] == fixture_id
+                )
             ]
             return "DELETE"
         if "INSERT INTO fpl_fixture_stat_entries" in query:
             self.fixture_stat_entries.append(
                 {
-                    "fixture_id": arguments[0],
-                    "identifier": arguments[1],
-                    "side": arguments[2],
-                    "ordinal": arguments[3],
-                    "element": arguments[4],
-                    "value_text": arguments[5],
-                    "value_type": arguments[6],
+                    "season_id": arguments[0],
+                    "fixture_id": arguments[1],
+                    "identifier": arguments[2],
+                    "side": arguments[3],
+                    "ordinal": arguments[4],
+                    "element": arguments[5],
+                    "value_text": arguments[6],
+                    "value_type": arguments[7],
                 },
             )
             return "INSERT 0 1"
         if "DELETE FROM fpl_event_live_elements" in query:
-            event_id = arguments[0]
+            season_id = arguments[0]
+            event_id = arguments[1]
             self.tables["fpl_event_live_elements"] = {
                 key: row
                 for key, row in self.tables["fpl_event_live_elements"].items()
-                if row["event_id"] != event_id
+                if not (
+                    row["season_id"] == season_id and row["event_id"] == event_id
+                )
             }
             self.live_explain_stats = [
-                row for row in self.live_explain_stats if row["event_id"] != event_id
+                row
+                for row in self.live_explain_stats
+                if not (
+                    row["season_id"] == season_id and row["event_id"] == event_id
+                )
             ]
             return "DELETE"
         if "INSERT INTO fpl_event_live_explain_stats" in query:
             self.live_explain_stats.append(
                 {
-                    "event_id": arguments[0],
-                    "element_id": arguments[1],
-                    "fixture_id": arguments[2],
-                    "identifier": arguments[3],
-                    "ordinal": arguments[4],
-                    "points": arguments[5],
-                    "value_text": arguments[6],
-                    "value_type": arguments[7],
+                    "season_id": arguments[0],
+                    "event_id": arguments[1],
+                    "element_id": arguments[2],
+                    "fixture_id": arguments[3],
+                    "identifier": arguments[4],
+                    "ordinal": arguments[5],
+                    "points": arguments[6],
+                    "value_text": arguments[7],
+                    "value_type": arguments[8],
                 },
             )
             return "INSERT 0 1"
@@ -133,80 +164,128 @@ class NormalisedConnection:
         if "INSERT INTO relay_change_events" in query:
             event = {
                 "id": len(self.change_events) + 1,
-                "entity_family": arguments[0],
-                "event_name": arguments[1],
-                "source_key": arguments[2],
-                "event_id": arguments[3],
-                "payload_hash": arguments[4],
-                "fetched_at": arguments[5],
+                "season_id": arguments[0],
+                "entity_family": arguments[1],
+                "event_name": arguments[2],
+                "source_key": arguments[3],
+                "event_id": arguments[4],
+                "payload_hash": arguments[5],
+                "fetched_at": arguments[6],
                 "created_at": datetime.now(tz=UTC),
             }
             self.change_events.append(event)
             return event
-        if "FROM fpl_events WHERE is_current" in query:
+        if "FROM fpl_seasons WHERE is_current" in query:
             return next(
                 (
                     row
-                    for row in self.tables["fpl_events"].values()
+                    for row in self.tables["fpl_seasons"].values()
                     if row["is_current"] is True
                 ),
                 None,
             )
-        if "FROM fpl_events WHERE id" in query:
-            return self.tables["fpl_events"].get(arguments[0])
-        if "FROM fpl_teams WHERE id" in query:
-            return self.tables["fpl_teams"].get(arguments[0])
-        if "FROM fpl_elements WHERE id" in query:
-            return self.tables["fpl_elements"].get(arguments[0])
-        if "FROM fpl_fixtures WHERE id" in query:
-            return self.tables["fpl_fixtures"].get(arguments[0])
+        if "FROM fpl_seasons WHERE id" in query:
+            return self.tables["fpl_seasons"].get(arguments[0])
+        if "FROM fpl_events" in query and "is_current" in query:
+            return next(
+                (
+                    row
+                    for row in self.tables["fpl_events"].values()
+                    if row["season_id"] == arguments[0] and row["is_current"] is True
+                ),
+                None,
+            )
+        if "FROM fpl_events" in query and "id = $2" in query:
+            return self.tables["fpl_events"].get((arguments[0], arguments[1]))
+        if "FROM fpl_teams" in query and "id = $2" in query:
+            return self.tables["fpl_teams"].get((arguments[0], arguments[1]))
+        if "FROM fpl_elements" in query and "id = $2" in query:
+            return self.tables["fpl_elements"].get((arguments[0], arguments[1]))
+        if "FROM fpl_fixtures" in query and "id = $2" in query:
+            return self.tables["fpl_fixtures"].get((arguments[0], arguments[1]))
         if "FROM fpl_event_status" in query:
+            if self.event_status is None:
+                return None
+            if self.event_status["season_id"] != arguments[0]:
+                return None
             return self.event_status
         if "FROM fpl_event_live_elements" in query:
             return self.tables["fpl_event_live_elements"].get(
-                (arguments[0], arguments[1]),
+                (arguments[0], arguments[1], arguments[2]),
             )
         return None
 
     async def fetch(self, query: str, *arguments: object) -> list[object]:
-        if "FROM fpl_events ORDER BY" in query:
-            return list(self.tables["fpl_events"].values())
+        if "FROM fpl_seasons ORDER BY" in query:
+            return list(self.tables["fpl_seasons"].values())
+        if "FROM fpl_events" in query and "ORDER BY id" in query:
+            return [
+                row
+                for row in self.tables["fpl_events"].values()
+                if row["season_id"] == arguments[0]
+            ]
         if "FROM fpl_phases" in query:
-            return list(self.tables["fpl_phases"].values())
-        if "FROM fpl_teams ORDER BY" in query:
-            return list(self.tables["fpl_teams"].values())
-        if "FROM fpl_element_types" in query:
-            return list(self.tables["fpl_element_types"].values())
-        if "FROM fpl_elements ORDER BY" in query:
-            return list(self.tables["fpl_elements"].values())
-        if "FROM fpl_fixtures WHERE event" in query:
+            return [
+                row
+                for row in self.tables["fpl_phases"].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if "FROM fpl_teams" in query and "ORDER BY id" in query:
+            return [
+                row
+                for row in self.tables["fpl_teams"].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if "FROM fpl_element_types" in query and "ORDER BY id" in query:
+            return [
+                row
+                for row in self.tables["fpl_element_types"].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if "FROM fpl_elements" in query and "ORDER BY id" in query:
+            return [
+                row
+                for row in self.tables["fpl_elements"].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if "FROM fpl_fixtures" in query and "event = $2" in query:
             return [
                 row
                 for row in self.tables["fpl_fixtures"].values()
-                if row["event"] == arguments[0]
+                if row["season_id"] == arguments[0] and row["event"] == arguments[1]
             ]
-        if "FROM fpl_fixtures ORDER BY" in query:
-            return list(self.tables["fpl_fixtures"].values())
+        if "FROM fpl_fixtures" in query and "ORDER BY id" in query:
+            return [
+                row
+                for row in self.tables["fpl_fixtures"].values()
+                if row["season_id"] == arguments[0]
+            ]
         if "FROM fpl_fixture_stat_entries" in query:
             return [
                 row
                 for row in self.fixture_stat_entries
-                if row["fixture_id"] == arguments[0]
+                if row["season_id"] == arguments[0]
+                and row["fixture_id"] == arguments[1]
             ]
         if "FROM fpl_event_status_days" in query:
-            return list(self.tables["fpl_event_status_days"].values())
+            return [
+                row
+                for row in self.tables["fpl_event_status_days"].values()
+                if row["season_id"] == arguments[0]
+            ]
         if "FROM fpl_event_live_elements" in query:
             return [
                 row
                 for row in self.tables["fpl_event_live_elements"].values()
-                if row["event_id"] == arguments[0]
+                if row["season_id"] == arguments[0] and row["event_id"] == arguments[1]
             ]
         if "FROM fpl_event_live_explain_stats" in query:
             return [
                 row
                 for row in self.live_explain_stats
-                if row["event_id"] == arguments[0]
-                and row["element_id"] == arguments[1]
+                if row["season_id"] == arguments[0]
+                and row["event_id"] == arguments[1]
+                and row["element_id"] == arguments[2]
             ]
         if "FROM relay_change_events" in query:
             after_id = cast("int", arguments[0])
@@ -221,7 +300,12 @@ class NormalisedConnection:
 
     async def fetchval(self, query: str, *arguments: object) -> object:
         if "SELECT payload_hash" in query:
-            source = self.sources.get(cast("str", arguments[0]))
+            source_identity = (
+                cast("str", arguments[0]),
+                cast("str", arguments[1]),
+                cast("int | None", arguments[2]),
+            )
+            source = self.sources.get(source_identity)
             return None if source is None else source["payload_hash"]
         if "pg_notify" in query:
             self.notifications.append(cast("str", arguments[1]))
@@ -271,20 +355,26 @@ class NormalisedPool:
 
 def table_key(*, table: str, row: dict[str, object]) -> object:
     if table == "fpl_element_stat_definitions":
-        return row["name"]
+        return (row["season_id"], row["name"])
     if table == "fpl_event_status_days":
-        return (row["event"], row["date"])
+        return (row["season_id"], row["event"], row["date"])
     if table == "fpl_event_live_elements":
-        return (row["event_id"], row["element_id"])
+        return (row["season_id"], row["event_id"], row["element_id"])
+    if table == "fpl_seasons":
+        return row["id"]
+    if table.startswith("fpl_"):
+        return (row["season_id"], row["id"])
     return row["id"]
 
 
 def metadata(
     *,
+    season_id: str = "2025-26",
     source_key: IngestionSourceKey,
     event_id: int | None,
 ) -> IngestionMetadata:
     return IngestionMetadata(
+        season_id=season_id,
         source_key=source_key,
         event_id=event_id,
         payload_hash=source_key.value.ljust(64, "a")[:64],
@@ -297,11 +387,25 @@ def metadata(
 async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
     pool = NormalisedPool()
     store = PostgresStore(pool=pool)
+    season = Season(
+        id="2025-26",
+        start_year=2025,
+        end_year=2026,
+        first_deadline_time=datetime(2025, 8, 15, 17, 30, tzinfo=UTC),
+        last_deadline_time=datetime(2026, 5, 24, 13, 30, tzinfo=UTC),
+        is_current=True,
+    )
     bootstrap = BootstrapStatic.model_validate(
         {
-            "events": [{"id": 1, "name": "Gameweek 1", "is_current": True}],
+            "events": [
+                {"id": 1, "name": "Gameweek 1", "is_current": True},
+                {"id": 2, "name": "Gameweek 2", "is_current": False},
+            ],
             "phases": [{"id": 1, "name": "Phase", "start_event": 1, "stop_event": 2}],
-            "teams": [{"id": 1, "name": "Team", "short_name": "TST"}],
+            "teams": [
+                {"id": 1, "name": "Team", "short_name": "TST"},
+                {"id": 2, "name": "Other Team", "short_name": "OTH"},
+            ],
             "element_types": [{"id": 1, "singular_name": "Goalkeeper"}],
             "element_stats": [{"label": "Minutes", "name": "minutes"}],
             "elements": [
@@ -310,6 +414,7 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
                     "first_name": "First",
                     "second_name": "Second",
                     "web_name": "Player",
+                    "photo": "1.jpg",
                     "team": 1,
                     "element_type": 1,
                 },
@@ -366,6 +471,7 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
     )
 
     bootstrap_outcome = await store.upsert_bootstrap(
+        season=season,
         bootstrap=bootstrap,
         metadata=metadata(source_key=IngestionSourceKey.BOOTSTRAP, event_id=None),
     )
@@ -393,46 +499,139 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
     assert status_outcome.changed is True
     assert live_outcome.changed is True
     assert unchanged.changed is False
-    current_event = await store.get_current_event()
+    seasons = await store.list_seasons()
+    assert seasons[0].id == "2025-26"
+    current_season = await store.get_current_season()
+    assert current_season is not None
+    assert current_season.id == "2025-26"
+    assert await store.get_season(season_id="2025-26") == current_season
+    current_event = await store.get_current_event(season_id="2025-26")
     assert current_event is not None
     assert current_event.id == 1
-    event = await store.get_event(event_id=1)
+    event = await store.get_event(season_id="2025-26", event_id=1)
     assert event is not None
     assert event.name == "Gameweek 1"
-    assert len(await store.list_events()) == 1
-    assert len(await store.list_phases()) == 1
-    team = await store.get_team(team_id=1)
+    assert len(await store.list_events(season_id="2025-26")) == 2
+    assert len(await store.list_phases(season_id="2025-26")) == 1
+    team = await store.get_team(season_id="2025-26", team_id=1)
     assert team is not None
     assert team.short_name == "TST"
-    assert len(await store.list_teams()) == 1
-    assert len(await store.list_element_types()) == 1
-    element = await store.get_element(element_id=1)
+    assert len(await store.list_teams(season_id="2025-26")) == 2
+    assert len(await store.list_element_types(season_id="2025-26")) == 1
+    element = await store.get_element(season_id="2025-26", element_id=1)
     assert element is not None
     assert element.web_name == "Player"
-    assert len(await store.list_elements()) == 1
-    stored_fixture = await store.get_fixture(fixture_id=1)
+    assert element.photo == "1.jpg"
+    assert len(await store.list_elements(season_id="2025-26")) == 1
+    stored_fixture = await store.get_fixture(season_id="2025-26", fixture_id=1)
     assert stored_fixture is not None
     assert stored_fixture.stats[0].h[0].value == 2
-    assert len(await store.list_fixtures(event_id=None)) == 1
-    assert len(await store.list_fixtures(event_id=1)) == 1
-    stored_status = await store.get_event_status()
+    assert len(await store.list_fixtures(season_id="2025-26", event_id=None)) == 1
+    assert len(await store.list_fixtures(season_id="2025-26", event_id=1)) == 1
+    stored_status = await store.get_event_status(season_id="2025-26")
     assert stored_status is not None
     assert stored_status.leagues == "updated"
-    live_element = await store.get_live_element(event_id=1, element_id=1)
+    live_element = await store.get_live_element(
+        season_id="2025-26",
+        event_id=1,
+        element_id=1,
+    )
     assert live_element is not None
     assert live_element.stats.total_points == 8
-    assert len(await store.list_live_elements(event_id=1)) == 1
+    assert len(await store.list_live_elements(season_id="2025-26", event_id=1)) == 1
     assert len(await store.list_change_events(after_id=0, limit=20)) == 9
     await store.close()
     assert pool.closed is True
 
 
 @pytest.mark.asyncio
+async def test_postgres_store_keeps_repeated_upstream_ids_per_season() -> None:
+    pool = NormalisedPool()
+    store = PostgresStore(pool=pool)
+    seasons = [
+        Season(
+            id="2025-26",
+            start_year=2025,
+            end_year=2026,
+            first_deadline_time=datetime(2025, 8, 15, 17, 30, tzinfo=UTC),
+            last_deadline_time=datetime(2026, 5, 24, 13, 30, tzinfo=UTC),
+            is_current=False,
+        ),
+        Season(
+            id="2026-27",
+            start_year=2026,
+            end_year=2027,
+            first_deadline_time=datetime(2026, 8, 15, 17, 30, tzinfo=UTC),
+            last_deadline_time=datetime(2027, 5, 24, 13, 30, tzinfo=UTC),
+            is_current=True,
+        ),
+    ]
+    for season in seasons:
+        bootstrap = BootstrapStatic.model_validate(
+            {
+                "events": [
+                    {
+                        "id": 1,
+                        "name": f"{season.id} Gameweek 1",
+                        "is_current": True,
+                    },
+                ],
+                "teams": [
+                    {
+                        "id": 1,
+                        "name": f"{season.id} Team",
+                        "short_name": "TST",
+                    },
+                ],
+                "element_types": [{"id": 1, "singular_name": "Goalkeeper"}],
+                "elements": [
+                    {
+                        "id": 1,
+                        "first_name": "First",
+                        "second_name": season.id,
+                        "web_name": f"{season.id} Player",
+                        "team": 1,
+                        "element_type": 1,
+                    },
+                ],
+            },
+        )
+        outcome = await store.upsert_bootstrap(
+            season=season,
+            bootstrap=bootstrap,
+            metadata=metadata(
+                season_id=season.id,
+                source_key=IngestionSourceKey.BOOTSTRAP,
+                event_id=None,
+            ),
+        )
+        assert outcome.changed is True
+
+    old_event = await store.get_event(season_id="2025-26", event_id=1)
+    new_event = await store.get_event(season_id="2026-27", event_id=1)
+    assert old_event is not None
+    assert new_event is not None
+    assert old_event.name == "2025-26 Gameweek 1"
+    assert new_event.name == "2026-27 Gameweek 1"
+    current_season = await store.get_current_season()
+    assert current_season is not None
+    assert current_season.id == "2026-27"
+
+
+@pytest.mark.asyncio
 async def test_postgres_store_normalised_missing_reads_return_none() -> None:
     store = PostgresStore(pool=NormalisedPool())
-    assert await store.get_event(event_id=999) is None
-    assert await store.get_team(team_id=999) is None
-    assert await store.get_element(element_id=999) is None
-    assert await store.get_fixture(fixture_id=999) is None
-    assert await store.get_event_status() is None
-    assert await store.get_live_element(event_id=1, element_id=999) is None
+    assert await store.get_season(season_id="2099-00") is None
+    assert await store.get_event(season_id="2025-26", event_id=999) is None
+    assert await store.get_team(season_id="2025-26", team_id=999) is None
+    assert await store.get_element(season_id="2025-26", element_id=999) is None
+    assert await store.get_fixture(season_id="2025-26", fixture_id=999) is None
+    assert await store.get_event_status(season_id="2025-26") is None
+    assert (
+        await store.get_live_element(
+            season_id="2025-26",
+            event_id=1,
+            element_id=999,
+        )
+        is None
+    )

@@ -21,6 +21,7 @@ from fpl_data_relay.fpl_models import (
     LiveElementExplainStat,
     LiveElementStats,
     Phase,
+    Season,
     Team,
 )
 
@@ -41,5 +42,6 @@ __all__ = [
     "LiveElementExplainStat",
     "LiveElementStats",
     "Phase",
+    "Season",
     "Team",
 ]

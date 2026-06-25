@@ -27,6 +27,7 @@ from fpl_data_relay.upstream_models import (
     Fixture,
     LiveElement,
     Phase,
+    Season,
     Team,
 )
 
@@ -52,16 +53,17 @@ class FakeLock:
 class InMemoryStore:
     def __init__(self) -> None:
         self.resources: dict[ResourceKey, StoredResource] = {}
-        self.source_hashes: dict[ResourceKey, str] = {}
+        self.source_hashes: dict[tuple[str, ResourceKey, int | None], str] = {}
         self.events: list[ChangeEvent] = []
-        self.fpl_events: list[Event] = []
-        self.phases: list[Phase] = []
-        self.teams: list[Team] = []
-        self.element_types: list[ElementType] = []
-        self.elements: list[Element] = []
-        self.fixtures: dict[int, Fixture] = {}
-        self.event_status: EventStatusResponse | None = None
-        self.live_elements: dict[int, EventLiveResponse] = {}
+        self.seasons: dict[str, Season] = {}
+        self.fpl_events: dict[str, list[Event]] = {}
+        self.phases: dict[str, list[Phase]] = {}
+        self.teams: dict[str, list[Team]] = {}
+        self.element_types: dict[str, list[ElementType]] = {}
+        self.elements: dict[str, list[Element]] = {}
+        self.fixtures: dict[tuple[str, int], Fixture] = {}
+        self.event_status: dict[str, EventStatusResponse] = {}
+        self.live_elements: dict[tuple[str, int], EventLiveResponse] = {}
         self.locked = False
         self.schema_applied = False
         self.closed = False
@@ -76,14 +78,23 @@ class InMemoryStore:
     async def upsert_bootstrap(
         self,
         *,
+        season: Season,
         bootstrap: BootstrapStatic,
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
-        self.fpl_events = bootstrap.events
-        self.phases = bootstrap.phases
-        self.teams = bootstrap.teams
-        self.element_types = bootstrap.element_types
-        self.elements = bootstrap.elements
+        if season.id != metadata.season_id:
+            raise ValueError("Season id does not match ingestion metadata.")
+        if season.is_current:
+            self.seasons = {
+                season_id: existing.model_copy(update={"is_current": False})
+                for season_id, existing in self.seasons.items()
+            }
+        self.seasons[season.id] = season
+        self.fpl_events[season.id] = bootstrap.events
+        self.phases[season.id] = bootstrap.phases
+        self.teams[season.id] = bootstrap.teams
+        self.element_types[season.id] = bootstrap.element_types
+        self.elements[season.id] = bootstrap.elements
         return self._record_source(
             metadata=metadata,
             families=[
@@ -103,7 +114,7 @@ class InMemoryStore:
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
         for fixture in fixtures:
-            self.fixtures[fixture.id] = fixture
+            self.fixtures[(metadata.season_id, fixture.id)] = fixture
         return self._record_source(
             metadata=metadata,
             families=[EntityFamily.FIXTURES],
@@ -115,7 +126,7 @@ class InMemoryStore:
         status: EventStatusResponse,
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
-        self.event_status = status
+        self.event_status[metadata.season_id] = status
         return self._record_source(
             metadata=metadata,
             families=[EntityFamily.EVENT_STATUS],
@@ -128,68 +139,116 @@ class InMemoryStore:
         live: EventLiveResponse,
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
-        self.live_elements[event_id] = live
+        self.live_elements[(metadata.season_id, event_id)] = live
         return self._record_source(
             metadata=metadata,
             families=[EntityFamily.EVENT_LIVE],
         )
 
-    async def get_current_event(self) -> Event | None:
-        current_events = [event for event in self.fpl_events if event.is_current]
+    async def list_seasons(self) -> list[Season]:
+        return sorted(self.seasons.values(), key=lambda season: season.id)
+
+    async def get_current_season(self) -> Season | None:
+        current_seasons = [
+            season for season in self.seasons.values() if season.is_current
+        ]
+        if len(current_seasons) != 1:
+            return None
+        return current_seasons[0]
+
+    async def get_season(self, *, season_id: str) -> Season | None:
+        return self.seasons.get(season_id)
+
+    async def get_current_event(self, *, season_id: str) -> Event | None:
+        current_events = [
+            event for event in self.fpl_events.get(season_id, []) if event.is_current
+        ]
         if len(current_events) != 1:
             return None
         return current_events[0]
 
-    async def list_events(self) -> list[Event]:
-        return self.fpl_events
+    async def list_events(self, *, season_id: str) -> list[Event]:
+        return self.fpl_events.get(season_id, [])
 
-    async def get_event(self, *, event_id: int) -> Event | None:
-        return next((event for event in self.fpl_events if event.id == event_id), None)
-
-    async def list_phases(self) -> list[Phase]:
-        return self.phases
-
-    async def list_teams(self) -> list[Team]:
-        return self.teams
-
-    async def get_team(self, *, team_id: int) -> Team | None:
-        return next((team for team in self.teams if team.id == team_id), None)
-
-    async def list_element_types(self) -> list[ElementType]:
-        return self.element_types
-
-    async def list_elements(self) -> list[Element]:
-        return self.elements
-
-    async def get_element(self, *, element_id: int) -> Element | None:
+    async def get_event(self, *, season_id: str, event_id: int) -> Event | None:
         return next(
-            (element for element in self.elements if element.id == element_id),
+            (
+                event
+                for event in self.fpl_events.get(season_id, [])
+                if event.id == event_id
+            ),
             None,
         )
 
-    async def list_fixtures(self, *, event_id: int | None) -> list[Fixture]:
-        fixtures = list(self.fixtures.values())
+    async def list_phases(self, *, season_id: str) -> list[Phase]:
+        return self.phases.get(season_id, [])
+
+    async def list_teams(self, *, season_id: str) -> list[Team]:
+        return self.teams.get(season_id, [])
+
+    async def get_team(self, *, season_id: str, team_id: int) -> Team | None:
+        return next(
+            (team for team in self.teams.get(season_id, []) if team.id == team_id),
+            None,
+        )
+
+    async def list_element_types(self, *, season_id: str) -> list[ElementType]:
+        return self.element_types.get(season_id, [])
+
+    async def list_elements(self, *, season_id: str) -> list[Element]:
+        return self.elements.get(season_id, [])
+
+    async def get_element(self, *, season_id: str, element_id: int) -> Element | None:
+        return next(
+            (
+                element
+                for element in self.elements.get(season_id, [])
+                if element.id == element_id
+            ),
+            None,
+        )
+
+    async def list_fixtures(
+        self,
+        *,
+        season_id: str,
+        event_id: int | None,
+    ) -> list[Fixture]:
+        fixtures = [
+            fixture
+            for (fixture_season_id, _), fixture in self.fixtures.items()
+            if fixture_season_id == season_id
+        ]
         if event_id is None:
             return fixtures
         return [fixture for fixture in fixtures if fixture.event == event_id]
 
-    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
-        return self.fixtures.get(fixture_id)
+    async def get_fixture(self, *, season_id: str, fixture_id: int) -> Fixture | None:
+        return self.fixtures.get((season_id, fixture_id))
 
-    async def get_event_status(self) -> EventStatusResponse | None:
-        return self.event_status
+    async def get_event_status(self, *, season_id: str) -> EventStatusResponse | None:
+        return self.event_status.get(season_id)
 
-    async def list_live_elements(self, *, event_id: int) -> list[LiveElement]:
-        response = self.live_elements.get(event_id)
+    async def list_live_elements(
+        self,
+        *,
+        season_id: str,
+        event_id: int,
+    ) -> list[LiveElement]:
+        response = self.live_elements.get((season_id, event_id))
         return [] if response is None else response.elements
 
     async def get_live_element(
         self,
         *,
+        season_id: str,
         event_id: int,
         element_id: int,
     ) -> LiveElement | None:
-        elements = await self.list_live_elements(event_id=event_id)
+        elements = await self.list_live_elements(
+            season_id=season_id,
+            event_id=event_id,
+        )
         return next((element for element in elements if element.id == element_id), None)
 
     async def get_resource(
@@ -247,10 +306,11 @@ class InMemoryStore:
         families: list[EntityFamily],
     ) -> UpsertOutcome:
         resource_key = ResourceKey(metadata.source_key.value)
-        existing_hash = self.source_hashes.get(resource_key)
+        source_identity = (metadata.season_id, resource_key, metadata.event_id)
+        existing_hash = self.source_hashes.get(source_identity)
         if existing_hash == metadata.payload_hash:
             return UpsertOutcome(changed=False, change_events=[])
-        self.source_hashes[resource_key] = metadata.payload_hash
+        self.source_hashes[source_identity] = metadata.payload_hash
         self.resources[resource_key] = StoredResource(
             resource_key=resource_key,
             event_id=metadata.event_id,
@@ -263,6 +323,7 @@ class InMemoryStore:
         for family in families:
             event = ChangeEvent(
                 id=len(self.events) + 1,
+                season_id=metadata.season_id,
                 entity_family=family,
                 event_name=EVENT_NAMES[family],
                 source_key=metadata.source_key,
@@ -379,18 +440,27 @@ def bootstrap_payload(*, current_ids: list[int]) -> dict[str, object]:
             {
                 "id": event_id,
                 "name": f"Gameweek {event_id}",
+                "deadline_time": (
+                    "2025-08-15T17:30:00Z"
+                    if event_id == 1
+                    else "2026-05-24T13:30:00Z"
+                ),
                 "is_current": event_id in current_ids,
                 "unknown_event_field": "kept",
             }
             for event_id in [1, 2]
         ],
-        "teams": [{"id": 1, "name": "Team", "short_name": "TST"}],
+        "teams": [
+            {"id": 1, "name": "Team", "short_name": "TST"},
+            {"id": 2, "name": "Other Team", "short_name": "OTH"},
+        ],
         "elements": [
             {
                 "id": 1,
                 "first_name": "First",
                 "second_name": "Second",
                 "web_name": "Player",
+                "photo": "1.jpg",
                 "team": 1,
                 "element_type": 1,
             },

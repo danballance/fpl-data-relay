@@ -13,6 +13,7 @@ from fpl_data_relay.fpl_models import (
     EventLiveResponse,
     EventStatusResponse,
     Fixture,
+    Season,
 )
 from fpl_data_relay.hashing import payload_sha256
 from fpl_data_relay.resources import IngestionSourceKey
@@ -56,6 +57,7 @@ class IngestionResult(BaseModel):
 
     changed_count: int
     unchanged_count: int
+    season_id: str | None
     current_event_id: int | None
     has_active_fixture: bool
 
@@ -107,11 +109,14 @@ class IngestionService:
             self._client.fetch_bootstrap_static(),
             self._client.fetch_fixtures(),
         )
+        season = derive_season(bootstrap=bootstrap)
         current_event_id = select_current_event_id(bootstrap=bootstrap)
         outcomes = [
             await self._store.upsert_bootstrap(
+                season=season,
                 bootstrap=bootstrap,
                 metadata=metadata_for_payload(
+                    season_id=season.id,
                     source_key=IngestionSourceKey.BOOTSTRAP,
                     event_id=None,
                     payload=model_to_payload(model=bootstrap),
@@ -121,6 +126,7 @@ class IngestionService:
             await self._store.upsert_fixtures(
                 fixtures=fixtures,
                 metadata=metadata_for_payload(
+                    season_id=season.id,
                     source_key=IngestionSourceKey.FIXTURES,
                     event_id=None,
                     payload=model_to_payload(model=fixtures),
@@ -130,6 +136,7 @@ class IngestionService:
         ]
         return result_from_outcomes(
             outcomes=outcomes,
+            season_id=season.id,
             current_event_id=current_event_id,
             has_active_fixture=False,
         )
@@ -141,7 +148,7 @@ class IngestionService:
         fixture_id: int | None,
     ) -> IngestionResult:
         """Fetch and store live resources while a lock is already held."""
-        current_event_id = await self._resolve_live_target_event_id(
+        season, current_event_id = await self._resolve_live_target(
             target_event_id=target_event_id,
             fixture_id=fixture_id,
         )
@@ -155,6 +162,7 @@ class IngestionService:
             await self._store.upsert_event_status(
                 status=event_status,
                 metadata=metadata_for_payload(
+                    season_id=season.id,
                     source_key=IngestionSourceKey.EVENT_STATUS,
                     event_id=current_event_id,
                     payload=model_to_payload(model=event_status),
@@ -164,6 +172,7 @@ class IngestionService:
             await self._store.upsert_fixtures(
                 fixtures=current_fixtures,
                 metadata=metadata_for_payload(
+                    season_id=season.id,
                     source_key=IngestionSourceKey.CURRENT_FIXTURES,
                     event_id=current_event_id,
                     payload=model_to_payload(model=current_fixtures),
@@ -174,6 +183,7 @@ class IngestionService:
                 event_id=current_event_id,
                 live=event_live,
                 metadata=metadata_for_payload(
+                    season_id=season.id,
                     source_key=IngestionSourceKey.EVENT_LIVE,
                     event_id=current_event_id,
                     payload=model_to_payload(model=event_live),
@@ -183,23 +193,32 @@ class IngestionService:
         ]
         return result_from_outcomes(
             outcomes=outcomes,
+            season_id=season.id,
             current_event_id=current_event_id,
             has_active_fixture=has_active_fixture(fixtures=current_fixtures),
         )
 
-    async def _resolve_live_target_event_id(
+    async def _resolve_live_target(
         self,
         *,
         target_event_id: int | None,
         fixture_id: int | None,
-    ) -> int:
-        """Resolve CLI live-ingestion target options to an FPL event id."""
+    ) -> tuple[Season, int]:
+        """Resolve CLI live-ingestion target options to a season and event id."""
         if target_event_id is not None and fixture_id is not None:
             raise ValueError("Provide either target_event_id or fixture_id, not both.")
+        season = await self._store.get_current_season()
+        if season is None:
+            raise RuntimeError(
+                "Cannot ingest live resources before reference data exists.",
+            )
         if target_event_id is not None:
-            return target_event_id
+            return season, target_event_id
         if fixture_id is not None:
-            fixture = await self._store.get_fixture(fixture_id=fixture_id)
+            fixture = await self._store.get_fixture(
+                season_id=season.id,
+                fixture_id=fixture_id,
+            )
             if fixture is None:
                 raise RuntimeError(
                     f"Cannot ingest live resources for fixture {fixture_id}: "
@@ -210,13 +229,13 @@ class IngestionService:
                     f"Cannot ingest live resources for fixture {fixture_id}: "
                     "fixture has no event id.",
                 )
-            return fixture.event
-        current_event = await self._store.get_current_event()
+            return season, fixture.event
+        current_event = await self._store.get_current_event(season_id=season.id)
         if current_event is None:
             raise RuntimeError(
                 "Cannot ingest live resources before reference data exists.",
             )
-        return current_event.id
+        return season, current_event.id
 
 
 class IngestionRunner(Protocol):
@@ -314,6 +333,7 @@ class RelayScheduler:
             return IngestionResult(
                 changed_count=0,
                 unchanged_count=0,
+                season_id=None,
                 current_event_id=None,
                 has_active_fixture=False,
             )
@@ -326,6 +346,7 @@ def utc_now() -> datetime:
 
 def metadata_for_payload(
     *,
+    season_id: str,
     source_key: IngestionSourceKey,
     event_id: int | None,
     payload: object,
@@ -333,6 +354,7 @@ def metadata_for_payload(
 ) -> IngestionMetadata:
     """Create canonical hash metadata for a fetched upstream source."""
     return IngestionMetadata(
+        season_id=season_id,
         source_key=source_key,
         event_id=event_id,
         payload_hash=payload_sha256(payload=payload),
@@ -350,6 +372,39 @@ def select_current_event_id(*, bootstrap: BootstrapStatic) -> int:
     return current_events[0].id
 
 
+def derive_season(*, bootstrap: BootstrapStatic) -> Season:
+    """Derive the active FPL season from bootstrap event deadlines."""
+    if not bootstrap.events:
+        raise ValueError("Cannot derive FPL season without events.")
+    missing_deadline_ids = [
+        event.id for event in bootstrap.events if event.deadline_time is None
+    ]
+    if missing_deadline_ids:
+        joined_ids = ", ".join(str(event_id) for event_id in missing_deadline_ids)
+        raise ValueError(
+            "Cannot derive FPL season: event deadline_time missing for "
+            f"event id(s) {joined_ids}.",
+        )
+    deadlines = [event.deadline_time for event in bootstrap.events]
+    first_deadline = min(deadlines)
+    last_deadline = max(deadlines)
+    if first_deadline.year + 1 != last_deadline.year:
+        raise ValueError(
+            "Cannot derive FPL season: first and last deadlines do not span "
+            "exactly two adjacent years.",
+        )
+    start_year = first_deadline.year
+    end_year = last_deadline.year
+    return Season(
+        id=f"{start_year}-{end_year % 100:02d}",
+        start_year=start_year,
+        end_year=end_year,
+        first_deadline_time=first_deadline,
+        last_deadline_time=last_deadline,
+        is_current=True,
+    )
+
+
 def has_active_fixture(*, fixtures: list[Fixture]) -> bool:
     """Return whether any current fixture is started but not finished."""
     return any(fixture.started and not fixture.finished for fixture in fixtures)
@@ -358,6 +413,7 @@ def has_active_fixture(*, fixtures: list[Fixture]) -> bool:
 def result_from_outcomes(
     *,
     outcomes: list[UpsertOutcome],
+    season_id: str | None,
     current_event_id: int | None,
     has_active_fixture: bool,
 ) -> IngestionResult:
@@ -367,6 +423,7 @@ def result_from_outcomes(
     return IngestionResult(
         changed_count=changed_count,
         unchanged_count=unchanged_count,
+        season_id=season_id,
         current_event_id=current_event_id,
         has_active_fixture=has_active_fixture,
     )
@@ -381,6 +438,7 @@ def combine_results(
     return IngestionResult(
         changed_count=first.changed_count + second.changed_count,
         unchanged_count=first.unchanged_count + second.unchanged_count,
+        season_id=second.season_id if second.season_id is not None else first.season_id,
         current_event_id=second.current_event_id,
         has_active_fixture=second.has_active_fixture,
     )

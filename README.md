@@ -2,8 +2,8 @@
 
 Self-hosted Python relay for public Fantasy Premier League data. The service
 fetches core FPL API documents, validates them with explicit Pydantic models,
-stores the latest state as normalised Postgres entities, exposes entity-oriented
-REST endpoints, and streams stored change events over SSE.
+stores season-scoped state as normalised Postgres entities, exposes
+entity-oriented REST endpoints, and streams stored change events over SSE.
 
 ## Local Commands
 
@@ -17,9 +17,10 @@ uv run fpl-relay ingest live
 uv run fpl-relay serve
 ```
 
-Live ingestion defaults to the current FPL event/gameweek stored from reference
-data. You can target another event directly, or resolve the event from a stored
-fixture:
+Reference ingestion derives the current season id from FPL event deadlines, for
+example `2025-26`. Live ingestion defaults to that current season and its
+current FPL event/gameweek. You can target another event in the current season
+directly, or resolve the event from a stored fixture:
 
 ```fish
 uv run fpl-relay ingest live --target-id 5

@@ -27,6 +27,7 @@ from fpl_data_relay.fpl_models import (
     LiveElementExplainStat,
     LiveElementStats,
     Phase,
+    Season,
     Team,
 )
 from fpl_data_relay.hashing import parse_json_payload, payload_sha256
@@ -94,6 +95,7 @@ class IngestionMetadata(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    season_id: str
     source_key: IngestionSourceKey
     event_id: int | None
     payload_hash: str
@@ -115,6 +117,7 @@ class ChangeEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: int
+    season_id: str | None = None
     entity_family: EntityFamily = EntityFamily.EVENTS
     event_name: str
     source_key: IngestionSourceKey | None = None
@@ -128,6 +131,7 @@ class ChangeEvent(BaseModel):
         """Serialize change-event metadata for the REST API."""
         return {
             "id": self.id,
+            "season_id": self.season_id,
             "entity_family": self.entity_family.value,
             "event_name": self.event_name,
             "source_key": None if self.source_key is None else self.source_key.value,
@@ -156,6 +160,7 @@ class StoredSourceMetadata(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    season_id: str
     source_key: IngestionSourceKey
     event_id: int | None
     payload_hash: str
@@ -238,6 +243,7 @@ class FplStore(Protocol):
     async def upsert_bootstrap(
         self,
         *,
+        season: Season,
         bootstrap: BootstrapStatic,
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
@@ -272,61 +278,84 @@ class FplStore(Protocol):
         """Upsert live element rows for one event."""
         ...
 
-    async def get_current_event(self) -> Event | None:
-        """Return the single current event, if reference data exists."""
+    async def list_seasons(self) -> list[Season]:
+        """Return all seasons."""
         ...
 
-    async def list_events(self) -> list[Event]:
+    async def get_current_season(self) -> Season | None:
+        """Return the current season, if reference data exists."""
+        ...
+
+    async def get_season(self, *, season_id: str) -> Season | None:
+        """Return one season."""
+        ...
+
+    async def get_current_event(self, *, season_id: str) -> Event | None:
+        """Return the current event for one season, if reference data exists."""
+        ...
+
+    async def list_events(self, *, season_id: str) -> list[Event]:
         """Return all events."""
         ...
 
-    async def get_event(self, *, event_id: int) -> Event | None:
+    async def get_event(self, *, season_id: str, event_id: int) -> Event | None:
         """Return one event."""
         ...
 
-    async def list_phases(self) -> list[Phase]:
+    async def list_phases(self, *, season_id: str) -> list[Phase]:
         """Return all phases."""
         ...
 
-    async def list_teams(self) -> list[Team]:
+    async def list_teams(self, *, season_id: str) -> list[Team]:
         """Return all teams."""
         ...
 
-    async def get_team(self, *, team_id: int) -> Team | None:
+    async def get_team(self, *, season_id: str, team_id: int) -> Team | None:
         """Return one team."""
         ...
 
-    async def list_element_types(self) -> list[ElementType]:
+    async def list_element_types(self, *, season_id: str) -> list[ElementType]:
         """Return all element types."""
         ...
 
-    async def list_elements(self) -> list[Element]:
+    async def list_elements(self, *, season_id: str) -> list[Element]:
         """Return all elements."""
         ...
 
-    async def get_element(self, *, element_id: int) -> Element | None:
+    async def get_element(self, *, season_id: str, element_id: int) -> Element | None:
         """Return one element."""
         ...
 
-    async def list_fixtures(self, *, event_id: int | None) -> list[Fixture]:
+    async def list_fixtures(
+        self,
+        *,
+        season_id: str,
+        event_id: int | None,
+    ) -> list[Fixture]:
         """Return fixtures, optionally filtered by event id."""
         ...
 
-    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
+    async def get_fixture(self, *, season_id: str, fixture_id: int) -> Fixture | None:
         """Return one fixture with nested stat entries."""
         ...
 
-    async def get_event_status(self) -> EventStatusResponse | None:
+    async def get_event_status(self, *, season_id: str) -> EventStatusResponse | None:
         """Return the latest event-status aggregate."""
         ...
 
-    async def list_live_elements(self, *, event_id: int) -> list[LiveElement]:
+    async def list_live_elements(
+        self,
+        *,
+        season_id: str,
+        event_id: int,
+    ) -> list[LiveElement]:
         """Return live element rows for one event."""
         ...
 
     async def get_live_element(
         self,
         *,
+        season_id: str,
         event_id: int,
         element_id: int,
     ) -> LiveElement | None:
@@ -392,6 +421,7 @@ class PostgresStore(FplStore):
     async def upsert_bootstrap(
         self,
         *,
+        season: Season,
         bootstrap: BootstrapStatic,
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
@@ -407,47 +437,81 @@ class PostgresStore(FplStore):
         async with self._pool.acquire() as connection, connection.transaction():
             if await source_is_unchanged(connection=connection, metadata=metadata):
                 return UpsertOutcome(changed=False, change_events=[])
+            if season.id != metadata.season_id:
+                raise ValueError("Season id does not match ingestion metadata.")
+            await connection.execute(
+                """
+                UPDATE fpl_seasons
+                SET is_current = false, row_hash = '', updated_at = now()
+                WHERE id != $1 AND is_current = true
+                """,
+                season.id,
+            )
+            await upsert_model_row(
+                connection=connection,
+                table="fpl_seasons",
+                key_columns=["id"],
+                values=season.model_dump(),
+            )
             for event in bootstrap.events:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_events",
-                    key_columns=["id"],
-                    values=event.model_dump(),
+                    key_columns=["season_id", "id"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=event.model_dump(),
+                    ),
                 )
             for phase in bootstrap.phases:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_phases",
-                    key_columns=["id"],
-                    values=phase.model_dump(),
+                    key_columns=["season_id", "id"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=phase.model_dump(),
+                    ),
                 )
             for team in bootstrap.teams:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_teams",
-                    key_columns=["id"],
-                    values=team.model_dump(),
+                    key_columns=["season_id", "id"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=team.model_dump(),
+                    ),
                 )
             for element_type in bootstrap.element_types:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_element_types",
-                    key_columns=["id"],
-                    values=element_type.model_dump(),
+                    key_columns=["season_id", "id"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=element_type.model_dump(),
+                    ),
                 )
             for stat in bootstrap.element_stats:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_element_stat_definitions",
-                    key_columns=["name"],
-                    values=stat.model_dump(),
+                    key_columns=["season_id", "name"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=stat.model_dump(),
+                    ),
                 )
             for element in bootstrap.elements:
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_elements",
-                    key_columns=["id"],
-                    values=element.model_dump(),
+                    key_columns=["season_id", "id"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=element.model_dump(),
+                    ),
                 )
             await upsert_source_metadata(connection=connection, metadata=metadata)
             events = await insert_change_events(
@@ -468,19 +532,27 @@ class PostgresStore(FplStore):
             if await source_is_unchanged(connection=connection, metadata=metadata):
                 return UpsertOutcome(changed=False, change_events=[])
             for fixture in fixtures:
-                fixture_values = fixture.model_dump(exclude={"stats"})
+                fixture_values = values_for_season(
+                    season_id=metadata.season_id,
+                    values=fixture.model_dump(exclude={"stats"}),
+                )
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_fixtures",
-                    key_columns=["id"],
+                    key_columns=["season_id", "id"],
                     values=fixture_values,
                 )
                 await connection.execute(
-                    "DELETE FROM fpl_fixture_stat_entries WHERE fixture_id = $1",
+                    """
+                    DELETE FROM fpl_fixture_stat_entries
+                    WHERE season_id = $1 AND fixture_id = $2
+                    """,
+                    metadata.season_id,
                     fixture.id,
                 )
                 await insert_fixture_stat_entries(
                     connection=connection,
+                    season_id=metadata.season_id,
                     fixture=fixture,
                 )
             await upsert_source_metadata(connection=connection, metadata=metadata)
@@ -504,10 +576,10 @@ class PostgresStore(FplStore):
             await connection.execute(
                 """
                 INSERT INTO fpl_event_status (
-                    id, leagues, payload_hash, fetched_at, checked_at
+                    season_id, leagues, payload_hash, fetched_at, checked_at
                 )
-                VALUES (true, $1, $2, $3, $4)
-                ON CONFLICT (id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (season_id)
                 DO UPDATE SET
                     leagues = EXCLUDED.leagues,
                     payload_hash = EXCLUDED.payload_hash,
@@ -515,6 +587,7 @@ class PostgresStore(FplStore):
                     checked_at = EXCLUDED.checked_at,
                     updated_at = now()
                 """,
+                metadata.season_id,
                 status.leagues,
                 metadata.payload_hash,
                 metadata.fetched_at,
@@ -524,8 +597,11 @@ class PostgresStore(FplStore):
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_event_status_days",
-                    key_columns=["event", "date"],
-                    values=day.model_dump(),
+                    key_columns=["season_id", "event", "date"],
+                    values=values_for_season(
+                        season_id=metadata.season_id,
+                        values=day.model_dump(),
+                    ),
                 )
             await upsert_source_metadata(connection=connection, metadata=metadata)
             events = await insert_change_events(
@@ -547,21 +623,27 @@ class PostgresStore(FplStore):
             if await source_is_unchanged(connection=connection, metadata=metadata):
                 return UpsertOutcome(changed=False, change_events=[])
             await connection.execute(
-                "DELETE FROM fpl_event_live_elements WHERE event_id = $1",
+                """
+                DELETE FROM fpl_event_live_elements
+                WHERE season_id = $1 AND event_id = $2
+                """,
+                metadata.season_id,
                 event_id,
             )
             for live_element in live.elements:
                 values = live_element.stats.model_dump()
+                values["season_id"] = metadata.season_id
                 values["event_id"] = event_id
                 values["element_id"] = live_element.id
                 await upsert_model_row(
                     connection=connection,
                     table="fpl_event_live_elements",
-                    key_columns=["event_id", "element_id"],
+                    key_columns=["season_id", "event_id", "element_id"],
                     values=values,
                 )
                 await insert_live_explain_stats(
                     connection=connection,
+                    season_id=metadata.season_id,
                     event_id=event_id,
                     live_element=live_element,
                 )
@@ -573,100 +655,147 @@ class PostgresStore(FplStore):
             )
             return UpsertOutcome(changed=True, change_events=events)
 
-    async def get_current_event(self) -> Event | None:
-        """Return the single current event, if available."""
+    async def list_seasons(self) -> list[Season]:
+        """Return all seasons ordered by id."""
+        return await self._fetch_models(
+            query="SELECT * FROM fpl_seasons ORDER BY id",
+            converter=season_from_row,
+        )
+
+    async def get_current_season(self) -> Season | None:
+        """Return the single current season, if available."""
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM fpl_events WHERE is_current = true",
+                "SELECT * FROM fpl_seasons WHERE is_current = true",
+            )
+        return None if row is None else season_from_row(row=row)
+
+    async def get_season(self, *, season_id: str) -> Season | None:
+        """Return one season by id."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM fpl_seasons WHERE id = $1",
+                season_id,
+            )
+        return None if row is None else season_from_row(row=row)
+
+    async def get_current_event(self, *, season_id: str) -> Event | None:
+        """Return the single current event for a season, if available."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT * FROM fpl_events
+                WHERE season_id = $1 AND is_current = true
+                """,
+                season_id,
             )
         return None if row is None else event_from_row(row=row)
 
-    async def list_events(self) -> list[Event]:
+    async def list_events(self, *, season_id: str) -> list[Event]:
         """Return all events ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_events ORDER BY id",
+            query="SELECT * FROM fpl_events WHERE season_id = $1 ORDER BY id",
             converter=event_from_row,
+            arguments=(season_id,),
         )
 
-    async def get_event(self, *, event_id: int) -> Event | None:
+    async def get_event(self, *, season_id: str, event_id: int) -> Event | None:
         """Return one event by id."""
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM fpl_events WHERE id = $1",
+                "SELECT * FROM fpl_events WHERE season_id = $1 AND id = $2",
+                season_id,
                 event_id,
             )
         return None if row is None else event_from_row(row=row)
 
-    async def list_phases(self) -> list[Phase]:
+    async def list_phases(self, *, season_id: str) -> list[Phase]:
         """Return all phases ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_phases ORDER BY id",
+            query="SELECT * FROM fpl_phases WHERE season_id = $1 ORDER BY id",
             converter=phase_from_row,
+            arguments=(season_id,),
         )
 
-    async def list_teams(self) -> list[Team]:
+    async def list_teams(self, *, season_id: str) -> list[Team]:
         """Return all teams ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_teams ORDER BY id",
+            query="SELECT * FROM fpl_teams WHERE season_id = $1 ORDER BY id",
             converter=team_from_row,
+            arguments=(season_id,),
         )
 
-    async def get_team(self, *, team_id: int) -> Team | None:
+    async def get_team(self, *, season_id: str, team_id: int) -> Team | None:
         """Return one team by id."""
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM fpl_teams WHERE id = $1",
+                "SELECT * FROM fpl_teams WHERE season_id = $1 AND id = $2",
+                season_id,
                 team_id,
             )
         return None if row is None else team_from_row(row=row)
 
-    async def list_element_types(self) -> list[ElementType]:
+    async def list_element_types(self, *, season_id: str) -> list[ElementType]:
         """Return all element types ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_element_types ORDER BY id",
+            query="SELECT * FROM fpl_element_types WHERE season_id = $1 ORDER BY id",
             converter=element_type_from_row,
+            arguments=(season_id,),
         )
 
-    async def list_elements(self) -> list[Element]:
+    async def list_elements(self, *, season_id: str) -> list[Element]:
         """Return all elements ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_elements ORDER BY id",
+            query="SELECT * FROM fpl_elements WHERE season_id = $1 ORDER BY id",
             converter=element_from_row,
+            arguments=(season_id,),
         )
 
-    async def get_element(self, *, element_id: int) -> Element | None:
+    async def get_element(self, *, season_id: str, element_id: int) -> Element | None:
         """Return one element by id."""
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM fpl_elements WHERE id = $1",
+                "SELECT * FROM fpl_elements WHERE season_id = $1 AND id = $2",
+                season_id,
                 element_id,
             )
         return None if row is None else element_from_row(row=row)
 
-    async def list_fixtures(self, *, event_id: int | None) -> list[Fixture]:
+    async def list_fixtures(
+        self,
+        *,
+        season_id: str,
+        event_id: int | None,
+    ) -> list[Fixture]:
         """Return fixtures with their nested stat entries."""
         if event_id is None:
-            query = "SELECT * FROM fpl_fixtures ORDER BY id"
-            arguments: tuple[object, ...] = ()
+            query = "SELECT * FROM fpl_fixtures WHERE season_id = $1 ORDER BY id"
+            arguments: tuple[object, ...] = (season_id,)
         else:
-            query = "SELECT * FROM fpl_fixtures WHERE event = $1 ORDER BY id"
-            arguments = (event_id,)
+            query = """
+                SELECT * FROM fpl_fixtures
+                WHERE season_id = $1 AND event = $2
+                ORDER BY id
+            """
+            arguments = (season_id, event_id)
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, *arguments)
             fixtures = [fixture_from_row(row=row) for row in rows]
             for index, fixture in enumerate(fixtures):
                 stats = await fetch_fixture_stats(
                     connection=connection,
+                    season_id=season_id,
                     fixture_id=fixture.id,
                 )
                 fixtures[index] = fixture.model_copy(update={"stats": stats})
         return fixtures
 
-    async def get_fixture(self, *, fixture_id: int) -> Fixture | None:
+    async def get_fixture(self, *, season_id: str, fixture_id: int) -> Fixture | None:
         """Return one fixture with its nested stat entries."""
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM fpl_fixtures WHERE id = $1",
+                "SELECT * FROM fpl_fixtures WHERE season_id = $1 AND id = $2",
+                season_id,
                 fixture_id,
             )
             if row is None:
@@ -674,18 +803,27 @@ class PostgresStore(FplStore):
             fixture = fixture_from_row(row=row)
             stats = await fetch_fixture_stats(
                 connection=connection,
+                season_id=season_id,
                 fixture_id=fixture.id,
             )
         return fixture.model_copy(update={"stats": stats})
 
-    async def get_event_status(self) -> EventStatusResponse | None:
+    async def get_event_status(self, *, season_id: str) -> EventStatusResponse | None:
         """Return latest event status aggregate, if ingested."""
         async with self._pool.acquire() as connection:
-            status_row = await connection.fetchrow("SELECT * FROM fpl_event_status")
+            status_row = await connection.fetchrow(
+                "SELECT * FROM fpl_event_status WHERE season_id = $1",
+                season_id,
+            )
             if status_row is None:
                 return None
             day_rows = await connection.fetch(
-                "SELECT * FROM fpl_event_status_days ORDER BY date, event",
+                """
+                SELECT * FROM fpl_event_status_days
+                WHERE season_id = $1
+                ORDER BY date, event
+                """,
+                season_id,
             )
         status_values = row_values(row=status_row)
         return EventStatusResponse(
@@ -693,15 +831,21 @@ class PostgresStore(FplStore):
             status=[event_status_day_from_row(row=row) for row in day_rows],
         )
 
-    async def list_live_elements(self, *, event_id: int) -> list[LiveElement]:
+    async def list_live_elements(
+        self,
+        *,
+        season_id: str,
+        event_id: int,
+    ) -> list[LiveElement]:
         """Return live elements with explanations for one event."""
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(
                 """
                 SELECT * FROM fpl_event_live_elements
-                WHERE event_id = $1
+                WHERE season_id = $1 AND event_id = $2
                 ORDER BY element_id
                 """,
+                season_id,
                 event_id,
             )
             return [
@@ -715,6 +859,7 @@ class PostgresStore(FplStore):
     async def get_live_element(
         self,
         *,
+        season_id: str,
         event_id: int,
         element_id: int,
     ) -> LiveElement | None:
@@ -723,8 +868,9 @@ class PostgresStore(FplStore):
             row = await connection.fetchrow(
                 """
                 SELECT * FROM fpl_event_live_elements
-                WHERE event_id = $1 AND element_id = $2
+                WHERE season_id = $1 AND event_id = $2 AND element_id = $3
                 """,
+                season_id,
                 event_id,
                 element_id,
             )
@@ -835,8 +981,8 @@ class PostgresStore(FplStore):
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(
                 """
-                SELECT id, entity_family, event_name, source_key, event_id,
-                       payload_hash, fetched_at, created_at
+                SELECT id, season_id, entity_family, event_name, source_key,
+                       resource_key, event_id, payload_hash, fetched_at, created_at
                 FROM relay_change_events
                 WHERE id > $1
                 ORDER BY id ASC
@@ -911,9 +1057,10 @@ class PostgresStore(FplStore):
         *,
         query: str,
         converter: Callable[..., ModelT],
+        arguments: tuple[object, ...] = (),
     ) -> list[ModelT]:
         async with self._pool.acquire() as connection:
-            rows = await connection.fetch(query)
+            rows = await connection.fetch(query, *arguments)
         return [converter(row=row) for row in rows]
 
 
@@ -924,18 +1071,30 @@ async def source_is_unchanged(
 ) -> bool:
     """Return whether source hash is unchanged, updating checked_at when it is."""
     existing_hash = await connection.fetchval(
-        "SELECT payload_hash FROM relay_ingestion_sources WHERE source_key = $1",
+        """
+        SELECT payload_hash
+        FROM relay_ingestion_sources
+        WHERE season_id = $1
+          AND source_key = $2
+          AND event_id IS NOT DISTINCT FROM $3
+        """,
+        metadata.season_id,
         metadata.source_key.value,
+        metadata.event_id,
     )
     if existing_hash != metadata.payload_hash:
         return False
     await connection.execute(
         """
         UPDATE relay_ingestion_sources
-        SET checked_at = $2, updated_at = now()
-        WHERE source_key = $1
+        SET checked_at = $4, updated_at = now()
+        WHERE season_id = $1
+          AND source_key = $2
+          AND event_id IS NOT DISTINCT FROM $3
         """,
+        metadata.season_id,
         metadata.source_key.value,
+        metadata.event_id,
         metadata.checked_at,
     )
     return True
@@ -950,10 +1109,10 @@ async def upsert_source_metadata(
     await connection.execute(
         """
         INSERT INTO relay_ingestion_sources (
-            source_key, event_id, payload_hash, fetched_at, checked_at
+            season_id, source_key, event_id, payload_hash, fetched_at, checked_at
         )
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (source_key)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (season_id, source_key, (COALESCE(event_id, 0)))
         DO UPDATE SET
             event_id = EXCLUDED.event_id,
             payload_hash = EXCLUDED.payload_hash,
@@ -961,6 +1120,7 @@ async def upsert_source_metadata(
             checked_at = EXCLUDED.checked_at,
             updated_at = now()
         """,
+        metadata.season_id,
         metadata.source_key.value,
         metadata.event_id,
         metadata.payload_hash,
@@ -981,13 +1141,14 @@ async def insert_change_events(
         row = await connection.fetchrow(
             """
             INSERT INTO relay_change_events (
-                entity_family, event_name, source_key, event_id,
+                season_id, entity_family, event_name, source_key, event_id,
                 payload_hash, fetched_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, entity_family, event_name, source_key, event_id,
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, season_id, entity_family, event_name, source_key, event_id,
                       payload_hash, fetched_at, created_at
             """,
+            metadata.season_id,
             family.value,
             EVENT_NAMES[family],
             metadata.source_key.value,
@@ -1038,9 +1199,19 @@ async def upsert_model_row(
     await connection.execute(query, *[cleaned_values[column] for column in columns])
 
 
+def values_for_season(
+    *,
+    season_id: str,
+    values: dict[str, object],
+) -> dict[str, object]:
+    """Return model values with the storage season key prepended."""
+    return {"season_id": season_id, **values}
+
+
 async def insert_fixture_stat_entries(
     *,
     connection: ConnectionProtocol,
+    season_id: str,
     fixture: Fixture,
 ) -> None:
     """Insert normalised fixture stat entries for one fixture."""
@@ -1051,11 +1222,12 @@ async def insert_fixture_stat_entries(
                 await connection.execute(
                     """
                     INSERT INTO fpl_fixture_stat_entries (
-                        fixture_id, identifier, side, ordinal, element,
+                        season_id, fixture_id, identifier, side, ordinal, element,
                         value_text, value_type
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     """,
+                    season_id,
                     fixture.id,
                     stat.identifier,
                     side,
@@ -1069,6 +1241,7 @@ async def insert_fixture_stat_entries(
 async def insert_live_explain_stats(
     *,
     connection: ConnectionProtocol,
+    season_id: str,
     event_id: int,
     live_element: LiveElement,
 ) -> None:
@@ -1079,11 +1252,12 @@ async def insert_live_explain_stats(
             await connection.execute(
                 """
                 INSERT INTO fpl_event_live_explain_stats (
-                    event_id, element_id, fixture_id, identifier, ordinal,
+                    season_id, event_id, element_id, fixture_id, identifier, ordinal,
                     points, value_text, value_type
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
+                season_id,
                 event_id,
                 live_element.id,
                 explain.fixture,
@@ -1141,15 +1315,17 @@ def text_and_type_to_scalar(*, value_text: str | None, value_type: str) -> StatS
 async def fetch_fixture_stats(
     *,
     connection: ConnectionProtocol,
+    season_id: str,
     fixture_id: int,
 ) -> list[FixtureStat]:
     """Fetch nested fixture stats for one fixture."""
     rows = await connection.fetch(
         """
         SELECT * FROM fpl_fixture_stat_entries
-        WHERE fixture_id = $1
+        WHERE season_id = $1 AND fixture_id = $2
         ORDER BY identifier, side, ordinal
         """,
+        season_id,
         fixture_id,
     )
     grouped: dict[str, dict[str, list[FixtureStatEntry]]] = {}
@@ -1179,14 +1355,16 @@ async def live_element_from_row(
 ) -> LiveElement:
     """Build a live element model from row plus explanation stats."""
     values = row_values(row=row)
+    season_id = require_str(values=values, key="season_id")
     event_id = require_int(values=values, key="event_id")
     element_id = require_int(values=values, key="element_id")
     rows = await connection.fetch(
         """
         SELECT * FROM fpl_event_live_explain_stats
-        WHERE event_id = $1 AND element_id = $2
+        WHERE season_id = $1 AND event_id = $2 AND element_id = $3
         ORDER BY fixture_id, identifier, ordinal
         """,
+        season_id,
         event_id,
         element_id,
     )
@@ -1240,6 +1418,11 @@ def change_event_from_row(*, row: object) -> ChangeEvent:
     )
     return ChangeEvent(
         id=require_int(values=values, key="id"),
+        season_id=(
+            None
+            if values.get("season_id") is None
+            else require_str(values=values, key="season_id")
+        ),
         entity_family=entity_family,
         event_name=require_str(values=values, key="event_name"),
         source_key=(
@@ -1258,6 +1441,11 @@ def change_event_from_row(*, row: object) -> ChangeEvent:
 def event_from_row(*, row: object) -> Event:
     """Convert a row to Event."""
     return Event.model_validate(filter_row_values(values=row_values(row=row)))
+
+
+def season_from_row(*, row: object) -> Season:
+    """Convert a row to Season."""
+    return Season.model_validate(filter_row_values(values=row_values(row=row)))
 
 
 def phase_from_row(*, row: object) -> Phase:
