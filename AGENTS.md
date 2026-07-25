@@ -13,7 +13,7 @@
 - The shell is `fish`
 - All commands must be run via uv, i.e.: `uv run $COMMAND`
 - The project uses git, but you are never required to commit anything
-- The python package is located in ./fpl_data_relay/
+- The python package is located in ./src/fpl_data_relay/
 - The unit tests are located in ./tests/
 - Documentation for the project lives in ./docs/
 - Agentic tasks and supporting resources live in ./.tasks/
@@ -24,7 +24,7 @@
 - All code must be fully typed and use ty: `uv run ty check`
 - Always use Pydantic for types instead of dataclasses
 - Avoid vague dict types and prefer either a pydantic BaseModel or at least a TypedDict
-- All code must be covered by unit tests and project coverage must always be greater than 90%: `uv run pytest --cov ./fpl_data_relay/ tests`
+- All code must be covered by unit tests and project coverage must always be greater than 90%: `uv run pytest --cov ./src/fpl_data_relay tests`
 - Pytest tests must be written in the function-based style - no test classes please!
 - Lean into interfaces - i.e. Protocol and ABC where it makes sense
 - Avoid args, kwargs etc whenever possible

@@ -48,11 +48,13 @@ docker compose run --rm app uv run --no-dev fpl-relay ingest live
 
 See [docs/deployment.md](docs/deployment.md) for production command examples.
 See [docs/api.md](docs/api.md) for the exposed HTTP API.
+See [docs/architecture.md](docs/architecture.md) for package boundaries.
 
 ## Checks
 
 ```fish
 uv run ruff check
 uv run ty check
-uv run python -m pytest --cov ./fpl_data_relay/ tests
+uv run lint-imports
+uv run python -m pytest --cov ./src/fpl_data_relay tests
 ```

@@ -6,7 +6,7 @@ ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 
 COPY pyproject.toml uv.lock README.md ./
-COPY fpl_data_relay ./fpl_data_relay
+COPY src ./src
 
 RUN uv sync --frozen --no-dev
 

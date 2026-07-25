@@ -6,26 +6,27 @@ from typing import cast
 
 import pytest
 
-from fpl_data_relay.json_types import JsonValue
-from fpl_data_relay.resources import EVENT_NAMES, EntityFamily, ResourceKey
-from fpl_data_relay.schemas import SCHEMA_VERSION
-from fpl_data_relay.store import (
+from fpl_data_relay.adapters.outbound.postgres.database import IngestionLockError
+from fpl_data_relay.application.database import SCHEMA_VERSION
+from fpl_data_relay.domain.changes import (
+    EVENT_NAMES,
     ChangeEvent,
-    IngestionLockError,
+    EntityFamily,
     IngestionMetadata,
-    ResourceWrite,
-    StoredResource,
+    IngestionSourceKey,
     UpsertOutcome,
 )
-from fpl_data_relay.upstream_models import (
+from fpl_data_relay.domain.fixtures import Fixture
+from fpl_data_relay.domain.live import (
+    EventLiveResponse,
+    EventStatusResponse,
+    LiveElement,
+)
+from fpl_data_relay.domain.reference import (
     BootstrapStatic,
     Element,
     ElementType,
     Event,
-    EventLiveResponse,
-    EventStatusResponse,
-    Fixture,
-    LiveElement,
     Phase,
     Season,
     Team,
@@ -52,8 +53,10 @@ class FakeLock:
 
 class InMemoryStore:
     def __init__(self) -> None:
-        self.resources: dict[ResourceKey, StoredResource] = {}
-        self.source_hashes: dict[tuple[str, ResourceKey, int | None], str] = {}
+        self.source_hashes: dict[
+            tuple[str, IngestionSourceKey, int | None],
+            str,
+        ] = {}
         self.events: list[ChangeEvent] = []
         self.seasons: dict[str, Season] = {}
         self.fpl_events: dict[str, list[Event]] = {}
@@ -251,13 +254,6 @@ class InMemoryStore:
         )
         return next((element for element in elements if element.id == element_id), None)
 
-    async def get_resource(
-        self,
-        *,
-        resource_key: ResourceKey,
-    ) -> StoredResource | None:
-        return self.resources.get(resource_key)
-
     async def list_change_events(
         self,
         *,
@@ -266,59 +262,21 @@ class InMemoryStore:
     ) -> list[ChangeEvent]:
         return [event for event in self.events if event.id > after_id][:limit]
 
-    async def upsert_resource(self, *, resource: ResourceWrite) -> UpsertOutcome:
-        existing = self.resources.get(resource.resource_key)
-        if existing is not None and existing.payload_hash == resource.payload_hash:
-            self.resources[resource.resource_key] = StoredResource(
-                resource_key=existing.resource_key,
-                event_id=existing.event_id,
-                payload=existing.payload,
-                payload_hash=existing.payload_hash,
-                fetched_at=existing.fetched_at,
-                checked_at=resource.checked_at,
-            )
-            return UpsertOutcome(changed=False, change_event=None)
-        stored = StoredResource(
-            resource_key=resource.resource_key,
-            event_id=resource.event_id,
-            payload=cast("JsonValue", resource.payload),
-            payload_hash=resource.payload_hash,
-            fetched_at=resource.fetched_at,
-            checked_at=resource.checked_at,
-        )
-        self.resources[resource.resource_key] = stored
-        event = ChangeEvent(
-            id=len(self.events) + 1,
-            resource_key=resource.resource_key,
-            event_name=resource.event_name,
-            event_id=resource.event_id,
-            payload_hash=resource.payload_hash,
-            fetched_at=resource.fetched_at,
-            created_at=datetime.now(tz=UTC),
-        )
-        self.events.append(event)
-        return UpsertOutcome(changed=True, change_event=event)
-
     def _record_source(
         self,
         *,
         metadata: IngestionMetadata,
         families: list[EntityFamily],
     ) -> UpsertOutcome:
-        resource_key = ResourceKey(metadata.source_key.value)
-        source_identity = (metadata.season_id, resource_key, metadata.event_id)
+        source_identity = (
+            metadata.season_id,
+            metadata.source_key,
+            metadata.event_id,
+        )
         existing_hash = self.source_hashes.get(source_identity)
         if existing_hash == metadata.payload_hash:
             return UpsertOutcome(changed=False, change_events=[])
         self.source_hashes[source_identity] = metadata.payload_hash
-        self.resources[resource_key] = StoredResource(
-            resource_key=resource_key,
-            event_id=metadata.event_id,
-            payload=cast("JsonValue", {"source_key": resource_key.value}),
-            payload_hash=metadata.payload_hash,
-            fetched_at=metadata.fetched_at,
-            checked_at=metadata.checked_at,
-        )
         events: list[ChangeEvent] = []
         for family in families:
             event = ChangeEvent(
@@ -327,7 +285,7 @@ class InMemoryStore:
                 entity_family=family,
                 event_name=EVENT_NAMES[family],
                 source_key=metadata.source_key,
-                resource_key=resource_key,
+                resource_key=metadata.source_key,
                 event_id=metadata.event_id,
                 payload_hash=metadata.payload_hash,
                 fetched_at=metadata.fetched_at,
@@ -338,7 +296,6 @@ class InMemoryStore:
         return UpsertOutcome(
             changed=True,
             change_events=events,
-            change_event=events[0],
         )
 
     def ingestion_lock(self) -> FakeLock:
@@ -361,7 +318,7 @@ class InMemoryStore:
 
 class FakeClient:
     def __init__(self) -> None:
-        self.bootstrap_current_id = 1
+        self.bootstrap_current_id: int | None = 1
         self.fixture_started = True
         self.current_fixture_event_ids: list[int] = []
         self.live_event_ids: list[int] = []
@@ -371,8 +328,13 @@ class FakeClient:
         self.closed = True
 
     async def fetch_bootstrap_static(self) -> BootstrapStatic:
+        current_ids = (
+            []
+            if self.bootstrap_current_id is None
+            else [self.bootstrap_current_id]
+        )
         return BootstrapStatic.model_validate(
-            bootstrap_payload(current_ids=[self.bootstrap_current_id]),
+            bootstrap_payload(current_ids=current_ids),
         )
 
     async def fetch_fixtures(self) -> list[Fixture]:
@@ -487,23 +449,6 @@ def fixture_payload(
         "finished": finished,
         "unknown_fixture_field": "kept",
     }
-
-
-def resource_write(
-    *,
-    resource_key: ResourceKey,
-    payload_hash: str,
-) -> ResourceWrite:
-    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
-    return ResourceWrite(
-        resource_key=resource_key,
-        event_name=EVENT_NAMES[resource_key],
-        event_id=None,
-        payload={"resource": resource_key.value},
-        payload_hash=payload_hash,
-        fetched_at=timestamp,
-        checked_at=timestamp,
-    )
 
 
 class FakePostgresConnection:

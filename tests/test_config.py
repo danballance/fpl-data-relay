@@ -1,7 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
-from fpl_data_relay.config import Settings
+from fpl_data_relay.config import (
+    Settings,
+    load_postgres_maintenance_database_url_from_environment,
+    load_settings_from_environment,
+)
 
 
 def valid_settings_payload() -> dict[str, object]:
@@ -31,8 +35,41 @@ def test_settings_reject_invalid_intervals() -> None:
         Settings.model_validate(payload)
 
 
-def test_settings_accept_required_values() -> None:
-    settings = Settings.model_validate(valid_settings_payload())
-    assert settings.database_url.startswith("postgresql://")
+def test_environment_loader_requires_every_explicit_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in valid_settings_payload():
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        load_settings_from_environment()
+
+
+def test_environment_loader_returns_validated_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in valid_settings_payload().items():
+        monkeypatch.setenv(name, str(value))
+    settings = load_settings_from_environment()
+    assert settings.database_url.endswith("/relay")
     assert settings.live_poll_seconds == 15
 
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_maintenance_database_url_must_be_present_and_nonempty(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("POSTGRES_MAINTENANCE_DATABASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("POSTGRES_MAINTENANCE_DATABASE_URL", value)
+    with pytest.raises(RuntimeError):
+        load_postgres_maintenance_database_url_from_environment()
+
+
+def test_maintenance_database_url_is_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "postgresql://relay:relay@localhost:5432/postgres"
+    monkeypatch.setenv("POSTGRES_MAINTENANCE_DATABASE_URL", url)
+    assert load_postgres_maintenance_database_url_from_environment() == url
