@@ -5,6 +5,11 @@
 *.egg-info/
 __pycache__/
 
+client/node_modules/
+client/dist/
+client/coverage/
+client/.env.local
+
 
 .env
 

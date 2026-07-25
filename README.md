@@ -49,6 +49,22 @@ docker compose run --rm app uv run --no-dev fpl-relay ingest live
 See [docs/deployment.md](docs/deployment.md) for production command examples.
 See [docs/api.md](docs/api.md) for the exposed HTTP API.
 See [docs/architecture.md](docs/architecture.md) for package boundaries.
+See [docs/client.md](docs/client.md) for the local React data explorer.
+
+## Local Data Explorer
+
+The repository includes a read-only React client under `client/`. It explores
+the normalised data already held by this relay and never calls the upstream FPL
+API. Run the relay and client in separate terminals:
+
+```fish
+uv run fpl-relay serve
+```
+
+```fish
+set -x RELAY_API_PROXY_TARGET http://127.0.0.1:8000
+uv run npm --prefix client run dev
+```
 
 ## Checks
 
@@ -57,4 +73,5 @@ uv run ruff check
 uv run ty check
 uv run lint-imports
 uv run python -m pytest --cov ./src/fpl_data_relay tests
+uv run npm --prefix client run check
 ```
