@@ -1,8 +1,14 @@
-import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
-import { Navigate, Route, Routes } from "react-router-dom";
+import {
+  QueryClientProvider,
+  type QueryClient,
+  useQuery,
+} from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { Route, Routes } from "react-router-dom";
 
 import { RelayApiProvider } from "./api/provider";
 import type { RelayApi } from "./api/relay-api";
+import { RelayApiError, errorMessage } from "./api/errors";
 import { AppShell } from "./app/AppShell";
 import { SelectionProvider } from "./app/selection";
 import { ActivityPage } from "./features/activity/ActivityPage";
@@ -31,7 +37,8 @@ export function App({
   return (
     <QueryClientProvider client={queryClient}>
       <RelayApiProvider api={api}>
-        <SelectionProvider>
+        <ServiceReadinessGate api={api}>
+          <SelectionProvider>
           <Routes>
             <Route element={<AppShell />}>
               <Route index element={<OverviewPage />} />
@@ -45,11 +52,60 @@ export function App({
               <Route path="event-status" element={<EventStatusPage />} />
               <Route path="live-players" element={<LivePlayersPage />} />
               <Route path="activity" element={<ActivityPage />} />
-              <Route path="*" element={<Navigate replace to="/" />} />
+              <Route path="*" element={<OverviewPage />} />
             </Route>
           </Routes>
-        </SelectionProvider>
+          </SelectionProvider>
+        </ServiceReadinessGate>
       </RelayApiProvider>
     </QueryClientProvider>
+  );
+}
+
+function ServiceReadinessGate({
+  api,
+  children,
+}: {
+  api: RelayApi;
+  children: ReactNode;
+}) {
+  const readiness = useQuery({
+    queryKey: ["readiness"],
+    queryFn: ({ signal }) => api.getReadiness(signal),
+    retry: (failureCount, error) =>
+      error instanceof RelayApiError &&
+      error.code === "database_waking" &&
+      failureCount < 8,
+    retryDelay: 5_000,
+  });
+  if (readiness.isSuccess) return children;
+  const waking =
+    readiness.error instanceof RelayApiError &&
+    readiness.error.code === "database_waking";
+  return (
+    <main className="service-gate" aria-live="polite">
+      <div className="service-gate__panel">
+        <span className="brand-mark">FR</span>
+        <h1>
+          {readiness.isPending || waking
+            ? "Service waking up"
+            : "Service unavailable"}
+        </h1>
+        <p>
+          {readiness.isPending || waking
+            ? "The database was idle. We’ll retry every five seconds."
+            : errorMessage(readiness.error)}
+        </p>
+        {readiness.isError ? (
+          <button
+            className="button"
+            type="button"
+            onClick={() => void readiness.refetch()}
+          >
+            Retry now
+          </button>
+        ) : null}
+      </div>
+    </main>
   );
 }

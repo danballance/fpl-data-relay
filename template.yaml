@@ -1,0 +1,496 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Cost-conscious serverless production stack for FPL Data Relay.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address for budget and operational notifications.
+  FplApiBaseUrl:
+    Type: String
+    Description: Public FPL API base URL.
+  FplClientUserAgent:
+    Type: String
+    Description: Identifying User-Agent for upstream FPL requests.
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        DATABASE_EXECUTOR: rds_data
+        DATABASE_RESOURCE_ARN: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+        DATABASE_SECRET_ARN: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+        DATABASE_NAME: fplrelay
+
+Resources:
+  DatabaseVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/24
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: fpl-relay-database
+
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DatabaseVpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.0.0/26
+      MapPublicIpOnLaunch: false
+
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DatabaseVpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.0.64/26
+      MapPublicIpOnLaunch: false
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated subnets for FPL Relay Aurora.
+      SubnetIds:
+        - !Ref DatabaseSubnetA
+        - !Ref DatabaseSubnetB
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Aurora accessed only through the RDS Data API.
+      VpcId: !Ref DatabaseVpc
+      SecurityGroupEgress: []
+
+  DatabaseCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineMode: provisioned
+      EngineVersion: "17.7"
+      DatabaseName: fplrelay
+      MasterUsername: relay_admin
+      ManageMasterUserPassword: true
+      EnableHttpEndpoint: true
+      Port: 5432
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DatabaseSecurityGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0
+        MaxCapacity: 2
+        SecondsUntilAutoPause: 300
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      StorageEncrypted: true
+      CopyTagsToSnapshot: true
+
+  DatabaseWriter:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref DatabaseCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      EnablePerformanceInsights: false
+      MonitoringInterval: 0
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: "$default"
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: fpl_data_relay.lambda_api.handler
+      MemorySize: 512
+      Timeout: 28
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - Statement:
+            - Sid: UseDataApi
+              Effect: Allow
+              Action:
+                - rds-data:BatchExecuteStatement
+                - rds-data:BeginTransaction
+                - rds-data:CommitTransaction
+                - rds-data:ExecuteStatement
+                - rds-data:RollbackTransaction
+              Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+            - Sid: ReadDatabaseSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+  IngestionDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  IngestionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 240
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestionDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  LiveScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: fpl-relay-live
+
+  ScheduleTargetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendIngestionJobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt IngestionQueue.Arn
+
+  DailyReferenceSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: fpl-relay-reference-daily
+      Description: Refresh FPL reference data at 04:00 Europe/London.
+      ScheduleExpression: cron(0 4 * * ? *)
+      ScheduleExpressionTimezone: Europe/London
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt IngestionQueue.Arn
+        RoleArn: !GetAtt ScheduleTargetRole.Arn
+        Input: '{"version":1,"kind":"reference"}'
+
+  IngestionFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: fpl_data_relay.lambda_ingestion.handler
+      MemorySize: 1024
+      Timeout: 180
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          FPL_API_BASE_URL: !Ref FplApiBaseUrl
+          FPL_CLIENT_USER_AGENT: !Ref FplClientUserAgent
+          HTTP_TIMEOUT_SECONDS: "20"
+          INGESTION_QUEUE_URL: !Ref IngestionQueue
+          INGESTION_QUEUE_ARN: !GetAtt IngestionQueue.Arn
+          LIVE_SCHEDULE_GROUP_NAME: !Ref LiveScheduleGroup
+          SCHEDULE_TARGET_ROLE_ARN: !GetAtt ScheduleTargetRole.Arn
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt IngestionQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt IngestionQueue.QueueName
+        - Statement:
+            - Sid: UseDataApi
+              Effect: Allow
+              Action:
+                - rds-data:BatchExecuteStatement
+                - rds-data:BeginTransaction
+                - rds-data:CommitTransaction
+                - rds-data:ExecuteStatement
+                - rds-data:RollbackTransaction
+              Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+            - Sid: ReadDatabaseSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+            - Sid: ManageLiveSchedules
+              Effect: Allow
+              Action:
+                - scheduler:CreateSchedule
+                - scheduler:DeleteSchedule
+                - scheduler:ListSchedules
+                - scheduler:UpdateSchedule
+              Resource:
+                - !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/${LiveScheduleGroup}/fpl-live-*"
+                - !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/${LiveScheduleGroup}"
+            - Sid: PassScheduleTargetRole
+              Effect: Allow
+              Action: iam:PassRole
+              Resource: !GetAtt ScheduleTargetRole.Arn
+              Condition:
+                StringEquals:
+                  iam:PassedToService: scheduler.amazonaws.com
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ApiFunction}"
+      RetentionInDays: 14
+
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${IngestionFunction}"
+      RetentionInDays: 14
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Ingestion messages reached the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestionDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  IngestionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Repeated ingestion Lambda errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestionFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: 20
+          Unit: USD
+        BudgetName: fpl-relay-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref AlertEmail
+              SubscriptionType: EMAIL
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref AlertEmail
+              SubscriptionType: EMAIL
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-frontend"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  StripApiPrefixFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-strip-api-prefix"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Strip /api before forwarding to API Gateway.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          request.uri = request.uri.substring(4) || "/";
+          return request;
+        }
+
+  SpaRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-spa-rewrite"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Rewrite extensionless frontend routes to index.html.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          if (!request.uri.includes(".")) {
+            request.uri = "/index.html";
+          }
+          return request;
+        }
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        DefaultRootObject: index.html
+        Origins:
+          - Id: frontend
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: api
+            DomainName: !Sub "${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              HTTPSPort: 443
+              OriginSSLProtocols: [TLSv1.2]
+        DefaultCacheBehavior:
+          TargetOriginId: frontend
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SpaRewriteFunction.FunctionARN
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: 413f1604-6f3c-4fca-93d6-1c7e7e43f4c5
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt StripApiPrefixFunction.FunctionARN
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+Outputs:
+  CloudFrontUrl:
+    Description: Public application URL.
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+  ApiEndpoint:
+    Description: Direct HTTP API endpoint for diagnostics.
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Value: !Ref FrontendDistribution
+  DatabaseClusterArn:
+    Value: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+  DatabaseSecretArn:
+    Value: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+  IngestionQueueUrl:
+    Value: !Ref IngestionQueue

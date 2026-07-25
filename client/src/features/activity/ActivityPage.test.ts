@@ -19,9 +19,13 @@ describe("change-event history", () => {
     }));
     const listChangeEvents = vi
       .fn<RelayApi["listChangeEvents"]>()
-      .mockResolvedValueOnce({ events: firstPage })
       .mockResolvedValueOnce({
-        events: [{ ...changeEvent, id: CHANGE_PAGE_SIZE + 1 }],
+        items: firstPage,
+        next_after_id: CHANGE_PAGE_SIZE,
+      })
+      .mockResolvedValueOnce({
+        items: [{ ...changeEvent, id: CHANGE_PAGE_SIZE + 1 }],
+        next_after_id: null,
       });
     const api = makeFakeRelayApi({ listChangeEvents });
     const result = await readChangeHistory(
@@ -42,7 +46,10 @@ describe("change-event history", () => {
       id: 0,
     }));
     const api = makeFakeRelayApi({
-      listChangeEvents: async () => ({ events: repeated }),
+      listChangeEvents: async () => ({
+        items: repeated,
+        next_after_id: 0,
+      }),
     });
     await expect(
       readChangeHistory(api, new AbortController().signal),

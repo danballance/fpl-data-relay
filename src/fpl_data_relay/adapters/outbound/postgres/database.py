@@ -1,19 +1,20 @@
 """PostgreSQL persistence engine for normalised FPL relay data."""
 
-import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import date, datetime
 from typing import Protocol, cast
 
-from asyncpg import Record
-
+from fpl_data_relay.adapters.outbound.postgres.migrations import (
+    apply_migrations,
+    migration_status,
+)
 from fpl_data_relay.adapters.outbound.postgres.schema import (
     ADVISORY_LOCK_ID,
-    NOTIFY_CHANNEL,
-    SCHEMA_SQL,
 )
+from fpl_data_relay.application.errors import SchemaUnavailableError
+from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.domain.changes import (
     EVENT_NAMES,
     ChangeEvent,
@@ -51,16 +52,16 @@ from fpl_data_relay.domain.types import JsonValue
 type StatScalar = int | float | str | bool | None
 
 
-class SchemaError(RuntimeError):
-    """Raised when the database schema does not match the application."""
-
-    pass
-
-
 class IngestionLockError(RuntimeError):
     """Raised when a second ingestion cycle attempts to run concurrently."""
 
     pass
+
+
+class RowProtocol(Protocol):
+    """Mapping-like row shape shared by asyncpg and Data API results."""
+
+    def items(self) -> Iterable[tuple[str, object]]: ...
 
 
 class ConnectionProtocol(Protocol):
@@ -85,15 +86,6 @@ class ConnectionProtocol(Protocol):
     async def fetchval(self, query: str, *arguments: object) -> object:
         """Fetch the first column from the first row of a SQL query."""
         ...
-
-    async def add_listener(self, channel: str, callback: object) -> None:
-        """Register a Postgres NOTIFY listener."""
-        ...
-
-    async def remove_listener(self, channel: str, callback: object) -> None:
-        """Remove a Postgres NOTIFY listener."""
-        ...
-
 
 class ConnectionManagerProtocol(Protocol):
     """Async context manager returned by a pool acquisition."""
@@ -127,12 +119,12 @@ class PoolProtocol(Protocol):
 class _PostgresOperations(Protocol):
     """Persistence interface used by API and ingestion layers."""
 
-    async def apply_schema(self) -> None:
-        """Create or update the database schema."""
-        ...
-
     async def check_schema_version(self, *, expected_version: int) -> None:
         """Verify the database schema version."""
+        ...
+
+    async def schema_status(self) -> SchemaStatus:
+        """Return applied and pending migration versions."""
         ...
 
     async def upsert_bootstrap(
@@ -213,7 +205,13 @@ class _PostgresOperations(Protocol):
         """Return all element types."""
         ...
 
-    async def list_elements(self, *, season_id: str) -> list[Element]:
+    async def list_elements(
+        self,
+        *,
+        season_id: str,
+        after_id: int,
+        limit: int,
+    ) -> list[Element]:
         """Return all elements."""
         ...
 
@@ -226,6 +224,8 @@ class _PostgresOperations(Protocol):
         *,
         season_id: str,
         event_id: int | None,
+        after_id: int,
+        limit: int,
     ) -> list[Fixture]:
         """Return fixtures, optionally filtered by event id."""
         ...
@@ -243,6 +243,8 @@ class _PostgresOperations(Protocol):
         *,
         season_id: str,
         event_id: int,
+        after_id: int,
+        limit: int,
     ) -> list[LiveElement]:
         """Return live element rows for one event."""
         ...
@@ -270,15 +272,6 @@ class _PostgresOperations(Protocol):
         """Acquire an exclusive lock for an ingestion cycle."""
         ...
 
-    def watch_change_events(
-        self,
-        *,
-        after_id: int,
-        heartbeat_seconds: int,
-    ) -> AsyncIterator[ChangeEvent | None]:
-        """Yield new change events and heartbeat sentinels."""
-        ...
-
     async def close(self) -> None:
         """Close resources held by the store."""
         ...
@@ -296,22 +289,32 @@ class PostgresDatabase(_PostgresOperations):
         await self._pool.close()
 
     async def apply_schema(self) -> None:
-        """Apply the current schema SQL to the database."""
-        async with self._pool.acquire() as connection:
-            await connection.execute(SCHEMA_SQL)
+        """Apply pending immutable migrations."""
+        await apply_migrations(pool=self._pool)
 
     async def check_schema_version(self, *, expected_version: int) -> None:
         """Raise if the stored schema version differs from the expected one."""
         async with self._pool.acquire() as connection:
+            migration_table = await connection.fetchval(
+                "SELECT to_regclass('relay_schema_migrations')",
+            )
+            if migration_table is None:
+                raise SchemaUnavailableError(
+                    "Database migration history is not available.",
+                )
             version = await connection.fetchval(
-                "SELECT version FROM relay_schema_version WHERE id = true",
+                "SELECT MAX(version) FROM relay_schema_migrations",
             )
         if version != expected_version:
             message = (
                 "Database schema version mismatch: "
                 f"expected {expected_version}, found {version!r}."
             )
-            raise SchemaError(message)
+            raise SchemaUnavailableError(message)
+
+    async def schema_status(self) -> SchemaStatus:
+        """Return validated applied and pending migration versions."""
+        return await migration_status(pool=self._pool)
 
     async def upsert_bootstrap(
         self,
@@ -638,12 +641,23 @@ class PostgresDatabase(_PostgresOperations):
             arguments=(season_id,),
         )
 
-    async def list_elements(self, *, season_id: str) -> list[Element]:
-        """Return all elements ordered by id."""
+    async def list_elements(
+        self,
+        *,
+        season_id: str,
+        after_id: int,
+        limit: int,
+    ) -> list[Element]:
+        """Return a cursor page of elements ordered by id."""
         return await self._fetch_models(
-            query="SELECT * FROM fpl_elements WHERE season_id = $1 ORDER BY id",
+            query="""
+                SELECT * FROM fpl_elements
+                WHERE season_id = $1 AND id > $2
+                ORDER BY id
+                LIMIT $3
+            """,
             converter=element_from_row,
-            arguments=(season_id,),
+            arguments=(season_id, after_id, limit),
         )
 
     async def get_element(self, *, season_id: str, element_id: int) -> Element | None:
@@ -661,27 +675,37 @@ class PostgresDatabase(_PostgresOperations):
         *,
         season_id: str,
         event_id: int | None,
+        after_id: int,
+        limit: int,
     ) -> list[Fixture]:
-        """Return fixtures with their nested stat entries."""
+        """Return a cursor page of fixtures with nested stat entries."""
         if event_id is None:
-            query = "SELECT * FROM fpl_fixtures WHERE season_id = $1 ORDER BY id"
-            arguments: tuple[object, ...] = (season_id,)
+            query = """
+                SELECT * FROM fpl_fixtures
+                WHERE season_id = $1 AND id > $2
+                ORDER BY id
+                LIMIT $3
+            """
+            arguments: tuple[object, ...] = (season_id, after_id, limit)
         else:
             query = """
                 SELECT * FROM fpl_fixtures
-                WHERE season_id = $1 AND event = $2
+                WHERE season_id = $1 AND event = $2 AND id > $3
                 ORDER BY id
+                LIMIT $4
             """
-            arguments = (season_id, event_id)
+            arguments = (season_id, event_id, after_id, limit)
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, *arguments)
             fixtures = [fixture_from_row(row=row) for row in rows]
+            fixture_ids = [fixture.id for fixture in fixtures]
+            stats_by_fixture = await fetch_fixture_stats_for_ids(
+                connection=connection,
+                season_id=season_id,
+                fixture_ids=fixture_ids,
+            )
             for index, fixture in enumerate(fixtures):
-                stats = await fetch_fixture_stats(
-                    connection=connection,
-                    season_id=season_id,
-                    fixture_id=fixture.id,
-                )
+                stats = stats_by_fixture.get(fixture.id, [])
                 fixtures[index] = fixture.model_copy(update={"stats": stats})
         return fixtures
 
@@ -731,25 +755,27 @@ class PostgresDatabase(_PostgresOperations):
         *,
         season_id: str,
         event_id: int,
+        after_id: int,
+        limit: int,
     ) -> list[LiveElement]:
-        """Return live elements with explanations for one event."""
+        """Return a cursor page of live elements with explanations."""
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(
                 """
                 SELECT * FROM fpl_event_live_elements
-                WHERE season_id = $1 AND event_id = $2
+                WHERE season_id = $1 AND event_id = $2 AND element_id > $3
                 ORDER BY element_id
+                LIMIT $4
                 """,
                 season_id,
                 event_id,
+                after_id,
+                limit,
             )
-            return [
-                await live_element_from_row(
-                    connection=connection,
-                    row=row,
-                )
-                for row in rows
-            ]
+            return await live_elements_from_rows(
+                connection=connection,
+                rows=rows,
+            )
 
     async def get_live_element(
         self,
@@ -797,62 +823,18 @@ class PostgresDatabase(_PostgresOperations):
 
     @contextlib.asynccontextmanager
     async def ingestion_lock(self) -> AsyncIterator[None]:
-        """Hold the Postgres advisory lock for one ingestion cycle."""
-        async with self._pool.acquire() as connection:
+        """Hold a transaction-scoped advisory lock for one ingestion cycle."""
+        async with (
+            self._pool.acquire() as connection,
+            connection.transaction(),
+        ):
             acquired = await connection.fetchval(
-                "SELECT pg_try_advisory_lock($1)",
+                "SELECT pg_try_advisory_xact_lock($1)",
                 ADVISORY_LOCK_ID,
             )
             if acquired is not True:
                 raise IngestionLockError("Another ingestion cycle is already running.")
-            try:
-                yield
-            finally:
-                await connection.fetchval(
-                    "SELECT pg_advisory_unlock($1)",
-                    ADVISORY_LOCK_ID,
-                )
-
-    async def watch_change_events(
-        self,
-        *,
-        after_id: int,
-        heartbeat_seconds: int,
-    ) -> AsyncIterator[ChangeEvent | None]:
-        """Watch stored events via polling plus Postgres notifications."""
-        current_id = after_id
-        queue: asyncio.Queue[int] = asyncio.Queue()
-
-        def listener(
-            connection: object,
-            process_id: int,
-            channel: str,
-            payload: str,
-        ) -> None:
-            """Queue notified change-event ids for the stream loop."""
-            del connection, process_id, channel
-            queue.put_nowait(int(payload))
-
-        async with self._pool.acquire() as connection:
-            await connection.add_listener(NOTIFY_CHANNEL, listener)
-            try:
-                while True:
-                    events = await self.list_change_events(
-                        after_id=current_id,
-                        limit=100,
-                    )
-                    for event in events:
-                        current_id = event.id
-                        yield event
-                    try:
-                        await asyncio.wait_for(
-                            queue.get(),
-                            timeout=heartbeat_seconds,
-                        )
-                    except TimeoutError:
-                        yield None
-            finally:
-                await connection.remove_listener(NOTIFY_CHANNEL, listener)
+            yield
 
     async def _fetch_models[ModelT](
         self,
@@ -937,7 +919,7 @@ async def insert_change_events(
     families: list[EntityFamily],
     metadata: IngestionMetadata,
 ) -> list[ChangeEvent]:
-    """Insert and notify change events for entity families."""
+    """Insert change events for entity families."""
     events: list[ChangeEvent] = []
     for family in families:
         row = await connection.fetchrow(
@@ -962,11 +944,6 @@ async def insert_change_events(
             raise RuntimeError("Failed to insert relay change event.")
         event = change_event_from_row(row=row)
         events.append(event)
-        await connection.fetchval(
-            "SELECT pg_notify($1, $2)",
-            NOTIFY_CHANNEL,
-            str(event.id),
-        )
     return events
 
 
@@ -1150,6 +1127,51 @@ async def fetch_fixture_stats(
     ]
 
 
+async def fetch_fixture_stats_for_ids(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    fixture_ids: list[int],
+) -> dict[int, list[FixtureStat]]:
+    """Fetch and group nested stats for a bounded fixture page."""
+    if not fixture_ids:
+        return {}
+    rows = await connection.fetch(
+        """
+        SELECT * FROM fpl_fixture_stat_entries
+        WHERE season_id = $1 AND fixture_id = ANY($2)
+        ORDER BY fixture_id, identifier, side, ordinal
+        """,
+        season_id,
+        fixture_ids,
+    )
+    grouped: dict[int, dict[str, dict[str, list[FixtureStatEntry]]]] = {}
+    for row in rows:
+        values = row_values(row=row)
+        fixture_id = require_int(values=values, key="fixture_id")
+        identifier = require_str(values=values, key="identifier")
+        side = require_str(values=values, key="side")
+        grouped.setdefault(fixture_id, {}).setdefault(
+            identifier,
+            {"a": [], "h": []},
+        )[side].append(
+            FixtureStatEntry(
+                element=optional_int(values=values, key="element"),
+                value=text_and_type_to_scalar(
+                    value_text=optional_str(values=values, key="value_text"),
+                    value_type=require_str(values=values, key="value_type"),
+                ),
+            ),
+        )
+    return {
+        fixture_id: [
+            FixtureStat(identifier=identifier, a=sides["a"], h=sides["h"])
+            for identifier, sides in stats.items()
+        ]
+        for fixture_id, stats in grouped.items()
+    }
+
+
 async def live_element_from_row(
     *,
     connection: ConnectionProtocol,
@@ -1192,6 +1214,69 @@ async def live_element_from_row(
             for fixture_id, stats in explains.items()
         ],
     )
+
+
+async def live_elements_from_rows(
+    *,
+    connection: ConnectionProtocol,
+    rows: list[object],
+) -> list[LiveElement]:
+    """Build live elements using one bounded child query."""
+    if not rows:
+        return []
+    values_by_element = [row_values(row=row) for row in rows]
+    season_id = require_str(values=values_by_element[0], key="season_id")
+    event_id = require_int(values=values_by_element[0], key="event_id")
+    element_ids = [
+        require_int(values=values, key="element_id")
+        for values in values_by_element
+    ]
+    explain_rows = await connection.fetch(
+        """
+        SELECT * FROM fpl_event_live_explain_stats
+        WHERE season_id = $1
+          AND event_id = $2
+          AND element_id = ANY($3)
+        ORDER BY element_id, fixture_id, identifier, ordinal
+        """,
+        season_id,
+        event_id,
+        element_ids,
+    )
+    explains: dict[int, dict[int, list[LiveElementExplainStat]]] = {}
+    for explain_row in explain_rows:
+        explain_values = row_values(row=explain_row)
+        element_id = require_int(values=explain_values, key="element_id")
+        fixture_id = require_int(values=explain_values, key="fixture_id")
+        explains.setdefault(element_id, {}).setdefault(fixture_id, []).append(
+            LiveElementExplainStat(
+                identifier=require_str(values=explain_values, key="identifier"),
+                points=require_int(values=explain_values, key="points"),
+                value=text_and_type_to_scalar(
+                    value_text=optional_str(
+                        values=explain_values,
+                        key="value_text",
+                    ),
+                    value_type=require_str(
+                        values=explain_values,
+                        key="value_type",
+                    ),
+                ),
+            ),
+        )
+    return [
+        LiveElement(
+            id=element_id,
+            stats=LiveElementStats.model_validate(
+                filter_row_values(values=values),
+            ),
+            explain=[
+                LiveElementExplain(fixture=fixture_id, stats=stats)
+                for fixture_id, stats in explains.get(element_id, {}).items()
+            ],
+        )
+        for values, element_id in zip(values_by_element, element_ids, strict=True)
+    ]
 
 
 def change_event_from_row(*, row: object) -> ChangeEvent:
@@ -1282,11 +1367,12 @@ def filter_row_values(*, values: dict[str, object]) -> dict[str, object]:
 
 def row_values(*, row: object) -> dict[str, object]:
     """Normalize a mapping-like database row into a plain dictionary."""
-    if isinstance(row, Record):
-        return {key: value for key, value in row.items()}
     if isinstance(row, Mapping):
         mapping = cast("Mapping[str, object]", row)
         return {key: mapping[key] for key in mapping}
+    if hasattr(row, "items"):
+        mapping_like = cast("RowProtocol", row)
+        return {key: value for key, value in mapping_like.items()}
     raise TypeError(f"Unsupported database row type: {type(row).__name__}")
 
 
@@ -1327,6 +1413,8 @@ def require_datetime(*, values: dict[str, object], key: str) -> datetime:
     value = values[key]
     if isinstance(value, datetime):
         return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
     raise TypeError(f"Expected {key} to be datetime, found {type(value).__name__}.")
 
 
@@ -1335,4 +1423,6 @@ def require_date(*, values: dict[str, object], key: str) -> date:
     value = values[key]
     if isinstance(value, date):
         return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
     raise TypeError(f"Expected {key} to be date, found {type(value).__name__}.")

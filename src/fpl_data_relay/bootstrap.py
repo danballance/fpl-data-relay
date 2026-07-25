@@ -1,5 +1,6 @@
 """Composition root for production relay runtimes."""
 
+import os
 from typing import cast
 
 import asyncpg
@@ -27,6 +28,7 @@ from fpl_data_relay.adapters.outbound.postgres.reference import (
 from fpl_data_relay.adapters.outbound.postgres.schema_manager import (
     PostgresSchemaManager,
 )
+from fpl_data_relay.adapters.outbound.rds_data import create_rds_data_pool
 from fpl_data_relay.application.change_feed import ChangeFeed
 from fpl_data_relay.application.database import SCHEMA_VERSION, DatabaseService
 from fpl_data_relay.application.ingestion.service import (
@@ -34,10 +36,12 @@ from fpl_data_relay.application.ingestion.service import (
     IngestionService,
 )
 from fpl_data_relay.application.live_queries import LiveQueries
+from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.config import (
     Settings,
     load_postgres_maintenance_database_url_from_environment,
+    load_rds_data_settings_from_environment,
     load_settings_from_environment,
 )
 
@@ -103,6 +107,24 @@ async def build_postgres_database(*, settings: Settings) -> PostgresDatabase:
     return PostgresDatabase(pool=cast("PoolProtocol", pool))
 
 
+async def build_database_from_environment() -> PostgresDatabase:
+    """Build the explicitly selected database executor."""
+    executor = os.environ.get("DATABASE_EXECUTOR")
+    if executor == "asyncpg":
+        return await build_postgres_database(settings=load_settings_from_environment())
+    if executor == "rds_data":
+        settings = load_rds_data_settings_from_environment()
+        pool = create_rds_data_pool(
+            resource_arn=settings.resource_arn,
+            secret_arn=settings.secret_arn,
+            database_name=settings.database_name,
+        )
+        return PostgresDatabase(pool=cast("PoolProtocol", pool))
+    raise RuntimeError(
+        "DATABASE_EXECUTOR must be exactly 'asyncpg' or 'rds_data'.",
+    )
+
+
 async def build_relay_runtime(*, settings: Settings) -> RelayRuntime:
     """Wire production adapters to application services."""
     database = await build_postgres_database(settings=settings)
@@ -153,8 +175,8 @@ async def recreate_database(
     )
 
 
-async def create_production_app() -> FastAPI:
-    """Create the scheduler-enabled FastAPI app used by Uvicorn."""
+async def create_local_app() -> FastAPI:
+    """Create the scheduler-enabled FastAPI app used by local Uvicorn."""
     settings = load_settings_from_environment()
     runtime = await build_relay_runtime(settings=settings)
     return create_app(
@@ -166,8 +188,8 @@ async def create_production_app() -> FastAPI:
         reference_poll_seconds=settings.reference_poll_seconds,
         live_poll_seconds=settings.live_poll_seconds,
         idle_poll_seconds=settings.idle_poll_seconds,
-        sse_heartbeat_seconds=settings.sse_heartbeat_seconds,
         start_scheduler=True,
+        check_schema_on_startup=True,
         shutdown=runtime.close,
     )
 
@@ -176,11 +198,25 @@ class ProductionCliOperations:
     """Production implementations of commands exposed by the CLI adapter."""
 
     def validate_config(self) -> None:
-        load_settings_from_environment()
+        executor = os.environ.get("DATABASE_EXECUTOR")
+        if executor == "asyncpg":
+            load_settings_from_environment()
+        elif executor == "rds_data":
+            load_rds_data_settings_from_environment()
+        else:
+            raise RuntimeError(
+                "DATABASE_EXECUTOR must be exactly 'asyncpg' or 'rds_data'.",
+            )
 
     async def apply_schema(self) -> None:
-        settings = load_settings_from_environment()
-        runtime = await build_schema_runtime(settings=settings)
+        database = await build_database_from_environment()
+        runtime = SchemaRuntime(
+            database=database,
+            database_service=DatabaseService(
+                schema_manager=PostgresSchemaManager(database=database),
+                recreator=PostgresDatabaseRecreator(),
+            ),
+        )
         try:
             await runtime.database_service.apply_schema(
                 expected_version=SCHEMA_VERSION,
@@ -188,7 +224,25 @@ class ProductionCliOperations:
         finally:
             await runtime.close()
 
+    async def schema_status(self) -> SchemaStatus:
+        database = await build_database_from_environment()
+        runtime = SchemaRuntime(
+            database=database,
+            database_service=DatabaseService(
+                schema_manager=PostgresSchemaManager(database=database),
+                recreator=PostgresDatabaseRecreator(),
+            ),
+        )
+        try:
+            return await runtime.database_service.schema_status()
+        finally:
+            await runtime.close()
+
     async def drop_and_create_database(self) -> None:
+        if os.environ.get("DATABASE_EXECUTOR") != "asyncpg":
+            raise RuntimeError(
+                "db drop-and-create is available only for the asyncpg executor.",
+            )
         settings = load_settings_from_environment()
         maintenance_url = (
             load_postgres_maintenance_database_url_from_environment()
@@ -229,7 +283,7 @@ class ProductionCliOperations:
             await runtime.close()
 
     async def serve(self) -> None:
-        api_app = await create_production_app()
+        api_app = await create_local_app()
         config = uvicorn.Config(
             app=api_app,
             host="0.0.0.0",

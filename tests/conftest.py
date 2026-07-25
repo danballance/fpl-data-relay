@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import cast
 
@@ -8,6 +8,7 @@ import pytest
 
 from fpl_data_relay.adapters.outbound.postgres.database import IngestionLockError
 from fpl_data_relay.application.database import SCHEMA_VERSION
+from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.domain.changes import (
     EVENT_NAMES,
     ChangeEvent,
@@ -77,6 +78,12 @@ class InMemoryStore:
     async def check_schema_version(self, *, expected_version: int) -> None:
         if expected_version != SCHEMA_VERSION:
             raise RuntimeError("Unexpected schema version.")
+
+    async def schema_status(self) -> SchemaStatus:
+        return SchemaStatus(
+            applied_versions=[SCHEMA_VERSION],
+            pending_versions=[],
+        )
 
     async def upsert_bootstrap(
         self,
@@ -198,8 +205,18 @@ class InMemoryStore:
     async def list_element_types(self, *, season_id: str) -> list[ElementType]:
         return self.element_types.get(season_id, [])
 
-    async def list_elements(self, *, season_id: str) -> list[Element]:
-        return self.elements.get(season_id, [])
+    async def list_elements(
+        self,
+        *,
+        season_id: str,
+        after_id: int,
+        limit: int,
+    ) -> list[Element]:
+        return [
+            element
+            for element in self.elements.get(season_id, [])
+            if element.id > after_id
+        ][:limit]
 
     async def get_element(self, *, season_id: str, element_id: int) -> Element | None:
         return next(
@@ -216,15 +233,20 @@ class InMemoryStore:
         *,
         season_id: str,
         event_id: int | None,
+        after_id: int,
+        limit: int,
     ) -> list[Fixture]:
         fixtures = [
             fixture
             for (fixture_season_id, _), fixture in self.fixtures.items()
             if fixture_season_id == season_id
         ]
-        if event_id is None:
-            return fixtures
-        return [fixture for fixture in fixtures if fixture.event == event_id]
+        filtered = (
+            fixtures
+            if event_id is None
+            else [fixture for fixture in fixtures if fixture.event == event_id]
+        )
+        return [fixture for fixture in filtered if fixture.id > after_id][:limit]
 
     async def get_fixture(self, *, season_id: str, fixture_id: int) -> Fixture | None:
         return self.fixtures.get((season_id, fixture_id))
@@ -237,9 +259,15 @@ class InMemoryStore:
         *,
         season_id: str,
         event_id: int,
+        after_id: int,
+        limit: int,
     ) -> list[LiveElement]:
         response = self.live_elements.get((season_id, event_id))
-        return [] if response is None else response.elements
+        if response is None:
+            return []
+        return [
+            element for element in response.elements if element.id > after_id
+        ][:limit]
 
     async def get_live_element(
         self,
@@ -251,6 +279,8 @@ class InMemoryStore:
         elements = await self.list_live_elements(
             season_id=season_id,
             event_id=event_id,
+            after_id=0,
+            limit=200,
         )
         return next((element for element in elements if element.id == element_id), None)
 
@@ -300,17 +330,6 @@ class InMemoryStore:
 
     def ingestion_lock(self) -> FakeLock:
         return FakeLock(store=self)
-
-    async def watch_change_events(
-        self,
-        *,
-        after_id: int,
-        heartbeat_seconds: int,
-    ) -> AsyncIterator[ChangeEvent | None]:
-        del heartbeat_seconds
-        for event in await self.list_change_events(after_id=after_id, limit=100):
-            yield event
-        yield None
 
     async def close(self) -> None:
         self.closed = True
@@ -456,11 +475,18 @@ class FakePostgresConnection:
         self.pool = pool
 
     def transaction(self) -> FakePostgresTransaction:
-        return FakePostgresTransaction()
+        return FakePostgresTransaction(pool=self.pool)
 
     async def execute(self, query: str, *arguments: object) -> str:
-        if "relay_schema_version" in query and "CREATE TABLE" in query:
-            self.pool.schema_version = SCHEMA_VERSION
+        if "INSERT INTO relay_schema_migrations" in query:
+            self.pool.applied_migrations.append(
+                {
+                    "version": arguments[0],
+                    "name": arguments[1],
+                    "checksum": arguments[2],
+                },
+            )
+            self.pool.schema_version = cast("int", arguments[0])
             return "CREATE TABLE"
         if "UPDATE relay_resources" in query:
             resource_key = str(arguments[0])
@@ -502,7 +528,8 @@ class FakePostgresConnection:
         return None
 
     async def fetch(self, query: str, *arguments: object) -> list[object]:
-        del query
+        if "FROM relay_schema_migrations" in query:
+            return cast("list[object]", self.pool.applied_migrations)
         after_id = cast("int", arguments[0])
         limit = cast("int", arguments[1])
         events = [
@@ -513,41 +540,24 @@ class FakePostgresConnection:
         return cast("list[object]", events)
 
     async def fetchval(self, query: str, *arguments: object) -> object:
-        if "SELECT version" in query:
+        if "to_regclass" in query:
+            return (
+                "relay_schema_migrations"
+                if self.pool.applied_migrations
+                or self.pool.schema_version is not None
+                else None
+            )
+        if "SELECT MAX(version)" in query:
             return self.pool.schema_version
         if "SELECT payload_hash" in query:
             resource = self.pool.resources.get(str(arguments[0]))
             return None if resource is None else resource["payload_hash"]
-        if "pg_try_advisory_lock" in query:
+        if "pg_try_advisory_xact_lock" in query:
             if self.pool.locked:
                 return False
             self.pool.locked = True
             return True
-        if "pg_advisory_unlock" in query:
-            self.pool.locked = False
-            return True
-        if "pg_notify" in query:
-            payload = str(arguments[1])
-            self.pool.notifications.append(payload)
-            for listener in self.pool.listeners:
-                listener(self, 0, str(arguments[0]), payload)
-            return None
         return None
-
-    async def add_listener(self, channel: str, callback: object) -> None:
-        del channel
-        typed_callback = callback
-        if not callable(typed_callback):
-            raise TypeError("listener callback must be callable")
-        self.pool.listeners.append(
-            cast("Callable[[object, int, str, str], None]", typed_callback),
-        )
-
-    async def remove_listener(self, channel: str, callback: object) -> None:
-        del channel
-        self.pool.listeners.remove(
-            cast("Callable[[object, int, str, str], None]", callback),
-        )
 
 
 class FakePostgresAcquire:
@@ -567,6 +577,9 @@ class FakePostgresAcquire:
 
 
 class FakePostgresTransaction:
+    def __init__(self, *, pool: FakePostgresPool) -> None:
+        self._pool = pool
+
     async def __aenter__(self) -> object:
         return self
 
@@ -577,11 +590,13 @@ class FakePostgresTransaction:
         traceback: object,
     ) -> None:
         del exception_type, exception, traceback
+        self._pool.locked = False
 
 
 class FakePostgresPool:
     def __init__(self) -> None:
         self.schema_version: int | None = None
+        self.applied_migrations: list[dict[str, object]] = []
         self.resources: dict[str, dict[str, object]] = {}
         self.events: list[dict[str, object]] = []
         self.notifications: list[str] = []

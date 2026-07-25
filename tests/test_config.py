@@ -3,13 +3,16 @@ from pydantic import ValidationError
 
 from fpl_data_relay.config import (
     Settings,
+    load_fpl_settings_from_environment,
     load_postgres_maintenance_database_url_from_environment,
+    load_rds_data_settings_from_environment,
     load_settings_from_environment,
 )
 
 
 def valid_settings_payload() -> dict[str, object]:
     return {
+        "DATABASE_EXECUTOR": "asyncpg",
         "DATABASE_URL": "postgresql://relay:relay@localhost:5432/relay",
         "FPL_API_BASE_URL": "https://fantasy.premierleague.com/api",
         "FPL_CLIENT_USER_AGENT": "fpl-data-relay-tests",
@@ -17,7 +20,6 @@ def valid_settings_payload() -> dict[str, object]:
         "REFERENCE_POLL_SECONDS": 300,
         "LIVE_POLL_SECONDS": 15,
         "IDLE_POLL_SECONDS": 120,
-        "SSE_HEARTBEAT_SECONDS": 5,
     }
 
 
@@ -73,3 +75,38 @@ def test_maintenance_database_url_is_returned(
     url = "postgresql://relay:relay@localhost:5432/postgres"
     monkeypatch.setenv("POSTGRES_MAINTENANCE_DATABASE_URL", url)
     assert load_postgres_maintenance_database_url_from_environment() == url
+
+
+def test_rds_data_environment_loader_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "DATABASE_EXECUTOR": "rds_data",
+        "DATABASE_RESOURCE_ARN": "cluster",
+        "DATABASE_SECRET_ARN": "secret",
+        "DATABASE_NAME": "relay",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    settings = load_rds_data_settings_from_environment()
+    assert settings.resource_arn == "cluster"
+    monkeypatch.delenv("DATABASE_SECRET_ARN")
+    with pytest.raises(RuntimeError, match="DATABASE_SECRET_ARN"):
+        load_rds_data_settings_from_environment()
+
+
+def test_fpl_environment_loader_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "FPL_API_BASE_URL": "https://fantasy.premierleague.com/api",
+        "FPL_CLIENT_USER_AGENT": "tests",
+        "HTTP_TIMEOUT_SECONDS": "10",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    settings = load_fpl_settings_from_environment()
+    assert settings.user_agent == "tests"
+    monkeypatch.delenv("FPL_CLIENT_USER_AGENT")
+    with pytest.raises(RuntimeError, match="FPL_CLIENT_USER_AGENT"):
+        load_fpl_settings_from_environment()

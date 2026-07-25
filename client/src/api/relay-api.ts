@@ -2,9 +2,7 @@ import createClient from "openapi-fetch";
 
 import type { paths } from "./generated";
 import { RelayApiError } from "./errors";
-import { consumeSse } from "./sse";
 import type {
-  ChangeEvent,
   ChangeEvents,
   Element,
   ElementType,
@@ -14,12 +12,16 @@ import type {
   Health,
   LiveElement,
   Phase,
+  Readiness,
   Season,
   Team,
 } from "./types";
 
+const PAGE_SIZE = 100;
+
 export interface RelayApi {
   getHealth(signal: AbortSignal): Promise<Health>;
+  getReadiness(signal: AbortSignal): Promise<Readiness>;
   listSeasons(signal: AbortSignal): Promise<Season[]>;
   getCurrentSeason(signal: AbortSignal): Promise<Season>;
   getSeason(seasonId: string, signal: AbortSignal): Promise<Season>;
@@ -70,15 +72,6 @@ export interface RelayApi {
     limit: number,
     signal: AbortSignal,
   ): Promise<ChangeEvents>;
-  watchChangeEvents({
-    afterId,
-    signal,
-    onEvent,
-  }: {
-    afterId: number;
-    signal: AbortSignal;
-    onEvent: (event: ChangeEvent) => void;
-  }): Promise<void>;
 }
 
 interface ApiResult<T> {
@@ -100,9 +93,7 @@ function backendDetail(error: unknown, status: number): string {
 }
 
 function unwrap<T>(result: ApiResult<T>, path: string): T {
-  if (result.data !== undefined) {
-    return result.data;
-  }
+  if (result.data !== undefined) return result.data;
   throw new RelayApiError({
     status: result.response.status,
     detail: backendDetail(result.error, result.response.status),
@@ -131,6 +122,88 @@ async function transport<T>({
   }
 }
 
+async function requestJson<T>({
+  baseUrl,
+  path,
+  signal,
+  fetchImplementation,
+}: {
+  baseUrl: string;
+  path: string;
+  signal: AbortSignal;
+  fetchImplementation: typeof fetch;
+}): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetchImplementation(`${baseUrl}${path}`, { signal });
+  } catch (error) {
+    if (error instanceof DOMException) throw error;
+    throw new RelayApiError({
+      status: 0,
+      detail: error instanceof Error ? error.message : "Relay request failed.",
+      path,
+    });
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok) {
+    const record =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+    throw new RelayApiError({
+      status: response.status,
+      detail: backendDetail(body, response.status),
+      path,
+      code: typeof record.code === "string" ? record.code : undefined,
+      retryAfterSeconds:
+        typeof record.retry_after_seconds === "number"
+          ? record.retry_after_seconds
+          : undefined,
+    });
+  }
+  return body as T;
+}
+
+async function readAllPages<Item>({
+  baseUrl,
+  path,
+  signal,
+  fetchImplementation,
+}: {
+  baseUrl: string;
+  path: string;
+  signal: AbortSignal;
+  fetchImplementation: typeof fetch;
+}): Promise<Item[]> {
+  const items: Item[] = [];
+  let afterId = 0;
+  while (true) {
+    const separator = path.includes("?") ? "&" : "?";
+    const page = await requestJson<{
+      items: Item[];
+      next_after_id: number | null;
+    }>({
+      baseUrl,
+      path:
+        `${path}${separator}after_id=${afterId}` +
+        `&limit=${PAGE_SIZE}`,
+      signal,
+      fetchImplementation,
+    });
+    items.push(...page.items);
+    if (page.next_after_id === null) return items;
+    if (page.next_after_id <= afterId) {
+      throw new Error("Relay cursor page did not advance.");
+    }
+    afterId = page.next_after_id;
+  }
+}
+
 export function createRelayApi({
   baseUrl,
   fetchImplementation,
@@ -145,12 +218,18 @@ export function createRelayApi({
     baseUrl,
     fetch: fetchImplementation,
   });
-
   return {
     getHealth: (signal) =>
       transport({
         path: "/healthz",
         request: () => client.GET("/healthz", { signal }),
+      }),
+    getReadiness: (signal) =>
+      requestJson({
+        baseUrl,
+        path: "/readyz",
+        signal,
+        fetchImplementation,
       }),
     listSeasons: (signal) =>
       transport({
@@ -194,9 +273,7 @@ export function createRelayApi({
         path: `/v1/seasons/${seasonId}/events/${eventId}`,
         request: () =>
           client.GET("/v1/seasons/{season_id}/events/{event_id}", {
-            params: {
-              path: { season_id: seasonId, event_id: eventId },
-            },
+            params: { path: { season_id: seasonId, event_id: eventId } },
             signal,
           }),
       }),
@@ -223,9 +300,7 @@ export function createRelayApi({
         path: `/v1/seasons/${seasonId}/teams/${teamId}`,
         request: () =>
           client.GET("/v1/seasons/{season_id}/teams/{team_id}", {
-            params: {
-              path: { season_id: seasonId, team_id: teamId },
-            },
+            params: { path: { season_id: seasonId, team_id: teamId } },
             signal,
           }),
       }),
@@ -239,13 +314,11 @@ export function createRelayApi({
           }),
       }),
     listElements: (seasonId, signal) =>
-      transport({
+      readAllPages({
+        baseUrl,
         path: `/v1/seasons/${seasonId}/elements`,
-        request: () =>
-          client.GET("/v1/seasons/{season_id}/elements", {
-            params: { path: { season_id: seasonId } },
-            signal,
-          }),
+        signal,
+        fetchImplementation,
       }),
     getElement: (seasonId, elementId, signal) =>
       transport({
@@ -259,24 +332,18 @@ export function createRelayApi({
           }),
       }),
     listFixtures: (seasonId, signal) =>
-      transport({
+      readAllPages({
+        baseUrl,
         path: `/v1/seasons/${seasonId}/fixtures`,
-        request: () =>
-          client.GET("/v1/seasons/{season_id}/fixtures", {
-            params: { path: { season_id: seasonId } },
-            signal,
-          }),
+        signal,
+        fetchImplementation,
       }),
     listEventFixtures: (seasonId, eventId, signal) =>
-      transport({
+      readAllPages({
+        baseUrl,
         path: `/v1/seasons/${seasonId}/events/${eventId}/fixtures`,
-        request: () =>
-          client.GET("/v1/seasons/{season_id}/events/{event_id}/fixtures", {
-            params: {
-              path: { season_id: seasonId, event_id: eventId },
-            },
-            signal,
-          }),
+        signal,
+        fetchImplementation,
       }),
     getEventStatus: (seasonId, signal) =>
       transport({
@@ -288,18 +355,13 @@ export function createRelayApi({
           }),
       }),
     listLiveElements: (seasonId, eventId, signal) =>
-      transport({
-        path: `/v1/seasons/${seasonId}/events/${eventId}/live-elements`,
-        request: () =>
-          client.GET(
-            "/v1/seasons/{season_id}/events/{event_id}/live-elements",
-            {
-              params: {
-                path: { season_id: seasonId, event_id: eventId },
-              },
-              signal,
-            },
-          ),
+      readAllPages({
+        baseUrl,
+        path:
+          `/v1/seasons/${seasonId}/events/${eventId}` +
+          "/live-elements",
+        signal,
+        fetchImplementation,
       }),
     getLiveElement: (seasonId, eventId, elementId, signal) =>
       transport({
@@ -322,66 +384,11 @@ export function createRelayApi({
           ),
       }),
     listChangeEvents: (afterId, limit, signal) =>
-      transport({
+      requestJson({
+        baseUrl,
         path: `/v1/change-events?after_id=${afterId}&limit=${limit}`,
-        request: () =>
-          client.GET("/v1/change-events", {
-            params: { query: { after_id: afterId, limit } },
-            signal,
-          }),
+        signal,
+        fetchImplementation,
       }),
-    watchChangeEvents: async ({ afterId, signal, onEvent }) => {
-      const path = "/v1/stream";
-      let response: Response;
-      try {
-        response = await fetchImplementation(`${baseUrl}${path}`, {
-          headers: {
-            Accept: "text/event-stream",
-            "Last-Event-ID": String(afterId),
-          },
-          signal,
-        });
-      } catch (error) {
-        if (error instanceof DOMException) {
-          throw error;
-        }
-        throw new RelayApiError({
-          status: 0,
-          detail:
-            error instanceof Error
-              ? error.message
-              : "Could not connect to the relay stream.",
-          path,
-        });
-      }
-      if (!response.ok) {
-        let error: unknown;
-        try {
-          error = await response.json();
-        } catch {
-          error = undefined;
-        }
-        throw new RelayApiError({
-          status: response.status,
-          detail: backendDetail(error, response.status),
-          path,
-        });
-      }
-      if (response.body === null) {
-        throw new RelayApiError({
-          status: response.status,
-          detail: "The relay stream returned no response body.",
-          path,
-        });
-      }
-      await consumeSse({ body: response.body, onEvent });
-      if (!signal.aborted) {
-        throw new RelayApiError({
-          status: response.status,
-          detail: "The relay change stream disconnected.",
-          path,
-        });
-      }
-    },
   };
 }

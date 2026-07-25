@@ -19,6 +19,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/readyz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check database readiness
+         * @description Verify that the database is awake and has the expected schema.
+         */
+        get: operations["get_readiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/seasons": {
         parameters: {
             query?: never;
@@ -228,7 +248,7 @@ export interface paths {
         };
         /**
          * List season elements
-         * @description Return all stored FPL elements for one season.
+         * @description Return a cursor page of stored FPL elements.
          */
         get: operations["list_elements"];
         put?: never;
@@ -268,7 +288,7 @@ export interface paths {
         };
         /**
          * List season fixtures
-         * @description Return all stored FPL fixtures for one season.
+         * @description Return a cursor page of stored FPL fixtures for one season.
          */
         get: operations["list_fixtures"];
         put?: never;
@@ -288,7 +308,7 @@ export interface paths {
         };
         /**
          * List season event fixtures
-         * @description Return fixtures for one FPL event in one season.
+         * @description Return a cursor page of fixtures for one event.
          */
         get: operations["list_event_fixtures"];
         put?: never;
@@ -328,7 +348,7 @@ export interface paths {
         };
         /**
          * List season live elements
-         * @description Return live element rows for one FPL event in one season.
+         * @description Return a cursor page of live elements.
          */
         get: operations["list_live_elements"];
         put?: never;
@@ -379,26 +399,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/stream": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stream change events
-         * @description Open a Server-Sent Events stream. Supply `Last-Event-ID` to replay events after a previously received identifier. Each update contains `id`, `event`, and JSON `data` fields; idle connections receive heartbeat comments. Swagger UI cannot complete this long-lived request.
-         */
-        get: operations["stream_change_events"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -437,8 +437,31 @@ export interface components {
          * @description Page of change events after a caller-supplied event identifier.
          */
         ChangeEventsResponse: {
-            /** Events */
-            events: components["schemas"]["ChangeEventResponse"][];
+            /** Items */
+            items: components["schemas"]["ChangeEventResponse"][];
+            /** Next After Id */
+            next_after_id: number | null;
+        };
+        /** CursorPage[Element] */
+        CursorPage_Element_: {
+            /** Items */
+            items: components["schemas"]["Element"][];
+            /** Next After Id */
+            next_after_id: number | null;
+        };
+        /** CursorPage[Fixture] */
+        CursorPage_Fixture_: {
+            /** Items */
+            items: components["schemas"]["Fixture"][];
+            /** Next After Id */
+            next_after_id: number | null;
+        };
+        /** CursorPage[LiveElement] */
+        CursorPage_LiveElement_: {
+            /** Items */
+            items: components["schemas"]["LiveElement"][];
+            /** Next After Id */
+            next_after_id: number | null;
         };
         /**
          * Element
@@ -817,6 +840,19 @@ export interface components {
             /** Stop Event */
             stop_event: number;
         };
+        /**
+         * ReadyResponse
+         * @description Database readiness and applied schema version.
+         */
+        ReadyResponse: {
+            /**
+             * Status
+             * @constant
+             */
+            status: "ready";
+            /** Schema Version */
+            schema_version: number;
+        };
         ScalarValue: number | string | boolean | null;
         /**
          * Season
@@ -841,6 +877,21 @@ export interface components {
             last_deadline_time: string;
             /** Is Current */
             is_current: boolean;
+        };
+        /**
+         * ServiceErrorResponse
+         * @description Stable machine-readable service availability error.
+         */
+        ServiceErrorResponse: {
+            /** Detail */
+            detail: string;
+            /**
+             * Code
+             * @enum {string}
+             */
+            code: "database_waking" | "database_unavailable" | "schema_unavailable";
+            /** Retry After Seconds */
+            retry_after_seconds: number | null;
         };
         /**
          * Team
@@ -910,6 +961,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    get_readiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Database readiness and applied schema version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadyResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceErrorResponse"];
                 };
             };
         };
@@ -1261,7 +1341,10 @@ export interface operations {
     };
     list_elements: {
         parameters: {
-            query?: never;
+            query: {
+                after_id: number;
+                limit: number;
+            };
             header?: never;
             path: {
                 /** @description FPL season id. */
@@ -1277,7 +1360,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Element"][];
+                    "application/json": components["schemas"]["CursorPage_Element_"];
                 };
             };
             /** @description Validation Error */
@@ -1336,7 +1419,10 @@ export interface operations {
     };
     list_fixtures: {
         parameters: {
-            query?: never;
+            query: {
+                after_id: number;
+                limit: number;
+            };
             header?: never;
             path: {
                 /** @description FPL season id. */
@@ -1352,7 +1438,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Fixture"][];
+                    "application/json": components["schemas"]["CursorPage_Fixture_"];
                 };
             };
             /** @description Validation Error */
@@ -1368,7 +1454,10 @@ export interface operations {
     };
     list_event_fixtures: {
         parameters: {
-            query?: never;
+            query: {
+                after_id: number;
+                limit: number;
+            };
             header?: never;
             path: {
                 /** @description FPL season id. */
@@ -1386,7 +1475,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Fixture"][];
+                    "application/json": components["schemas"]["CursorPage_Fixture_"];
                 };
             };
             /** @description Validation Error */
@@ -1443,7 +1532,10 @@ export interface operations {
     };
     list_live_elements: {
         parameters: {
-            query?: never;
+            query: {
+                after_id: number;
+                limit: number;
+            };
             header?: never;
             path: {
                 /** @description FPL season id. */
@@ -1461,7 +1553,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LiveElement"][];
+                    "application/json": components["schemas"]["CursorPage_LiveElement_"];
                 };
             };
             /** @description Validation Error */
@@ -1522,11 +1614,11 @@ export interface operations {
     };
     list_change_events: {
         parameters: {
-            query?: {
+            query: {
                 /** @description Return events after this change-event identifier. */
-                after_id?: number;
+                after_id: number;
                 /** @description Maximum number of events to return. */
-                limit?: number;
+                limit: number;
             };
             header?: never;
             path?: never;
@@ -1541,52 +1633,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChangeEventsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    stream_change_events: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Replay events whose identifiers are greater than this non-negative integer. */
-                "Last-Event-ID"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description A long-lived Server-Sent Events stream. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    /**
-                     * @example id: 7
-                     *     event: event_live.updated
-                     *     data: {"id":7,"event_name":"event_live.updated"}
-                     */
-                    "text/event-stream": string;
-                };
-            };
-            /** @description The Last-Event-ID header is not a non-negative integer. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */

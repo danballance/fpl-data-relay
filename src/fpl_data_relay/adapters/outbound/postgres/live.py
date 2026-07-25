@@ -22,10 +22,14 @@ class PostgresLiveRepository:
         *,
         season_id: str,
         event_id: int,
+        after_id: int,
+        limit: int,
     ) -> list[LiveElement]:
         return await self._database.list_live_elements(
             season_id=season_id,
             event_id=event_id,
+            after_id=after_id,
+            limit=limit,
         )
 
     async def get_live_element(

@@ -1,6 +1,5 @@
 """Narrow persistence ports owned by the application layer."""
 
-from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
@@ -112,7 +111,13 @@ class ReferenceRepository(Protocol):
 
     async def list_element_types(self, *, season_id: str) -> list[ElementType]: ...
 
-    async def list_elements(self, *, season_id: str) -> list[Element]: ...
+    async def list_elements(
+        self,
+        *,
+        season_id: str,
+        after_id: int,
+        limit: int,
+    ) -> list[Element]: ...
 
     async def get_element(
         self,
@@ -126,6 +131,8 @@ class ReferenceRepository(Protocol):
         *,
         season_id: str,
         event_id: int | None,
+        after_id: int,
+        limit: int,
     ) -> list[Fixture]: ...
 
     async def get_fixture(
@@ -150,6 +157,8 @@ class LiveRepository(Protocol):
         *,
         season_id: str,
         event_id: int,
+        after_id: int,
+        limit: int,
     ) -> list[LiveElement]: ...
 
     async def get_live_element(
@@ -162,7 +171,7 @@ class LiveRepository(Protocol):
 
 
 class ChangeEventRepository(Protocol):
-    """Change-event replay and streaming operations."""
+    """Change-event replay operations."""
 
     async def list_change_events(
         self,
@@ -170,10 +179,3 @@ class ChangeEventRepository(Protocol):
         after_id: int,
         limit: int,
     ) -> list[ChangeEvent]: ...
-
-    def watch_change_events(
-        self,
-        *,
-        after_id: int,
-        heartbeat_seconds: int,
-    ) -> AsyncIterator[ChangeEvent | None]: ...

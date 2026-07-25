@@ -1,9 +1,10 @@
 # FPL Data Relay
 
-Self-hosted Python relay for public Fantasy Premier League data. The service
+Serverless Python relay for public Fantasy Premier League data. The service
 fetches core FPL API documents, validates them with explicit Pydantic models,
 stores season-scoped state as normalised Postgres entities, exposes
-entity-oriented REST endpoints, and streams stored change events over SSE.
+entity-oriented REST endpoints, and exposes stored changes through cursor
+pagination.
 
 ## Local Commands
 
@@ -11,6 +12,7 @@ For local development, run commands through uv:
 
 ```fish
 uv run fpl-relay config-check
+uv run fpl-relay db status
 uv run fpl-relay db apply
 uv run fpl-relay ingest reference
 uv run fpl-relay ingest live
@@ -38,15 +40,12 @@ uv run fpl-relay db apply
 connect to a separate maintenance database before recreating the configured app
 database.
 
-For Dokploy/Compose deployments, run CLI commands inside the `app` service:
+Production uses AWS SAM, Lambda, Aurora PostgreSQL Serverless v2 with Data API,
+SQS/EventBridge Scheduler, and S3/CloudFront in `eu-west-2`. Local Compose
+continues to use PostgreSQL 17.7 and `asyncpg`.
 
-```fish
-docker compose run --rm app uv run --no-dev fpl-relay db apply
-docker compose run --rm app uv run --no-dev fpl-relay ingest reference
-docker compose run --rm app uv run --no-dev fpl-relay ingest live
-```
-
-See [docs/deployment.md](docs/deployment.md) for production command examples.
+See [docs/deployment.md](docs/deployment.md) for the complete AWS deployment
+runbook.
 See [docs/api.md](docs/api.md) for the exposed HTTP API.
 See [docs/architecture.md](docs/architecture.md) for package boundaries.
 See [docs/client.md](docs/client.md) for the local React data explorer.

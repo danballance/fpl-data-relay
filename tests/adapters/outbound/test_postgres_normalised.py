@@ -518,12 +518,32 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
     assert element is not None
     assert element.web_name == "Player"
     assert element.photo == "1.jpg"
-    assert len(await store.list_elements(season_id="2025-26")) == 1
+    assert len(
+        await store.list_elements(
+            season_id="2025-26",
+            after_id=0,
+            limit=100,
+        ),
+    ) == 1
     stored_fixture = await store.get_fixture(season_id="2025-26", fixture_id=1)
     assert stored_fixture is not None
     assert stored_fixture.stats[0].h[0].value == 2
-    assert len(await store.list_fixtures(season_id="2025-26", event_id=None)) == 1
-    assert len(await store.list_fixtures(season_id="2025-26", event_id=1)) == 1
+    assert len(
+        await store.list_fixtures(
+            season_id="2025-26",
+            event_id=None,
+            after_id=0,
+            limit=100,
+        ),
+    ) == 1
+    assert len(
+        await store.list_fixtures(
+            season_id="2025-26",
+            event_id=1,
+            after_id=0,
+            limit=100,
+        ),
+    ) == 1
     stored_status = await store.get_event_status(season_id="2025-26")
     assert stored_status is not None
     assert stored_status.leagues == "updated"
@@ -534,7 +554,14 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
     )
     assert live_element is not None
     assert live_element.stats.total_points == 8
-    assert len(await store.list_live_elements(season_id="2025-26", event_id=1)) == 1
+    assert len(
+        await store.list_live_elements(
+            season_id="2025-26",
+            event_id=1,
+            after_id=0,
+            limit=100,
+        ),
+    ) == 1
     assert len(await store.list_change_events(after_id=0, limit=20)) == 9
     await store.close()
     assert pool.closed is True

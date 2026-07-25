@@ -1,6 +1,7 @@
 .coverage
 .pytest_cache/
 .ruff_cache/
+.aws-sam/
 .venv/
 *.egg-info/
 __pycache__/

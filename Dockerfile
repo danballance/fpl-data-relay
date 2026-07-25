@@ -8,8 +8,8 @@ ENV UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --group local
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-dev", "fpl-relay", "serve"]
+CMD ["uv", "run", "--no-dev", "--group", "local", "fpl-relay", "serve"]

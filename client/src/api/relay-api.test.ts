@@ -29,23 +29,32 @@ describe("relay API adapter", () => {
       const url = input instanceof Request ? input.url : String(input);
       requested.push(url);
       if (url.endsWith("/healthz")) return jsonResponse(health);
+      if (url.endsWith("/readyz")) {
+        return jsonResponse({ status: "ready", schema_version: 1 });
+      }
       if (url.endsWith("/v1/seasons")) return jsonResponse([season]);
       if (url.endsWith("/v1/seasons/current")) return jsonResponse(season);
       if (url.includes("/element-types")) return jsonResponse([elementType]);
       if (url.match(/\/elements\/10$/)) return jsonResponse(element);
-      if (url.endsWith("/elements")) return jsonResponse([element]);
+      if (url.includes("/elements?after_id=")) {
+        return jsonResponse({ items: [element], next_after_id: null });
+      }
       if (url.match(/\/teams\/1$/)) return jsonResponse(team);
       if (url.endsWith("/teams")) return jsonResponse([team]);
       if (url.includes("/live-elements/10")) return jsonResponse(liveElement);
-      if (url.endsWith("/live-elements")) return jsonResponse([liveElement]);
+      if (url.includes("/live-elements?after_id=")) {
+        return jsonResponse({ items: [liveElement], next_after_id: null });
+      }
       if (url.endsWith("/event-status")) return jsonResponse(status);
-      if (url.endsWith("/fixtures")) return jsonResponse([fixture]);
+      if (url.includes("/fixtures?after_id=")) {
+        return jsonResponse({ items: [fixture], next_after_id: null });
+      }
       if (url.match(/\/events\/1$/)) return jsonResponse(event);
       if (url.endsWith("/events/current")) return jsonResponse(event);
       if (url.endsWith("/events")) return jsonResponse([event]);
       if (url.endsWith("/phases")) return jsonResponse([]);
       if (url.startsWith("http://relay/v1/change-events")) {
-        return jsonResponse({ events: [changeEvent] });
+        return jsonResponse({ items: [changeEvent], next_after_id: null });
       }
       if (url.endsWith("/v1/seasons/2025-26")) return jsonResponse(season);
       throw new Error(`Unexpected URL ${url}`);
@@ -57,6 +66,10 @@ describe("relay API adapter", () => {
     const signal = new AbortController().signal;
 
     expect(await api.getHealth(signal)).toEqual(health);
+    expect(await api.getReadiness(signal)).toEqual({
+      status: "ready",
+      schema_version: 1,
+    });
     expect(await api.listSeasons(signal)).toEqual([season]);
     expect(await api.getCurrentSeason(signal)).toEqual(season);
     expect(await api.getSeason(season.id, signal)).toEqual(season);
@@ -83,7 +96,8 @@ describe("relay API adapter", () => {
       liveElement,
     );
     expect(await api.listChangeEvents(0, 100, signal)).toEqual({
-      events: [changeEvent],
+      items: [changeEvent],
+      next_after_id: null,
     });
     expect(requested).toContain(
       "http://relay/v1/change-events?after_id=0&limit=100",
@@ -155,84 +169,73 @@ describe("relay API adapter", () => {
     ).rejects.toBe(abort);
   });
 
-  it("streams change events with a replay header and reports disconnects", async () => {
-    const encoder = new TextEncoder();
-    const onEvent = vi.fn();
-    const fetchImplementation = vi.fn(async () => {
-      return new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(changeEvent)}\n\n`),
-            );
-            controller.close();
-          },
-        }),
-        { status: 200 },
-      );
-    });
+  it("preserves waking error codes for the readiness gate", async () => {
     const api = createRelayApi({
       baseUrl: "/api",
-      fetchImplementation,
-    });
-    await expect(
-      api.watchChangeEvents({
-        afterId: 42,
-        signal: new AbortController().signal,
-        onEvent,
-      }),
-    ).rejects.toMatchObject({ detail: "The relay change stream disconnected." });
-    expect(onEvent).toHaveBeenCalledWith(changeEvent);
-    expect(fetchImplementation).toHaveBeenCalledWith(
-      "/api/v1/stream",
-      expect.objectContaining({
-        headers: {
-          Accept: "text/event-stream",
-          "Last-Event-ID": "42",
-        },
-      }),
-    );
-  });
-
-  it("handles stream connection, HTTP, and body failures", async () => {
-    const signal = new AbortController().signal;
-    const network = createRelayApi({
-      baseUrl: "/api",
-      fetchImplementation: vi.fn(async () => {
-        throw new Error("stream unavailable");
-      }),
-    });
-    await expect(
-      network.watchChangeEvents({ afterId: 0, signal, onEvent: vi.fn() }),
-    ).rejects.toMatchObject({ status: 0, detail: "stream unavailable" });
-
-    const http = createRelayApi({
-      baseUrl: "/api",
       fetchImplementation: vi.fn(async () =>
-        jsonResponse({ detail: "Bad stream id." }, 400),
+        jsonResponse(
+          {
+            code: "database_waking",
+            detail: "The database is waking from idle. Retry shortly.",
+            retry_after_seconds: 5,
+          },
+          503,
+        ),
       ),
     });
     await expect(
-      http.watchChangeEvents({ afterId: 0, signal, onEvent: vi.fn() }),
-    ).rejects.toMatchObject({ status: 400, detail: "Bad stream id." });
+      api.getReadiness(new AbortController().signal),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "database_waking",
+      retryAfterSeconds: 5,
+    });
+  });
 
-    const nonJson = createRelayApi({
+  it("follows paginated collection cursors and rejects stalled cursors", async () => {
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [element], next_after_id: 10 }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ ...element, id: 11 }],
+          next_after_id: null,
+        }),
+      );
+    const api = createRelayApi({ baseUrl: "/api", fetchImplementation });
+    await expect(
+      api.listElements(season.id, new AbortController().signal),
+    ).resolves.toHaveLength(2);
+    expect(fetchImplementation).toHaveBeenLastCalledWith(
+      expect.stringContaining("after_id=10"),
+      expect.any(Object),
+    );
+
+    const stalled = createRelayApi({
       baseUrl: "/api",
-      fetchImplementation: vi.fn(async () => new Response("bad", { status: 500 })),
+      fetchImplementation: vi.fn(async () =>
+        jsonResponse({ items: [element], next_after_id: 0 }),
+      ),
     });
     await expect(
-      nonJson.watchChangeEvents({ afterId: 0, signal, onEvent: vi.fn() }),
+      stalled.listElements(season.id, new AbortController().signal),
+    ).rejects.toThrow("did not advance");
+  });
+
+  it("reports non-JSON HTTP responses from raw endpoints", async () => {
+    const api = createRelayApi({
+      baseUrl: "/api",
+      fetchImplementation: vi.fn(async () =>
+        new Response("not json", { status: 500 }),
+      ),
+    });
+    await expect(
+      api.getReadiness(new AbortController().signal),
     ).rejects.toMatchObject({
       status: 500,
       detail: "Relay request failed with HTTP 500.",
     });
-
-    const empty = createRelayApi({
-      baseUrl: "/api",
-      fetchImplementation: vi.fn(async () => new Response(null, { status: 200 })),
-    });
-    await expect(
-      empty.watchChangeEvents({ afterId: 0, signal, onEvent: vi.fn() }),
-    ).rejects.toMatchObject({ detail: "The relay stream returned no response body." });
   });
 });

@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import cast
 
 import pytest
@@ -9,11 +8,10 @@ from asyncpg.protocol import protocol
 from fpl_data_relay.adapters.outbound.postgres.database import (
     IngestionLockError,
     PostgresDatabase,
-    SchemaError,
     row_values,
 )
 from fpl_data_relay.application.database import SCHEMA_VERSION
-from fpl_data_relay.domain.changes import EntityFamily, IngestionSourceKey
+from fpl_data_relay.application.errors import SchemaUnavailableError
 from tests.conftest import FakePostgresPool
 
 
@@ -33,7 +31,7 @@ async def test_postgres_store_fails_on_schema_mismatch() -> None:
     pool = FakePostgresPool()
     pool.schema_version = 999
     store = PostgresDatabase(pool=pool)
-    with pytest.raises(SchemaError, match="schema version mismatch"):
+    with pytest.raises(SchemaUnavailableError, match="schema version mismatch"):
         await store.check_schema_version(expected_version=SCHEMA_VERSION)
 
 
@@ -46,34 +44,6 @@ async def test_postgres_store_advisory_lock_rejects_overlap() -> None:
             async with store.ingestion_lock():
                 pass
     assert pool.locked is False
-
-
-@pytest.mark.asyncio
-async def test_postgres_store_watch_replays_then_heartbeats() -> None:
-    pool = FakePostgresPool()
-    store = PostgresDatabase(pool=pool)
-    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
-    pool.events.append(
-        {
-            "id": 1,
-            "season_id": "2025-26",
-            "entity_family": EntityFamily.EVENT_LIVE.value,
-            "event_name": "event_live.updated",
-            "source_key": IngestionSourceKey.EVENT_LIVE.value,
-            "resource_key": IngestionSourceKey.EVENT_LIVE.value,
-            "event_id": 1,
-            "payload_hash": "a" * 64,
-            "fetched_at": timestamp,
-            "created_at": timestamp,
-        },
-    )
-    events = []
-    async for event in store.watch_change_events(after_id=0, heartbeat_seconds=1):
-        events.append(event)
-        if len(events) == 2:
-            break
-    assert events[0] is not None
-    assert events[1] is None
 
 
 def test_row_values_rejects_unknown_row_shape() -> None:

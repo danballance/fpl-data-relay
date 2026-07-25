@@ -25,10 +25,28 @@ class HealthResponse(ApiResponse):
     schema_version: int
 
 
+class ReadyResponse(ApiResponse):
+    """Database readiness and applied schema version."""
+
+    status: Literal["ready"]
+    schema_version: int
+
+
 class ErrorResponse(ApiResponse):
     """Standard FastAPI error payload returned by relay endpoints."""
 
     detail: str
+
+
+class ServiceErrorResponse(ErrorResponse):
+    """Stable machine-readable service availability error."""
+
+    code: Literal[
+        "database_waking",
+        "database_unavailable",
+        "schema_unavailable",
+    ]
+    retry_after_seconds: int | None
 
 
 class ChangeEventResponse(ApiResponse):
@@ -49,7 +67,15 @@ class ChangeEventResponse(ApiResponse):
 class ChangeEventsResponse(ApiResponse):
     """Page of change events after a caller-supplied event identifier."""
 
-    events: list[ChangeEventResponse]
+    items: list[ChangeEventResponse]
+    next_after_id: int | None
+
+
+class CursorPage[ItemT](ApiResponse):
+    """Cursor page for an entity with an integer id."""
+
+    items: list[ItemT]
+    next_after_id: int | None
 
 
 def public_change_event(*, change_event: ChangeEvent) -> ChangeEventResponse:

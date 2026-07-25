@@ -16,6 +16,7 @@ from fpl_data_relay.application.ingestion.service import (
     IngestionService,
 )
 from fpl_data_relay.application.live_queries import LiveQueries
+from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.bootstrap import RelayRuntime, build_postgres_database
 from fpl_data_relay.config import Settings
@@ -31,6 +32,10 @@ class FakeCliOperations:
 
     async def apply_schema(self) -> None:
         self.calls.append(("apply", None, None))
+
+    async def schema_status(self) -> SchemaStatus:
+        self.calls.append(("status", None, None))
+        return SchemaStatus(applied_versions=[1], pending_versions=[])
 
     async def drop_and_create_database(self) -> None:
         self.calls.append(("drop", None, None))
@@ -65,6 +70,7 @@ def ingestion_result() -> IngestionResult:
 def settings() -> Settings:
     return Settings.model_validate(
         {
+            "DATABASE_EXECUTOR": "asyncpg",
             "DATABASE_URL": "postgresql://relay:relay@localhost:5432/relay",
             "FPL_API_BASE_URL": "https://fantasy.premierleague.com/api",
             "FPL_CLIENT_USER_AGENT": "tests",
@@ -72,7 +78,6 @@ def settings() -> Settings:
             "REFERENCE_POLL_SECONDS": 300,
             "LIVE_POLL_SECONDS": 15,
             "IDLE_POLL_SECONDS": 120,
-            "SSE_HEARTBEAT_SECONDS": 5,
         },
     )
 
@@ -82,11 +87,16 @@ def test_cli_preserves_config_schema_and_serve_commands() -> None:
     runner = CliRunner()
     app = create_cli_app(operations=operations)
     assert runner.invoke(app, ["config-check"]).output == "configuration ok\n"
-    assert "schema version 3 applied" in runner.invoke(app, ["db", "apply"]).output
+    assert "schema version 1 applied" in runner.invoke(app, ["db", "apply"]).output
+    assert (
+        runner.invoke(app, ["db", "status"]).output
+        == "applied=[1] pending=[]\n"
+    )
     assert runner.invoke(app, ["serve"]).exit_code == 0
     assert operations.calls == [
         ("config", None, None),
         ("apply", None, None),
+        ("status", None, None),
         ("serve", None, None),
     ]
 

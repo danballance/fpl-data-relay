@@ -47,13 +47,24 @@ async def test_narrow_postgres_adapters_expose_complete_use_cases() -> None:
     assert len(await reference.list_teams(season_id="2025-26")) == 2
     assert await reference.get_team(season_id="2025-26", team_id=1) is not None
     assert len(await reference.list_element_types(season_id="2025-26")) == 1
-    assert len(await reference.list_elements(season_id="2025-26")) == 1
+    assert len(
+        await reference.list_elements(
+            season_id="2025-26",
+            after_id=0,
+            limit=100,
+        ),
+    ) == 1
     assert (
         await reference.get_element(season_id="2025-26", element_id=1)
         is not None
     )
     assert len(
-        await reference.list_fixtures(season_id="2025-26", event_id=None),
+        await reference.list_fixtures(
+            season_id="2025-26",
+            event_id=None,
+            after_id=0,
+            limit=100,
+        ),
     ) == 1
     assert (
         await reference.get_fixture(season_id="2025-26", fixture_id=1)
@@ -63,7 +74,12 @@ async def test_narrow_postgres_adapters_expose_complete_use_cases() -> None:
     live = LiveQueries(repository=PostgresLiveRepository(database=database))
     assert await live.get_event_status(season_id="2025-26") is not None
     assert len(
-        await live.list_live_elements(season_id="2025-26", event_id=1),
+        await live.list_live_elements(
+            season_id="2025-26",
+            event_id=1,
+            after_id=0,
+            limit=100,
+        ),
     ) == 1
     assert (
         await live.get_live_element(
@@ -78,8 +94,6 @@ async def test_narrow_postgres_adapters_expose_complete_use_cases() -> None:
         repository=PostgresChangeEventRepository(database=database),
     )
     assert len(await changes.list_events(after_id=0, limit=100)) == 10
-    stream = changes.watch_events(after_id=10, heartbeat_seconds=1)
-    assert await anext(stream) is None
 
 
 @pytest.mark.asyncio

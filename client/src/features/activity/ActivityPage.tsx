@@ -4,99 +4,84 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { errorMessage } from "../../api/errors";
 import { useRelayApi } from "../../api/provider";
-import type { ChangeEvent } from "../../api/types";
 import type { RelayApi } from "../../api/relay-api";
+import type { ChangeEvent } from "../../api/types";
 import { ResourcePage } from "../../components/ResourcePage";
 import { compactHash, formatDateTime } from "../../lib/format";
 
-export const CHANGE_PAGE_SIZE = 1_000;
+export const CHANGE_PAGE_SIZE = 100;
+export const CHANGE_POLL_MILLISECONDS = 15_000;
+
+export async function readChangesAfter(
+  api: RelayApi,
+  afterId: number,
+  signal: AbortSignal,
+): Promise<ChangeEvent[]> {
+  const events: ChangeEvent[] = [];
+  let cursor = afterId;
+  while (true) {
+    const page = await api.listChangeEvents(
+      cursor,
+      CHANGE_PAGE_SIZE,
+      signal,
+    );
+    events.push(...page.items);
+    if (page.next_after_id === null) return events;
+    if (page.next_after_id <= cursor) {
+      throw new Error("Change-event history did not advance its cursor.");
+    }
+    cursor = page.next_after_id;
+  }
+}
 
 export async function readChangeHistory(
   api: RelayApi,
   signal: AbortSignal,
 ): Promise<ChangeEvent[]> {
-  const events: ChangeEvent[] = [];
-  let afterId = 0;
-
-  while (true) {
-    const page = await api.listChangeEvents(
-      afterId,
-      CHANGE_PAGE_SIZE,
-      signal,
-    );
-    events.push(...page.events);
-    if (page.events.length < CHANGE_PAGE_SIZE) {
-      return events;
-    }
-    const nextId = page.events.at(-1)?.id;
-    if (nextId === undefined || nextId <= afterId) {
-      throw new Error("Change-event history did not advance its cursor.");
-    }
-    afterId = nextId;
-  }
+  return readChangesAfter(api, 0, signal);
 }
 
 export function mergeChangeEvents(
   history: ChangeEvent[],
-  live: ChangeEvent[],
+  polled: ChangeEvent[],
 ): ChangeEvent[] {
   return Array.from(
-    new Map([...history, ...live].map((event) => [event.id, event])).values(),
+    new Map([...history, ...polled].map((event) => [event.id, event])).values(),
   ).sort((left, right) => left.id - right.id);
 }
 
 export function ActivityPage() {
   const api = useRelayApi();
-  const historyQuery = useQuery({
-    queryKey: ["change-events"],
-    queryFn: ({ signal }) => readChangeHistory(api, signal),
-    retry: false,
-  });
-  const [liveEvents, setLiveEvents] = useState<ChangeEvent[]>([]);
-  const [streamState, setStreamState] = useState<
-    "connecting" | "live" | "disconnected"
-  >("connecting");
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [reconnect, setReconnect] = useState(0);
+  const [hidden, setHidden] = useState(document.hidden);
+  const eventsRef = useRef<ChangeEvent[]>([]);
   const lastSeenId = useRef(0);
-
-  const records = useMemo(
-    () => mergeChangeEvents(historyQuery.data ?? [], liveEvents),
-    [historyQuery.data, liveEvents],
-  );
+  const changesQuery = useQuery({
+    queryKey: ["change-events"],
+    queryFn: async ({ signal }) => {
+      const polled = await readChangesAfter(api, lastSeenId.current, signal);
+      const events = mergeChangeEvents(eventsRef.current, polled);
+      eventsRef.current = events;
+      lastSeenId.current = Math.max(
+        lastSeenId.current,
+        events.at(-1)?.id ?? 0,
+      );
+      return events;
+    },
+    retry: false,
+    refetchInterval: hidden ? false : CHANGE_POLL_MILLISECONDS,
+    refetchIntervalInBackground: false,
+  });
+  const events = changesQuery.data ?? [];
 
   useEffect(() => {
-    if (historyQuery.data === undefined) {
-      return;
-    }
-    const controller = new AbortController();
-    lastSeenId.current = Math.max(
-      lastSeenId.current,
-      historyQuery.data.at(-1)?.id ?? 0,
-    );
-    void api
-      .watchChangeEvents({
-        afterId: lastSeenId.current,
-        signal: controller.signal,
-        onEvent: (event) => {
-          lastSeenId.current = Math.max(lastSeenId.current, event.id);
-          setLiveEvents((current) =>
-            current.some((item) => item.id === event.id)
-              ? current
-              : [...current, event],
-          );
-          setStreamState("live");
-        },
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setStreamState("disconnected");
-        setStreamError(errorMessage(error));
-      });
-    return () => controller.abort();
-  }, [api, historyQuery.data, reconnect]);
+    const visibilityChanged = () => {
+      setHidden(document.hidden);
+      if (!document.hidden) void changesQuery.refetch();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () =>
+      document.removeEventListener("visibilitychange", visibilityChanged);
+  }, [changesQuery]);
 
   const columns = useMemo<ColumnDef<ChangeEvent>[]>(
     () => [
@@ -128,39 +113,37 @@ export function ActivityPage() {
     <ResourcePage
       eyebrow="Change feed"
       title="Activity"
-      description="Stored ingestion changes followed by the live relay stream."
-      query={historyQuery}
-      records={records}
+      description="Stored ingestion changes refreshed with cursor polling."
+      query={changesQuery}
+      records={events}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={(row) => `Change ${row.id} · ${row.event_name}`}
       controls={
         <div className="stream-control">
-          <span className={`stream-state stream-state--${streamState}`}>
+          <span
+            className={`stream-state stream-state--${
+              hidden ? "paused" : changesQuery.isError ? "error" : "polling"
+            }`}
+          >
             <span aria-hidden="true" />
-            {streamState === "connecting"
-              ? "Connecting"
-              : streamState === "live"
-                ? "Live"
-                : "Disconnected"}
+            {hidden ? "Paused" : changesQuery.isError ? "Error" : "Polling"}
           </span>
-          {streamError === null ? null : <span>{streamError}</span>}
-          {streamState === "disconnected" ? (
+          {changesQuery.isError ? (
+            <span>{errorMessage(changesQuery.error)}</span>
+          ) : null}
+          {changesQuery.isError ? (
             <button
               className="button"
               type="button"
-              onClick={() => {
-                setStreamState("connecting");
-                setStreamError(null);
-                setReconnect((value) => value + 1);
-              }}
+              onClick={() => void changesQuery.refetch()}
             >
-              Reconnect from {records.at(-1)?.id ?? 0}
+              Retry from {events.at(-1)?.id ?? 0}
             </button>
           ) : null}
         </div>
       }
-      rawResponse={{ events: records }}
+      rawResponse={{ items: events, next_after_id: null }}
       emptyMessage="No change events are stored yet."
     />
   );

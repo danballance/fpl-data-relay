@@ -147,7 +147,7 @@ export function OverviewPage() {
           <article>
             <span>03</span>
             <h3>Watch ingestion activity</h3>
-            <p>Review stored change metadata and follow the SSE feed.</p>
+            <p>Review stored change metadata refreshed by cursor polling.</p>
           </article>
         </div>
       </section>

@@ -982,3 +982,19 @@ code {
     animation: none;
   }
 }
+.service-gate {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+}
+
+.service-gate__panel {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d8dee9);
+  border-radius: 1rem;
+  max-width: 34rem;
+  padding: 2.5rem;
+  text-align: center;
+}

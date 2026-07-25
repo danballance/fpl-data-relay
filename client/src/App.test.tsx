@@ -26,7 +26,7 @@ describe("relay explorer application", () => {
   it("selects only the explicitly current season and event", async () => {
     renderApplication("/");
     expect(
-      screen.getByRole("heading", {
+      await screen.findByRole("heading", {
         name: "Explore what the relay is holding.",
       }),
     ).toBeInTheDocument();
@@ -80,7 +80,7 @@ describe("relay explorer application", () => {
       await screen.findByRole("heading", { name: heading }),
     ).toBeInTheDocument();
     const table = await screen.findByRole("table");
-    expect(within(table).getByText(tableText)).toBeInTheDocument();
+    expect(await within(table).findByText(tableText)).toBeInTheDocument();
   });
 
   it("supports player filters, search, detail loading, and raw JSON", async () => {
@@ -312,35 +312,80 @@ describe("relay explorer application", () => {
       getHealth: async () => healthPromise,
     });
     renderApplication("/", api);
-    expect(screen.getByText("Checking relay")).toBeInTheDocument();
+    expect(await screen.findByText("Checking relay")).toBeInTheDocument();
     rejectHealth?.(new Error("offline"));
     expect(await screen.findByText("Relay offline")).toBeInTheDocument();
   });
 
-  it("appends streamed events and reconnects explicitly after failure", async () => {
-    const watchChangeEvents = vi
-      .fn<RelayApi["watchChangeEvents"]>()
-      .mockImplementationOnce(async ({ onEvent }) => {
-        onEvent({
-          ...changeEvent,
-          id: 2,
-          entity_family: "fixtures",
-          event_name: "fixtures.updated",
-        });
-        throw new Error("stream ended");
-      })
-      .mockImplementation(async () => {
-        throw new Error("still ended");
-      });
-    const api = makeFakeRelayApi({ watchChangeEvents });
+  it("distinguishes readiness failure and supports a manual retry", async () => {
+    const getReadiness = vi
+      .fn<RelayApi["getReadiness"]>()
+      .mockRejectedValueOnce(
+        new RelayApiError({
+          status: 503,
+          detail: "Database unavailable.",
+          path: "/readyz",
+          code: "database_unavailable",
+        }),
+      )
+      .mockResolvedValue({ status: "ready", schema_version: 1 });
+    renderApplication("/", makeFakeRelayApi({ getReadiness }));
+    expect(
+      await screen.findByRole("heading", { name: "Service unavailable" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Database unavailable.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry now" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Explore what the relay is holding.",
+      }),
+    ).toBeInTheDocument();
+    expect(getReadiness).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows stored activity with polling status", async () => {
+    const api = makeFakeRelayApi({
+      listChangeEvents: async () => ({
+        items: [
+          {
+            ...changeEvent,
+            id: 2,
+            entity_family: "fixtures",
+            event_name: "fixtures.updated",
+          },
+        ],
+        next_after_id: null,
+      }),
+    });
     renderApplication("/activity?season=2025-26&event=1", api);
     expect(await screen.findByText("fixtures.updated")).toBeInTheDocument();
-    const reconnect = await screen.findByRole("button", {
-      name: "Reconnect from 2",
-    });
-    await userEvent.click(reconnect);
-    await waitFor(() => expect(watchChangeEvents).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("still ended")).toBeInTheDocument();
+    expect(screen.getByText("Polling")).toBeInTheDocument();
+  });
+
+  it("shows an activity polling error and retries from the cursor", async () => {
+    const listChangeEvents = vi
+      .fn<RelayApi["listChangeEvents"]>()
+      .mockRejectedValueOnce(new Error("poll failed"))
+      .mockResolvedValue({
+        items: [changeEvent],
+        next_after_id: null,
+      });
+    renderApplication(
+      "/activity?season=2025-26&event=1",
+      makeFakeRelayApi({ listChangeEvents }),
+    );
+    expect((await screen.findAllByText("poll failed")).length).toBeGreaterThan(0);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Retry from 0" }),
+    );
+    expect(await screen.findByText("elements.updated")).toBeInTheDocument();
+    expect(listChangeEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("pauses activity polling while the document is hidden", async () => {
+    vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    renderApplication("/activity?season=2025-26&event=1");
+    expect(await screen.findByText("Paused")).toBeInTheDocument();
   });
 
   it("redirects unknown routes to the overview", async () => {

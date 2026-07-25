@@ -2,25 +2,32 @@
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Annotated, NoReturn, Protocol
+from typing import Annotated, NoReturn
 
-from fastapi import FastAPI, Header, HTTPException, Path, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 
 from fpl_data_relay.adapters.inbound.http.schemas import (
     ChangeEventsResponse,
+    CursorPage,
     ErrorResponse,
     HealthResponse,
+    ReadyResponse,
+    ServiceErrorResponse,
     public_change_event,
 )
 from fpl_data_relay.adapters.inbound.scheduler import RelayScheduler
 from fpl_data_relay.application.change_feed import ChangeFeed
 from fpl_data_relay.application.database import SCHEMA_VERSION
+from fpl_data_relay.application.errors import (
+    DatabaseUnavailableError,
+    DatabaseWakingError,
+    SchemaUnavailableError,
+)
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.ports.administration import SchemaManager
 from fpl_data_relay.application.ports.inbound import IngestionRunner
 from fpl_data_relay.application.reference_queries import ReferenceQueries
-from fpl_data_relay.domain.changes import ChangeEvent
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
     EventStatusResponse,
@@ -50,7 +57,7 @@ OPENAPI_TAGS = [
     },
     {
         "name": "Change Events",
-        "description": "Change-event replay and Server-Sent Events streaming.",
+        "description": "Cursor-based change-event replay.",
     },
 ]
 
@@ -66,44 +73,18 @@ NOT_INGESTED_RESPONSE: dict[int | str, dict[str, object]] = {
         "description": "The requested data has not been ingested yet.",
     },
 }
-INVALID_LAST_EVENT_ID_RESPONSE: dict[int | str, dict[str, object]] = {
-    400: {
-        "description": "The Last-Event-ID header is not a non-negative integer.",
-        "content": {
-            "application/json": {
-                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
-            },
-        },
-    },
-}
-
-
-class DisconnectWatcher(Protocol):
-    """Minimal request interface needed by the SSE stream."""
-
-    async def is_disconnected(self) -> bool:
-        """Return whether the client has closed the response stream."""
-        ...
-
-
-class EventStreamResponse(StreamingResponse):
-    """Streaming response whose documented media type is SSE."""
-
-    media_type = "text/event-stream"
-
-
 def create_app(
     *,
     reference_queries: ReferenceQueries,
     live_queries: LiveQueries,
     change_feed: ChangeFeed,
     schema_manager: SchemaManager,
-    ingestion_service: IngestionRunner,
+    ingestion_service: IngestionRunner | None,
     reference_poll_seconds: int,
     live_poll_seconds: int,
     idle_poll_seconds: int,
-    sse_heartbeat_seconds: int,
     start_scheduler: bool,
+    check_schema_on_startup: bool,
     shutdown: Callable[[], Awaitable[None]],
 ) -> FastAPI:
     """Build the FastAPI app around injected application use cases."""
@@ -111,18 +92,31 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """Validate dependencies, start optional polling, and close resources."""
-        await schema_manager.check_schema_version(expected_version=SCHEMA_VERSION)
-        scheduler = RelayScheduler(
-            ingestion_service=ingestion_service,
-            reference_poll_seconds=reference_poll_seconds,
-            live_poll_seconds=live_poll_seconds,
-            idle_poll_seconds=idle_poll_seconds,
+        if check_schema_on_startup:
+            await schema_manager.check_schema_version(
+                expected_version=SCHEMA_VERSION,
+            )
+        if start_scheduler and ingestion_service is None:
+            raise RuntimeError("Local scheduler requires an ingestion service.")
+        scheduler = (
+            RelayScheduler(
+                ingestion_service=ingestion_service,
+                reference_poll_seconds=reference_poll_seconds,
+                live_poll_seconds=live_poll_seconds,
+                idle_poll_seconds=idle_poll_seconds,
+            )
+            if ingestion_service is not None
+            else None
         )
-        scheduler_task = scheduler.start() if start_scheduler else None
+        scheduler_task = (
+            scheduler.start() if start_scheduler and scheduler is not None else None
+        )
         try:
             yield
         finally:
             if scheduler_task is not None:
+                if scheduler is None:
+                    raise RuntimeError("Scheduler task exists without a scheduler.")
                 await scheduler.stop(task=scheduler_task)
             await shutdown()
 
@@ -138,6 +132,47 @@ def create_app(
         lifespan=lifespan,
     )
 
+    @app.exception_handler(DatabaseWakingError)
+    async def database_waking(
+        _: Request,
+        exception: DatabaseWakingError,
+    ) -> JSONResponse:
+        del exception
+        body = ServiceErrorResponse(
+            code="database_waking",
+            detail="The database is waking from idle. Retry shortly.",
+            retry_after_seconds=5,
+        )
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "5"},
+            content=body.model_dump(mode="json"),
+        )
+
+    @app.exception_handler(DatabaseUnavailableError)
+    async def database_unavailable(
+        _: Request,
+        exception: DatabaseUnavailableError,
+    ) -> JSONResponse:
+        body = ServiceErrorResponse(
+            code="database_unavailable",
+            detail=str(exception),
+            retry_after_seconds=None,
+        )
+        return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+
+    @app.exception_handler(SchemaUnavailableError)
+    async def schema_unavailable(
+        _: Request,
+        exception: SchemaUnavailableError,
+    ) -> JSONResponse:
+        body = ServiceErrorResponse(
+            code="schema_unavailable",
+            detail=str(exception),
+            retry_after_seconds=None,
+        )
+        return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
+
     @app.get(
         "/healthz",
         tags=["Service"],
@@ -148,6 +183,19 @@ def create_app(
     async def healthz() -> HealthResponse:
         """Report service liveness and the schema version expected by the app."""
         return HealthResponse(status="ok", schema_version=SCHEMA_VERSION)
+
+    @app.get(
+        "/readyz",
+        tags=["Service"],
+        summary="Check database readiness",
+        response_description="Database readiness and applied schema version.",
+        responses={503: {"model": ServiceErrorResponse}},
+        operation_id="get_readiness",
+    )
+    async def readyz() -> ReadyResponse:
+        """Verify that the database is awake and has the expected schema."""
+        await schema_manager.check_schema_version(expected_version=SCHEMA_VERSION)
+        return ReadyResponse(status="ready", schema_version=SCHEMA_VERSION)
 
     async def require_season(*, season_id: str) -> Season:
         """Return a season or raise the standard not-found response."""
@@ -356,10 +404,17 @@ def create_app(
             str,
             Path(pattern=r"^\d{4}-\d{2}$", description="FPL season id."),
         ],
-    ) -> list[Element]:
-        """Return all stored FPL elements for one season."""
+        after_id: Annotated[int, Query(ge=0)],
+        limit: Annotated[int, Query(ge=1, le=200)],
+    ) -> CursorPage[Element]:
+        """Return a cursor page of stored FPL elements."""
         await require_season(season_id=season_id)
-        return await reference_queries.list_elements(season_id=season_id)
+        items = await reference_queries.list_elements(
+            season_id=season_id,
+            after_id=after_id,
+            limit=limit,
+        )
+        return cursor_page(items=items, limit=limit)
 
     @app.get(
         "/v1/seasons/{season_id}/elements/{element_id}",
@@ -401,13 +456,18 @@ def create_app(
             str,
             Path(pattern=r"^\d{4}-\d{2}$", description="FPL season id."),
         ],
-    ) -> list[Fixture]:
-        """Return all stored FPL fixtures for one season."""
+        after_id: Annotated[int, Query(ge=0)],
+        limit: Annotated[int, Query(ge=1, le=200)],
+    ) -> CursorPage[Fixture]:
+        """Return a cursor page of stored FPL fixtures for one season."""
         await require_season(season_id=season_id)
-        return await reference_queries.list_fixtures(
+        items = await reference_queries.list_fixtures(
             season_id=season_id,
             event_id=None,
+            after_id=after_id,
+            limit=limit,
         )
+        return cursor_page(items=items, limit=limit)
 
     @app.get(
         "/v1/seasons/{season_id}/events/{event_id}/fixtures",
@@ -425,13 +485,18 @@ def create_app(
             int,
             Path(ge=1, description="FPL event identifier."),
         ],
-    ) -> list[Fixture]:
-        """Return fixtures for one FPL event in one season."""
+        after_id: Annotated[int, Query(ge=0)],
+        limit: Annotated[int, Query(ge=1, le=200)],
+    ) -> CursorPage[Fixture]:
+        """Return a cursor page of fixtures for one event."""
         await require_season(season_id=season_id)
-        return await reference_queries.list_fixtures(
+        items = await reference_queries.list_fixtures(
             season_id=season_id,
             event_id=event_id,
+            after_id=after_id,
+            limit=limit,
         )
+        return cursor_page(items=items, limit=limit)
 
     @app.get(
         "/v1/seasons/{season_id}/event-status",
@@ -470,13 +535,18 @@ def create_app(
             int,
             Path(ge=1, description="FPL event identifier."),
         ],
-    ) -> list[LiveElement]:
-        """Return live element rows for one FPL event in one season."""
+        after_id: Annotated[int, Query(ge=0)],
+        limit: Annotated[int, Query(ge=1, le=200)],
+    ) -> CursorPage[LiveElement]:
+        """Return a cursor page of live elements."""
         await require_season(season_id=season_id)
-        return await live_queries.list_live_elements(
+        items = await live_queries.list_live_elements(
             season_id=season_id,
             event_id=event_id,
+            after_id=after_id,
+            limit=limit,
         )
+        return cursor_page(items=items, limit=limit)
 
     @app.get(
         "/v1/seasons/{season_id}/events/{event_id}/live-elements/{element_id}",
@@ -530,73 +600,17 @@ def create_app(
                 ge=0,
                 description="Return events after this change-event identifier.",
             ),
-        ] = 0,
+        ],
         limit: Annotated[
             int,
-            Query(ge=1, le=1000, description="Maximum number of events to return."),
-        ] = 100,
+            Query(ge=1, le=200, description="Maximum number of events to return."),
+        ],
     ) -> ChangeEventsResponse:
         """List stored change-event metadata after a known event id."""
         events = await change_feed.list_events(after_id=after_id, limit=limit)
         return ChangeEventsResponse(
-            events=[public_change_event(change_event=event) for event in events],
-        )
-
-    @app.get(
-        "/v1/stream",
-        tags=["Change Events"],
-        summary="Stream change events",
-        description=(
-            "Open a Server-Sent Events stream. Supply `Last-Event-ID` to replay "
-            "events after a previously received identifier. Each update contains "
-            "`id`, `event`, and JSON `data` fields; idle connections receive "
-            "heartbeat comments. Swagger UI cannot complete this long-lived request."
-        ),
-        response_model=None,
-        response_class=EventStreamResponse,
-        responses={
-            200: {
-                "description": "A long-lived Server-Sent Events stream.",
-                "content": {
-                    "text/event-stream": {
-                        "schema": {"type": "string"},
-                        "example": (
-                            "id: 7\n"
-                            "event: event_live.updated\n"
-                            'data: {"id":7,"event_name":"event_live.updated"}\n\n'
-                        ),
-                    },
-                },
-            },
-            **INVALID_LAST_EVENT_ID_RESPONSE,
-        },
-        operation_id="stream_change_events",
-    )
-    async def stream(
-        request: Request,
-        last_event_id: Annotated[
-            str | None,
-            Header(
-                alias="Last-Event-ID",
-                description=(
-                    "Replay events whose identifiers are greater than this "
-                    "non-negative integer."
-                ),
-            ),
-        ] = None,
-    ) -> EventStreamResponse:
-        """Stream change events as Server-Sent Events with replay support."""
-        after_id = parse_last_event_id(last_event_id=last_event_id)
-        generator = sse_generator(
-            request=request,
-            change_feed=change_feed,
-            after_id=after_id,
-            heartbeat_seconds=sse_heartbeat_seconds,
-        )
-        return EventStreamResponse(
-            generator,
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            items=[public_change_event(change_event=event) for event in events],
+            next_after_id=events[-1].id if len(events) == limit else None,
         )
 
     return app
@@ -608,47 +622,13 @@ def raise_not_ingested(*, entity: str) -> NoReturn:
     raise HTTPException(status_code=503, detail=message)
 
 
-def parse_last_event_id(*, last_event_id: str | None) -> int:
-    """Parse and validate the SSE Last-Event-ID header."""
-    if last_event_id is None or last_event_id == "":
-        return 0
-    try:
-        parsed_event_id = int(last_event_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Last-Event-ID must be an integer.",
-        ) from exc
-    if parsed_event_id < 0:
-        raise HTTPException(status_code=400, detail="Last-Event-ID must be >= 0.")
-    return parsed_event_id
-
-
-async def sse_generator(
+def cursor_page[ItemT: Element | Fixture | LiveElement](
     *,
-    request: DisconnectWatcher,
-    change_feed: ChangeFeed,
-    after_id: int,
-    heartbeat_seconds: int,
-) -> AsyncIterator[str]:
-    """Yield SSE frames from stored change events and heartbeat intervals."""
-    async for event in change_feed.watch_events(
-        after_id=after_id,
-        heartbeat_seconds=heartbeat_seconds,
-    ):
-        if await request.is_disconnected():
-            break
-        if event is None:
-            yield ": heartbeat\n\n"
-            continue
-        yield encode_sse_event(change_event=event)
-
-
-def encode_sse_event(*, change_event: ChangeEvent) -> str:
-    """Encode one change-event model as an SSE event frame."""
-    data = change_event.model_dump_json()
-    return (
-        f"id: {change_event.id}\n"
-        f"event: {change_event.event_name}\n"
-        f"data: {data}\n\n"
+    items: list[ItemT],
+    limit: int,
+) -> CursorPage[ItemT]:
+    """Build a page whose continuation cursor is the last returned id."""
+    return CursorPage[ItemT](
+        items=items,
+        next_after_id=items[-1].id if len(items) == limit else None,
     )

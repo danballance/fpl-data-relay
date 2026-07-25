@@ -119,6 +119,7 @@ export function makeFakeRelayApi(
 ): RelayApi {
   const api: RelayApi = {
     getHealth: async () => health,
+    getReadiness: async () => ({ status: "ready", schema_version: 1 }),
     listSeasons: async () => [season],
     getCurrentSeason: async () => season,
     getSeason: async () => season,
@@ -141,11 +142,10 @@ export function makeFakeRelayApi(
     getEventStatus: async () => status,
     listLiveElements: async () => [liveElement],
     getLiveElement: async () => liveElement,
-    listChangeEvents: async () => ({ events: [changeEvent] }),
-    watchChangeEvents: async ({ signal }) =>
-      new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => resolve(), { once: true });
-      }),
+    listChangeEvents: async () => ({
+      items: [changeEvent],
+      next_after_id: null,
+    }),
   };
   return { ...api, ...overrides };
 }

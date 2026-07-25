@@ -17,11 +17,6 @@ class ConnectionProtocol(Protocol):
 
     async def fetchval(self, query: str, *arguments: object) -> object: ...
 
-    async def add_listener(self, channel: str, callback: object) -> None: ...
-
-    async def remove_listener(self, channel: str, callback: object) -> None: ...
-
-
 class ConnectionManagerProtocol(Protocol):
     """Async context manager returned by pool acquisition."""
 

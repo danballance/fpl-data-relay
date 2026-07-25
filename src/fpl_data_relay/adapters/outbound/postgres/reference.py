@@ -54,8 +54,18 @@ class PostgresReferenceRepository:
     async def list_element_types(self, *, season_id: str) -> list[ElementType]:
         return await self._database.list_element_types(season_id=season_id)
 
-    async def list_elements(self, *, season_id: str) -> list[Element]:
-        return await self._database.list_elements(season_id=season_id)
+    async def list_elements(
+        self,
+        *,
+        season_id: str,
+        after_id: int,
+        limit: int,
+    ) -> list[Element]:
+        return await self._database.list_elements(
+            season_id=season_id,
+            after_id=after_id,
+            limit=limit,
+        )
 
     async def get_element(
         self,
@@ -73,10 +83,14 @@ class PostgresReferenceRepository:
         *,
         season_id: str,
         event_id: int | None,
+        after_id: int,
+        limit: int,
     ) -> list[Fixture]:
         return await self._database.list_fixtures(
             season_id=season_id,
             event_id=event_id,
+            after_id=after_id,
+            limit=limit,
         )
 
     async def get_fixture(

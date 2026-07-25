@@ -3,9 +3,10 @@
 from fpl_data_relay.application.ports.administration import (
     DatabaseRecreator,
     SchemaManager,
+    SchemaStatus,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 1
 
 
 class DatabaseService:
@@ -30,6 +31,9 @@ class DatabaseService:
         await self._schema_manager.check_schema_version(
             expected_version=expected_version,
         )
+
+    async def schema_status(self) -> SchemaStatus:
+        return await self._schema_manager.schema_status()
 
     async def drop_and_create(
         self,

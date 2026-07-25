@@ -7,6 +7,7 @@ import typer
 
 from fpl_data_relay.application.database import SCHEMA_VERSION
 from fpl_data_relay.application.ingestion.service import IngestionResult
+from fpl_data_relay.application.ports.administration import SchemaStatus
 
 
 class CliOperations(Protocol):
@@ -15,6 +16,8 @@ class CliOperations(Protocol):
     def validate_config(self) -> None: ...
 
     async def apply_schema(self) -> None: ...
+
+    async def schema_status(self) -> SchemaStatus: ...
 
     async def drop_and_create_database(self) -> None: ...
 
@@ -49,6 +52,14 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
         """Apply the database schema and verify its version."""
         asyncio.run(operations.apply_schema())
         typer.echo(f"schema version {SCHEMA_VERSION} applied")
+
+    @db_app.command("status")
+    def db_status() -> None:
+        """Validate and display applied and pending migrations."""
+        status = asyncio.run(operations.schema_status())
+        applied = ",".join(str(version) for version in status.applied_versions)
+        pending = ",".join(str(version) for version in status.pending_versions)
+        typer.echo(f"applied=[{applied}] pending=[{pending}]")
 
     @db_app.command("drop-and-create")
     def db_drop_and_create(
