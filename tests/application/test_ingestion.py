@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
@@ -181,6 +182,38 @@ async def test_changed_payload_creates_new_change_event() -> None:
     result = await service.ingest_all_once()
     assert result.changed_count >= 2
     assert len(store.events) > 10
+
+
+@pytest.mark.asyncio
+async def test_collected_payload_preserves_fetch_time_and_checks_season() -> None:
+    store = InMemoryStore()
+    client = FakeClient()
+    service = IngestionService(client=client, repository=store)
+    fetched_at = datetime(2026, 7, 26, 12, tzinfo=UTC)
+    await service.ingest_reference_payload(
+        bootstrap=await client.fetch_bootstrap_static(),
+        fixtures=await client.fetch_fixtures(),
+        fetched_at=fetched_at,
+    )
+    assert {event.fetched_at for event in store.events} == {fetched_at}
+    with pytest.raises(RuntimeError, match="does not match current season"):
+        await service.ingest_live_payload(
+            season_id="2099-00",
+            event_id=1,
+            event_status=await client.fetch_event_status(),
+            current_fixtures=await client.fetch_current_fixtures(event_id=1),
+            event_live=await client.fetch_event_live(event_id=1),
+            fetched_at=fetched_at,
+        )
+    with pytest.raises(RuntimeError, match="event 99 does not exist"):
+        await service.ingest_live_payload(
+            season_id="2025-26",
+            event_id=99,
+            event_status=await client.fetch_event_status(),
+            current_fixtures=await client.fetch_current_fixtures(event_id=1),
+            event_live=await client.fetch_event_live(event_id=1),
+            fetched_at=fetched_at,
+        )
 
 
 def test_has_active_fixture_detects_started_unfinished_fixture() -> None:

@@ -12,7 +12,9 @@ from fpl_data_relay.domain.changes import (
     IngestionSourceKey,
     UpsertOutcome,
 )
-from fpl_data_relay.domain.reference import Season
+from fpl_data_relay.domain.fixtures import Fixture
+from fpl_data_relay.domain.live import EventLiveResponse, EventStatusResponse
+from fpl_data_relay.domain.reference import BootstrapStatic, Season
 from fpl_data_relay.domain.rules import (
     derive_season,
     has_active_fixture,
@@ -82,6 +84,35 @@ class IngestionService:
             self._client.fetch_bootstrap_static(),
             self._client.fetch_fixtures(),
         )
+        return await self._persist_reference_unlocked(
+            bootstrap=bootstrap,
+            fixtures=fixtures,
+            fetched_at=fetched_at,
+        )
+
+    async def ingest_reference_payload(
+        self,
+        *,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        fetched_at: datetime,
+    ) -> IngestionResult:
+        """Persist an already collected and validated reference snapshot."""
+        async with self._repository.ingestion_lock():
+            return await self._persist_reference_unlocked(
+                bootstrap=bootstrap,
+                fixtures=fixtures,
+                fetched_at=fetched_at,
+            )
+
+    async def _persist_reference_unlocked(
+        self,
+        *,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        fetched_at: datetime,
+    ) -> IngestionResult:
+        """Persist reference resources while a lock is already held."""
         season = derive_season(bootstrap=bootstrap)
         current_event_id = select_current_event_id(bootstrap=bootstrap)
         outcomes = [
@@ -131,6 +162,66 @@ class IngestionService:
             self._client.fetch_current_fixtures(event_id=current_event_id),
             self._client.fetch_event_live(event_id=current_event_id),
         )
+        return await self._persist_live_unlocked(
+            season=season,
+            current_event_id=current_event_id,
+            event_status=event_status,
+            current_fixtures=current_fixtures,
+            event_live=event_live,
+            fetched_at=fetched_at,
+        )
+
+    async def ingest_live_payload(
+        self,
+        *,
+        season_id: str,
+        event_id: int,
+        event_status: EventStatusResponse,
+        current_fixtures: list[Fixture],
+        event_live: EventLiveResponse,
+        fetched_at: datetime,
+    ) -> IngestionResult:
+        """Persist an already collected and validated live snapshot."""
+        async with self._repository.ingestion_lock():
+            season = await self._repository.get_current_season()
+            if season is None:
+                raise RuntimeError(
+                    "Cannot ingest live resources before reference data exists.",
+                )
+            if season.id != season_id:
+                raise RuntimeError(
+                    f"Live payload season {season_id} does not match "
+                    f"current season {season.id}.",
+                )
+            event = await self._repository.get_event(
+                season_id=season_id,
+                event_id=event_id,
+            )
+            if event is None:
+                raise RuntimeError(
+                    f"Live payload event {event_id} does not exist in "
+                    f"season {season_id}.",
+                )
+            return await self._persist_live_unlocked(
+                season=season,
+                current_event_id=event_id,
+                event_status=event_status,
+                current_fixtures=current_fixtures,
+                event_live=event_live,
+                fetched_at=fetched_at,
+            )
+
+    async def _persist_live_unlocked(
+        self,
+        *,
+        season: Season,
+        current_event_id: int,
+        event_status: EventStatusResponse,
+        current_fixtures: list[Fixture],
+        event_live: EventLiveResponse,
+        fetched_at: datetime,
+    ) -> IngestionResult:
+        """Persist live resources while a lock is already held."""
         outcomes = [
             await self._repository.upsert_event_status(
                 status=event_status,

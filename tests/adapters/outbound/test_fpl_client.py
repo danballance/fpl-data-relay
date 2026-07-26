@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from fpl_data_relay.adapters.outbound.fpl.client import (
     FplClient,
+    RawFplClient,
     UpstreamFetchError,
     response_json,
     validate_model_list,
@@ -23,6 +24,43 @@ def test_response_json_fails_for_non_200() -> None:
     response = httpx.Response(status_code=429, text="rate limited")
     with pytest.raises(UpstreamFetchError, match="429"):
         response_json(response=response, path="/bootstrap-static/")
+
+
+def test_response_json_fails_for_invalid_json() -> None:
+    response = httpx.Response(
+        status_code=200,
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+    with pytest.raises(ValueError):
+        response_json(response=response, path="/bootstrap-static/")
+
+
+@pytest.mark.asyncio
+async def test_raw_client_uses_exact_endpoint_and_event_query() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"unvalidated": True})
+
+    client = RawFplClient(
+        base_url="https://fantasy.premierleague.com/api",
+        user_agent="tests",
+        timeout_seconds=10,
+    )
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://fantasy.premierleague.com/api",
+    )
+    try:
+        assert await client.fetch_current_fixtures(event_id=7) == {
+            "unvalidated": True,
+        }
+    finally:
+        await client.close()
+    assert requests[0].url.path == "/api/fixtures/"
+    assert dict(requests[0].url.params) == {"event": "7"}
 
 
 def test_upstream_models_silently_ignore_unknown_fields(
@@ -103,7 +141,7 @@ async def test_fpl_client_fetches_all_core_documents() -> None:
         user_agent="tests",
         timeout_seconds=10,
     )
-    client._client = httpx.AsyncClient(
+    client._raw._client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="https://fantasy.premierleague.com/api",
     )

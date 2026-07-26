@@ -2,7 +2,9 @@ import pytest
 from pydantic import ValidationError
 
 from fpl_data_relay.config import (
+    CollectorSettings,
     Settings,
+    load_collector_settings_from_environment,
     load_fpl_settings_from_environment,
     load_postgres_maintenance_database_url_from_environment,
     load_rds_data_settings_from_environment,
@@ -110,3 +112,27 @@ def test_fpl_environment_loader_is_explicit(
     monkeypatch.delenv("FPL_CLIENT_USER_AGENT")
     with pytest.raises(RuntimeError, match="FPL_CLIENT_USER_AGENT"):
         load_fpl_settings_from_environment()
+
+
+def test_collector_environment_loader_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "FPL_API_BASE_URL": "https://fantasy.premierleague.com/api",
+        "FPL_CLIENT_USER_AGENT": "tests",
+        "HTTP_TIMEOUT_SECONDS": "10",
+        "AWS_REGION": "eu-west-2",
+        "FETCH_QUEUE_URL": "https://sqs.eu-west-2.amazonaws.com/1/fetch",
+        "RESULT_QUEUE_URL": "https://sqs.eu-west-2.amazonaws.com/1/result",
+        "PAYLOAD_BUCKET": "payload-bucket",
+        "PAYLOAD_PREFIX": "payloads",
+        "COLLECTOR_HEARTBEAT_PATH": "/tmp/heartbeat",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    settings = load_collector_settings_from_environment()
+    assert isinstance(settings, CollectorSettings)
+    assert settings.aws_region == "eu-west-2"
+    monkeypatch.delenv("RESULT_QUEUE_URL")
+    with pytest.raises(RuntimeError, match="RESULT_QUEUE_URL"):
+        load_collector_settings_from_environment()

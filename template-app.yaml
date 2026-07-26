@@ -10,12 +10,14 @@ Parameters:
   AlertEmail:
     Type: String
     Description: Email address for disposable operational notifications.
-  FplApiBaseUrl:
+  CollectorPrincipalArn:
     Type: String
-    Description: Public FPL API base URL.
-  FplClientUserAgent:
+    AllowedPattern: "^arn:[^:]+:iam::[0-9]{12}:user/.+$"
+    Description: ARN of the dedicated IAM user allowed to assume the collector role.
+  PayloadPrefix:
     Type: String
-    Description: Identifying User-Agent for upstream FPL requests.
+    AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+    Description: S3 key prefix reserved for collected FPL payloads.
 
 Globals:
   Function:
@@ -92,10 +94,84 @@ Resources:
     Properties:
       VisibilityTimeout: 240
       MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20
       SqsManagedSseEnabled: true
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt IngestionDeadLetterQueue.Arn
-        maxReceiveCount: 5
+        maxReceiveCount: 3
+
+  CollectedPayloadDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CollectedPayloadQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 240
+      MessageRetentionPeriod: 86400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CollectedPayloadDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  CollectedPayloadBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireCollectedPayloads
+            Prefix: !Sub "${PayloadPrefix}/"
+            Status: Enabled
+            ExpirationInDays: 7
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref CollectorPrincipalArn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CollectFplPayloads
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ConsumeFetchJobs
+                Effect: Allow
+                Action:
+                  - sqs:ChangeMessageVisibility
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ReceiveMessage
+                Resource: !GetAtt IngestionQueue.Arn
+              - Sid: PublishCollectedPayloads
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CollectedPayloadQueue.Arn
+              - Sid: UploadCollectedPayloads
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${CollectedPayloadBucket.Arn}/${PayloadPrefix}/*"
 
   LiveScheduleGroup:
     Type: AWS::Scheduler::ScheduleGroup
@@ -148,16 +224,15 @@ Resources:
       ReservedConcurrentExecutions: 1
       Environment:
         Variables:
-          FPL_API_BASE_URL: !Ref FplApiBaseUrl
-          FPL_CLIENT_USER_AGENT: !Ref FplClientUserAgent
-          HTTP_TIMEOUT_SECONDS: "20"
-          INGESTION_QUEUE_URL: !Ref IngestionQueue
-          INGESTION_QUEUE_ARN: !GetAtt IngestionQueue.Arn
+          FETCH_QUEUE_URL: !Ref IngestionQueue
+          FETCH_QUEUE_ARN: !GetAtt IngestionQueue.Arn
+          PAYLOAD_BUCKET: !Ref CollectedPayloadBucket
+          PAYLOAD_PREFIX: !Ref PayloadPrefix
           LIVE_SCHEDULE_GROUP_NAME: !Ref LiveScheduleGroup
           SCHEDULE_TARGET_ROLE_ARN: !GetAtt ScheduleTargetRole.Arn
       Policies:
         - SQSPollerPolicy:
-            QueueName: !GetAtt IngestionQueue.QueueName
+            QueueName: !GetAtt CollectedPayloadQueue.QueueName
         - SQSSendMessagePolicy:
             QueueName: !GetAtt IngestionQueue.QueueName
         - Statement:
@@ -176,6 +251,10 @@ Resources:
               Action: secretsmanager:GetSecretValue
               Resource:
                 Fn::ImportValue: !Sub "${DataStackName}-DatabaseSecretArn"
+            - Sid: ReadCollectedPayloads
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${CollectedPayloadBucket.Arn}/${PayloadPrefix}/*"
             - Sid: ManageLiveSchedules
               Effect: Allow
               Action:
@@ -199,7 +278,7 @@ Resources:
         Queue:
           Type: SQS
           Properties:
-            Queue: !GetAtt IngestionQueue.Arn
+            Queue: !GetAtt CollectedPayloadQueue.Arn
             BatchSize: 1
             Enabled: true
 
@@ -227,10 +306,10 @@ Resources:
         - Endpoint: !Ref AlertEmail
           Protocol: email
 
-  DeadLetterAlarm:
+  FetchDeadLetterAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: Ingestion messages reached the dead-letter queue.
+      AlarmDescription: Fetch jobs reached the dead-letter queue.
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -240,6 +319,60 @@ Resources:
       Period: 300
       EvaluationPeriods: 1
       Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CollectedPayloadDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Collected payloads reached the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CollectedPayloadDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  FetchQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Fetch jobs have waited more than five minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestionQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CollectedPayloadQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Collected payloads have waited more than five minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CollectedPayloadQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
@@ -402,5 +535,17 @@ Outputs:
     Value: !Ref FrontendBucket
   CloudFrontDistributionId:
     Value: !Ref FrontendDistribution
-  IngestionQueueUrl:
+  FetchQueueUrl:
     Value: !Ref IngestionQueue
+  FetchDeadLetterQueueUrl:
+    Value: !Ref IngestionDeadLetterQueue
+  CollectedPayloadQueueUrl:
+    Value: !Ref CollectedPayloadQueue
+  CollectedPayloadDeadLetterQueueUrl:
+    Value: !Ref CollectedPayloadDeadLetterQueue
+  CollectedPayloadBucketName:
+    Value: !Ref CollectedPayloadBucket
+  CollectedPayloadPrefix:
+    Value: !Ref PayloadPrefix
+  CollectorRoleArn:
+    Value: !GetAtt CollectorRole.Arn

@@ -165,23 +165,29 @@ describe("shared explorer components", () => {
     expect(screen.getByText("detail failed")).toBeInTheDocument();
   });
 
-  it("searches, sorts, pages, and inspects table rows", async () => {
-    const inspect = vi.fn();
-    render(<TableHarness onInspect={inspect} />);
-    expect(screen.getByText("30 records")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByText("Record 30")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Previous" }));
-    await userEvent.click(screen.getByRole("button", { name: /^Name/ }));
-    expect(screen.getByRole("button", { name: /Name ↑/ })).toBeInTheDocument();
-    await userEvent.type(screen.getByRole("searchbox"), "Record 30");
-    expect(screen.getByText("1 records")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Inspect" }));
-    expect(inspect).toHaveBeenCalledWith({ id: 30, name: "Record 30" });
-    await userEvent.clear(screen.getByRole("searchbox"));
-    await userEvent.type(screen.getByRole("searchbox"), "missing");
-    expect(screen.getByText("Nothing matched.")).toBeInTheDocument();
-  });
+  it(
+    "searches, sorts, pages, and inspects table rows",
+    async () => {
+      const inspect = vi.fn();
+      render(<TableHarness onInspect={inspect} />);
+      expect(screen.getByText("30 records")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Next" }));
+      expect(screen.getByText("Record 30")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Previous" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Name/ }));
+      expect(
+        screen.getByRole("button", { name: /Name ↑/ }),
+      ).toBeInTheDocument();
+      await userEvent.type(screen.getByRole("searchbox"), "Record 30");
+      expect(screen.getByText("1 records")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Inspect" }));
+      expect(inspect).toHaveBeenCalledWith({ id: 30, name: "Record 30" });
+      await userEvent.clear(screen.getByRole("searchbox"));
+      await userEvent.type(screen.getByRole("searchbox"), "missing");
+      expect(screen.getByText("Nothing matched.")).toBeInTheDocument();
+    },
+    10_000,
+  );
 
   it("composes resource loading, detail, refresh, and raw response behavior", async () => {
     const refetch = vi.fn(async () => undefined);

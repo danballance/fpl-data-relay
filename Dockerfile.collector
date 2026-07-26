@@ -1,0 +1,20 @@
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+ENV PATH="/app/.venv/bin:$PATH"
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev --group collector \
+    && useradd --create-home --uid 10001 collector \
+    && chown -R collector:collector /app
+
+USER collector
+
+LABEL org.opencontainers.image.source="https://github.com/danballance/fpl-data-relay"
+
+CMD ["fpl-collector", "run"]

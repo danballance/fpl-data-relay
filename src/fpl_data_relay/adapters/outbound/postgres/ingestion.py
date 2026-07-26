@@ -69,6 +69,12 @@ class PostgresIngestionRepository:
     async def get_current_event(self, *, season_id: str) -> Event | None:
         return await self._database.get_current_event(season_id=season_id)
 
+    async def get_event(self, *, season_id: str, event_id: int) -> Event | None:
+        return await self._database.get_event(
+            season_id=season_id,
+            event_id=event_id,
+        )
+
     async def get_fixture(
         self,
         *,

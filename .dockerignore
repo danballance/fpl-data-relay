@@ -1,0 +1,17 @@
+.git
+.github
+.aws-sam
+.coverage
+.env
+.env.*
+.pytest_cache
+.ruff_cache
+.tasks
+.venv
+client
+deploy
+docs
+htmlcov
+tests
+**/__pycache__
+**/*.pyc

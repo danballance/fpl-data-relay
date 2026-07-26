@@ -5,27 +5,34 @@ description = "Self-hosted relay for public Fantasy Premier League data."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.135.0",
     "httpx>=0.28.0",
     "pydantic-settings>=2.12.0",
 ]
 
 [project.scripts]
 fpl-relay = "fpl_data_relay.bootstrap:app"
+fpl-collector = "fpl_data_relay.collector_cli:app"
 
 [dependency-groups]
 aws = [
     "boto3>=1.42.0",
+    "fastapi>=0.135.0",
     "mangum>=0.19.0",
 ]
 local = [
     "asyncpg>=0.30.0",
+    "fastapi>=0.135.0",
     "typer>=0.20.0",
     "uvicorn[standard]>=0.38.0",
+]
+collector = [
+    "boto3>=1.42.0",
+    "typer>=0.20.0",
 ]
 dev = [
     "asyncpg>=0.30.0",
     "boto3>=1.42.0",
+    "fastapi>=0.135.0",
     "import-linter>=2.3.0",
     "mangum>=0.19.0",
     "pytest>=9.0.0",

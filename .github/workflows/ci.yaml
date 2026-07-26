@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - uses: aws-actions/setup-sam@v3
+        with:
+          use-installer: true
+          token: ${{ github.token }}
+      - run: uv python install 3.14
+      - run: uv sync --frozen --group dev
+      - run: uv run --group dev ruff check
+      - run: uv run --group dev ty check
+      - run: uv run --group dev lint-imports
+      - run: uv run --group dev python -m pytest --cov ./src/fpl_data_relay tests
+      - run: npm --prefix client ci
+      - run: npm --prefix client run check
+      - run: sam validate --lint --template-file template-data.yaml --region eu-west-2
+      - run: sam validate --lint --template-file template-app.yaml --region eu-west-2
+      - run: docker build --file Dockerfile.collector --tag fpl-collector:test .
+      - run: docker run --rm fpl-collector:test fpl-collector --help
+      - run: docker run --rm fpl-collector:test python -c 'import importlib.util; assert importlib.util.find_spec("fastapi") is None'
+
+  publish-collector:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.collector
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/danballance/fpl-data-relay-collector:main
+            ghcr.io/danballance/fpl-data-relay-collector:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true

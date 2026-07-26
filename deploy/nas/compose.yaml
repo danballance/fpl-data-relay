@@ -1,0 +1,33 @@
+services:
+  collector:
+    image: ghcr.io/danballance/fpl-data-relay-collector:${COLLECTOR_IMAGE_TAG:?COLLECTOR_IMAGE_TAG is required}
+    pull_policy: always
+    env_file:
+      - ${COLLECTOR_ENV_FILE:?COLLECTOR_ENV_FILE is required}
+    volumes:
+      - /volume1/docker/appdata/fpl-data-relay-collector/aws:/home/collector/.aws:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'fpl-collector healthcheck --heartbeat-path "$${COLLECTOR_HEARTBEAT_PATH}" --max-age-seconds 90',
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -32,6 +32,16 @@ FPL_REQUIRED_ENV_VARS = [
     "HTTP_TIMEOUT_SECONDS",
 ]
 
+COLLECTOR_REQUIRED_ENV_VARS = [
+    *FPL_REQUIRED_ENV_VARS,
+    "AWS_REGION",
+    "FETCH_QUEUE_URL",
+    "RESULT_QUEUE_URL",
+    "PAYLOAD_BUCKET",
+    "PAYLOAD_PREFIX",
+    "COLLECTOR_HEARTBEAT_PATH",
+]
+
 
 class Settings(BaseSettings):
     """Validated application settings loaded from explicit environment names."""
@@ -77,6 +87,20 @@ class FplSettings(BaseModel):
     timeout_seconds: PositiveFloat
 
 
+class CollectorSettings(BaseModel):
+    """Explicit configuration for the NAS collection worker."""
+
+    model_config = ConfigDict(frozen=True)
+
+    aws_region: str = Field(min_length=1)
+    fetch_queue_url: HttpUrl
+    result_queue_url: HttpUrl
+    payload_bucket: str = Field(min_length=3)
+    payload_prefix: str = Field(min_length=1)
+    heartbeat_path: str = Field(min_length=1)
+    fpl: FplSettings
+
+
 def load_settings_from_environment() -> Settings:
     """Load settings after checking that every required variable is present."""
     missing_names = [name for name in REQUIRED_ENV_VARS if name not in os.environ]
@@ -115,6 +139,31 @@ def load_fpl_settings_from_environment() -> FplSettings:
             "base_url": os.environ["FPL_API_BASE_URL"],
             "user_agent": os.environ["FPL_CLIENT_USER_AGENT"],
             "timeout_seconds": os.environ["HTTP_TIMEOUT_SECONDS"],
+        },
+    )
+
+
+def load_collector_settings_from_environment() -> CollectorSettings:
+    """Load every explicit setting required by the NAS collector."""
+    missing_names = [
+        name for name in COLLECTOR_REQUIRED_ENV_VARS if name not in os.environ
+    ]
+    if missing_names:
+        joined_names = ", ".join(missing_names)
+        raise RuntimeError(f"Missing required environment variables: {joined_names}")
+    return CollectorSettings.model_validate(
+        {
+            "aws_region": os.environ["AWS_REGION"],
+            "fetch_queue_url": os.environ["FETCH_QUEUE_URL"],
+            "result_queue_url": os.environ["RESULT_QUEUE_URL"],
+            "payload_bucket": os.environ["PAYLOAD_BUCKET"],
+            "payload_prefix": os.environ["PAYLOAD_PREFIX"],
+            "heartbeat_path": os.environ["COLLECTOR_HEARTBEAT_PATH"],
+            "fpl": {
+                "base_url": os.environ["FPL_API_BASE_URL"],
+                "user_agent": os.environ["FPL_CLIENT_USER_AGENT"],
+                "timeout_seconds": os.environ["HTTP_TIMEOUT_SECONDS"],
+            },
         },
     )
 

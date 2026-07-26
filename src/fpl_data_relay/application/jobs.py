@@ -3,7 +3,14 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from fpl_data_relay.domain.fixtures import Fixture
 
@@ -17,7 +24,7 @@ DATABASE_WAKING_DELAY_SECONDS = 15
 class Job(BaseModel):
     """Immutable base for SQS ingestion jobs."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     version: Literal[1]
 
@@ -36,6 +43,24 @@ class LiveJob(Job):
     event_id: int = Field(ge=1)
     window_start: datetime
     window_end: datetime
+
+    @field_validator("window_start", "window_end")
+    @classmethod
+    def window_timestamp_must_be_timezone_aware(
+        cls,
+        value: datetime,
+    ) -> datetime:
+        """Reject ambiguous live-window timestamps."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Live job window timestamps must be timezone-aware.")
+        return value
+
+    @model_validator(mode="after")
+    def window_must_have_positive_duration(self) -> LiveJob:
+        """Reject empty or reversed live collection windows."""
+        if self.window_end <= self.window_start:
+            raise ValueError("Live job window_end must be after window_start.")
+        return self
 
 
 IngestionJob = Annotated[ReferenceJob | LiveJob, Field(discriminator="kind")]

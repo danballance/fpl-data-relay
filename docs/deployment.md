@@ -8,9 +8,10 @@ CloudFormation stacks:
 
 The data stack owns the VPC, isolated database subnets, Aurora PostgreSQL 17.7
 Serverless v2 cluster and writer, managed database secret, and monthly budget.
-The application stack owns API Gateway, both Lambdas, SQS and its dead-letter
-queue, EventBridge Scheduler resources, operational SNS and alarms, the private
-frontend bucket, and CloudFront.
+The application stack owns API Gateway, both Lambdas, fetch/result SQS queues
+and their dead-letter queues, collected-payload S3 storage, EventBridge
+Scheduler resources, the NAS collector role, operational SNS and alarms, the
+private frontend bucket, and CloudFront.
 
 The application imports database outputs from the data stack. CloudFormation
 therefore prevents deletion of the data stack while the application stack still
@@ -36,6 +37,8 @@ set -x APP_STACK_NAME fpl-relay-app
 set -x ALERT_EMAIL you@example.com
 set -x FPL_API_BASE_URL https://fantasy.premierleague.com/api
 set -x FPL_CLIENT_USER_AGENT fpl-data-relay/production
+set -x COLLECTOR_PRINCIPAL_ARN arn:aws:iam::123456789012:user/fpl-relay-nas-source
+set -x PAYLOAD_PREFIX payloads
 
 uv run aws sts get-caller-identity
 uv run aws configure get region
@@ -196,7 +199,56 @@ each Lambda artifact:
 uv run sam build \
   --template-file template-app.yaml \
   --build-dir .aws-sam/app-build
+```
 
+When migrating an already deployed stack, disable the former Lambda event
+source mapping before the stack update so it cannot consume fetch jobs while
+the handler and queue wiring change. Resolve the fetch queue from the current
+stack's legacy output, then disable and verify the mapping:
+
+```fish
+set -x OLD_FETCH_QUEUE_URL (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='IngestionQueueUrl'].OutputValue | [0]" \
+  --output text)
+
+set -x OLD_FETCH_QUEUE_ARN (uv run aws sqs get-queue-attributes \
+  --region $AWS_REGION \
+  --queue-url $OLD_FETCH_QUEUE_URL \
+  --attribute-names QueueArn \
+  --query 'Attributes.QueueArn' \
+  --output text)
+
+set -x OLD_MAPPING_UUID (uv run aws lambda list-event-source-mappings \
+  --region $AWS_REGION \
+  --event-source-arn $OLD_FETCH_QUEUE_ARN \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)
+
+uv run aws lambda update-event-source-mapping \
+  --region $AWS_REGION \
+  --uuid $OLD_MAPPING_UUID \
+  --no-enabled
+
+uv run aws lambda wait event-source-mapping-updated \
+  --region $AWS_REGION \
+  --uuid $OLD_MAPPING_UUID
+
+uv run aws lambda get-event-source-mapping \
+  --region $AWS_REGION \
+  --uuid $OLD_MAPPING_UUID \
+  --query State \
+  --output text
+```
+
+The final command must return `Disabled`. Leave the mapping disabled if the
+deployment is interrupted; SQS safely retains pending fetch jobs. For a fresh
+application stack, skip this migration-only step.
+
+Deploy only after that check succeeds:
+
+```fish
 uv run sam deploy \
   --template-file .aws-sam/app-build/template.yaml \
   --stack-name $APP_STACK_NAME \
@@ -207,8 +259,8 @@ uv run sam deploy \
   --parameter-overrides \
     DataStackName=$DATA_STACK_NAME \
     AlertEmail=$ALERT_EMAIL \
-    FplApiBaseUrl=$FPL_API_BASE_URL \
-    FplClientUserAgent=$FPL_CLIENT_USER_AGENT
+    CollectorPrincipalArn=$COLLECTOR_PRINCIPAL_ARN \
+    PayloadPrefix=$PAYLOAD_PREFIX
 ```
 
 The `DataStackName` parameter is required and has no default. Missing exports,
@@ -240,10 +292,40 @@ set -x CLOUDFRONT_URL (uv run aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue | [0]" \
   --output text)
 
-set -x INGESTION_QUEUE_URL (uv run aws cloudformation describe-stacks \
+set -x FETCH_QUEUE_URL (uv run aws cloudformation describe-stacks \
   --region $AWS_REGION \
   --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='IngestionQueueUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='FetchQueueUrl'].OutputValue | [0]" \
+  --output text)
+
+set -x FETCH_DEAD_LETTER_QUEUE_URL (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='FetchDeadLetterQueueUrl'].OutputValue | [0]" \
+  --output text)
+
+set -x COLLECTED_PAYLOAD_QUEUE_URL (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadQueueUrl'].OutputValue | [0]" \
+  --output text)
+
+set -x COLLECTED_PAYLOAD_DEAD_LETTER_QUEUE_URL (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadDeadLetterQueueUrl'].OutputValue | [0]" \
+  --output text)
+
+set -x COLLECTED_PAYLOAD_BUCKET (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadBucketName'].OutputValue | [0]" \
+  --output text)
+
+set -x COLLECTOR_ROLE_ARN (uv run aws cloudformation describe-stacks \
+  --region $AWS_REGION \
+  --stack-name $APP_STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='CollectorRoleArn'].OutputValue | [0]" \
   --output text)
 ```
 
@@ -251,22 +333,31 @@ If initial application creation fails, normal rollback removes the disposable
 resources. A resulting `ROLLBACK_COMPLETE` application stack can be deleted and
 created again without touching the data stack.
 
-## 4. Seed reference data
+## 4. Deploy the NAS collector
+
+Follow [collector.md](collector.md) to create the assume-role-only source
+identity, install the AWS profiles and private GHCR credentials, populate the
+Compose environment from the outputs above, and start the long-polling worker.
+
+Verify the container is healthy before sending the first job.
+
+## 5. Seed reference data
 
 Send the strict versioned reference job to the disposable queue:
 
 ```fish
 uv run aws sqs send-message \
   --region $AWS_REGION \
-  --queue-url $INGESTION_QUEUE_URL \
+  --queue-url $FETCH_QUEUE_URL \
   --message-body '{"version":1,"kind":"reference"}'
 ```
 
-Verify the ingestion Lambda logs and future match-window schedules in the
-`$APP_STACK_NAME-live` EventBridge Scheduler group. The daily reference schedule
-runs at 04:00 in the `Europe/London` time zone.
+Verify collector logs, the private payload bucket, result-queue ingestion
+Lambda logs, and future match-window schedules in the `$APP_STACK_NAME-live`
+EventBridge Scheduler group. The daily reference schedule runs at 04:00 in the
+`Europe/London` time zone.
 
-## 5. Build and upload the frontend
+## 6. Build and upload the frontend
 
 The React build uses relative `/api` requests. CloudFront strips that prefix
 before forwarding to API Gateway:
@@ -322,10 +413,12 @@ intervals, and exposes manual retry if the database is still unavailable.
 ## Delete and recreate only the application stack
 
 The frontend bucket contains reproducible build artifacts, but CloudFormation
-can delete only an empty S3 bucket. Empty it before deliberate stack deletion:
+can delete only empty S3 buckets. Empty both disposable buckets before
+deliberate stack deletion:
 
 ```fish
 uv run aws s3 rm "s3://$FRONTEND_BUCKET_NAME/" --recursive
+uv run aws s3 rm "s3://$COLLECTED_PAYLOAD_BUCKET/" --recursive
 
 uv run aws cloudformation delete-stack \
   --region $AWS_REGION \
@@ -373,5 +466,5 @@ uv run aws cloudformation wait stack-delete-complete \
 The Aurora cluster has `DeletionPolicy: Snapshot`, so CloudFormation requests a
 final snapshot when this deliberate deletion is allowed to proceed.
 
-Production starts with an empty database populated from the current FPL API.
+Production starts with an empty database populated through the NAS collector.
 Local PostgreSQL contents are not copied.

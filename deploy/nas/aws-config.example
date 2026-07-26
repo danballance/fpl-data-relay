@@ -1,0 +1,5 @@
+[profile fpl-collector]
+region = eu-west-2
+role_arn = arn:aws:iam::000000000000:role/fpl-relay-collector
+role_session_name = fpl-relay-nas
+source_profile = fpl-collector-source

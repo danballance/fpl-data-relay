@@ -74,6 +74,10 @@ class IngestionRepository(Protocol):
         """Return the current event for a season."""
         ...
 
+    async def get_event(self, *, season_id: str, event_id: int) -> Event | None:
+        """Return one event for live-job metadata validation."""
+        ...
+
     async def get_fixture(
         self,
         *,

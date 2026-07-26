@@ -1,15 +1,21 @@
-"""SQS Lambda composition for reference and live ingestion."""
+"""SQS Lambda composition for collected-payload ingestion."""
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict, cast
 
 import boto3
 from pydantic import BaseModel, ConfigDict
 
-from fpl_data_relay.adapters.outbound.fpl.client import FplClient
+from fpl_data_relay.adapters.outbound.fpl.validation import (
+    validate_fpl_model,
+    validate_fpl_model_list,
+)
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import (
     IngestionLockError,
@@ -19,21 +25,25 @@ from fpl_data_relay.adapters.outbound.postgres.ingestion import (
     PostgresIngestionRepository,
 )
 from fpl_data_relay.adapters.outbound.rds_data import create_rds_data_pool
+from fpl_data_relay.application.bundles import (
+    MAX_COLLECTED_PAYLOAD_BYTES,
+    PAYLOAD_BUNDLE_ADAPTER,
+    CollectedPayloadMessage,
+    LivePayloadBundle,
+    ReferencePayloadBundle,
+)
 from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import IngestionService
 from fpl_data_relay.application.jobs import (
-    INGESTION_JOB_ADAPTER,
     LiveJob,
     MatchWindow,
-    ReferenceJob,
     build_match_windows,
     next_live_delay,
 )
-from fpl_data_relay.config import (
-    load_fpl_settings_from_environment,
-    load_rds_data_settings_from_environment,
-)
+from fpl_data_relay.config import load_rds_data_settings_from_environment
 from fpl_data_relay.domain.fixtures import Fixture
+from fpl_data_relay.domain.live import EventLiveResponse, EventStatusResponse
+from fpl_data_relay.domain.reference import BootstrapStatic
 
 LOGGER = logging.getLogger(__name__)
 PAGE_SIZE = 200
@@ -43,6 +53,18 @@ class SqsClient(Protocol):
     """SQS operation required by ingestion."""
 
     def send_message(self, **parameters: object) -> dict[str, object]: ...
+
+
+class S3Client(Protocol):
+    """S3 operation required by collected-payload ingestion."""
+
+    def get_object(self, **parameters: object) -> dict[str, object]: ...
+
+
+class ReadableBody(Protocol):
+    """Readable byte stream returned by S3 GetObject."""
+
+    def read(self) -> bytes: ...
 
 
 class SchedulerClient(Protocol):
@@ -81,11 +103,12 @@ class LambdaResult(TypedDict):
 
 
 RDS_SETTINGS = load_rds_data_settings_from_environment()
-FPL_SETTINGS = load_fpl_settings_from_environment()
-QUEUE_URL = os.environ["INGESTION_QUEUE_URL"]
+FETCH_QUEUE_URL = os.environ["FETCH_QUEUE_URL"]
 SCHEDULE_GROUP_NAME = os.environ["LIVE_SCHEDULE_GROUP_NAME"]
 SCHEDULE_TARGET_ROLE_ARN = os.environ["SCHEDULE_TARGET_ROLE_ARN"]
-QUEUE_ARN = os.environ["INGESTION_QUEUE_ARN"]
+FETCH_QUEUE_ARN = os.environ["FETCH_QUEUE_ARN"]
+PAYLOAD_BUCKET = os.environ["PAYLOAD_BUCKET"]
+PAYLOAD_PREFIX = os.environ["PAYLOAD_PREFIX"].strip("/")
 
 POOL = create_rds_data_pool(
     resource_arn=RDS_SETTINGS.resource_arn,
@@ -94,13 +117,8 @@ POOL = create_rds_data_pool(
 )
 DATABASE = PostgresDatabase(pool=cast("PoolProtocol", POOL))
 REPOSITORY = PostgresIngestionRepository(database=DATABASE)
-FPL_CLIENT = FplClient(
-    base_url=str(FPL_SETTINGS.base_url),
-    user_agent=FPL_SETTINGS.user_agent,
-    timeout_seconds=FPL_SETTINGS.timeout_seconds,
-)
-INGESTION = IngestionService(client=FPL_CLIENT, repository=REPOSITORY)
 SQS = cast("SqsClient", boto3.client("sqs"))
+S3 = cast("S3Client", boto3.client("s3"))
 SCHEDULER = cast("SchedulerClient", boto3.client("scheduler"))
 
 
@@ -110,22 +128,48 @@ def handler(event: dict[str, object], context: object) -> LambdaResult:
     parsed_event = SqsEvent.model_validate(event)
     if len(parsed_event.Records) != 1:
         raise ValueError("Ingestion Lambda requires exactly one SQS record.")
-    job = INGESTION_JOB_ADAPTER.validate_json(parsed_event.Records[0].body)
+    message = CollectedPayloadMessage.model_validate_json(
+        parsed_event.Records[0].body,
+    )
     try:
-        return asyncio.run(process_job(job=job, now=datetime.now(tz=UTC)))
+        return asyncio.run(
+            process_collected_payload(
+                message=message,
+                now=datetime.now(tz=UTC),
+            ),
+        )
     except IngestionLockError:
-        LOGGER.info("ingestion_skipped_lock_held", extra={"job_kind": job.kind})
-        return {"status": "skipped_lock_held", "job_kind": job.kind}
+        LOGGER.info(
+            "ingestion_skipped_lock_held",
+            extra={"job_kind": message.job.kind},
+        )
+        return {"status": "skipped_lock_held", "job_kind": message.job.kind}
 
 
-async def process_job(
+async def process_collected_payload(
     *,
-    job: ReferenceJob | LiveJob,
+    message: CollectedPayloadMessage,
     now: datetime,
 ) -> LambdaResult:
-    """Run a reference or live job and schedule its next action."""
-    if isinstance(job, ReferenceJob):
-        await INGESTION.ingest_reference_once()
+    """Verify, validate, persist, and schedule one collected payload."""
+    bundle = await load_payload_bundle(message=message)
+    if bundle.job != message.job:
+        raise ValueError("Collected payload job does not match its SQS message.")
+    ingestion = IngestionService(client=UnavailableFplGateway(), repository=REPOSITORY)
+    if isinstance(bundle, ReferencePayloadBundle):
+        bootstrap = validate_fpl_model(
+            model=BootstrapStatic,
+            payload=bundle.bootstrap_static,
+        )
+        fixtures = validate_fpl_model_list(
+            model=Fixture,
+            payload=bundle.fixtures,
+        )
+        await ingestion.ingest_reference_payload(
+            bootstrap=bootstrap,
+            fixtures=fixtures,
+            fetched_at=bundle.fetched_at,
+        )
         season = await REPOSITORY.get_current_season()
         if season is None:
             raise RuntimeError("Reference ingestion did not create a current season.")
@@ -141,31 +185,101 @@ async def process_job(
                 extra={"fixture_id": fixture_id, "season_id": season.id},
             )
         await reconcile_schedules(windows=windows)
-        return {"status": "reference_ingested", "job_kind": job.kind}
+        return {"status": "reference_ingested", "job_kind": bundle.job.kind}
+    event_status = validate_fpl_model(
+        model=EventStatusResponse,
+        payload=bundle.event_status,
+    )
+    current_fixtures = validate_fpl_model_list(
+        model=Fixture,
+        payload=bundle.current_fixtures,
+    )
+    event_live = validate_fpl_model(
+        model=EventLiveResponse,
+        payload=bundle.event_live,
+    )
     try:
-        result = await INGESTION.ingest_live_once(
-            target_event_id=job.event_id,
-            fixture_id=None,
+        result = await ingestion.ingest_live_payload(
+            season_id=bundle.job.season_id,
+            event_id=bundle.job.event_id,
+            event_status=event_status,
+            current_fixtures=current_fixtures,
+            event_live=event_live,
+            fetched_at=bundle.fetched_at,
         )
     except DatabaseWakingError:
         delay = next_live_delay(
-            job=job,
+            job=bundle.job,
             now=now,
             has_active_fixture=None,
             database_waking=True,
         )
         if delay is not None:
-            await requeue_live_job(job=job, delay_seconds=delay)
-        return {"status": "database_waking", "job_kind": job.kind}
+            await requeue_live_job(job=bundle.job, delay_seconds=delay)
+        return {"status": "database_waking", "job_kind": bundle.job.kind}
     delay = next_live_delay(
-        job=job,
+        job=bundle.job,
         now=now,
         has_active_fixture=result.has_active_fixture,
         database_waking=False,
     )
     if delay is not None:
-        await requeue_live_job(job=job, delay_seconds=delay)
-    return {"status": "live_ingested", "job_kind": job.kind}
+        await requeue_live_job(job=bundle.job, delay_seconds=delay)
+    return {"status": "live_ingested", "job_kind": bundle.job.kind}
+
+
+class UnavailableFplGateway:
+    """Fail fast if collected-payload ingestion attempts an upstream fetch."""
+
+    async def fetch_bootstrap_static(self) -> BootstrapStatic:
+        raise RuntimeError("Collected-payload ingestion cannot fetch upstream.")
+
+    async def fetch_fixtures(self) -> list[Fixture]:
+        raise RuntimeError("Collected-payload ingestion cannot fetch upstream.")
+
+    async def fetch_current_fixtures(self, *, event_id: int) -> list[Fixture]:
+        del event_id
+        raise RuntimeError("Collected-payload ingestion cannot fetch upstream.")
+
+    async def fetch_event_status(self) -> EventStatusResponse:
+        raise RuntimeError("Collected-payload ingestion cannot fetch upstream.")
+
+    async def fetch_event_live(self, *, event_id: int) -> EventLiveResponse:
+        del event_id
+        raise RuntimeError("Collected-payload ingestion cannot fetch upstream.")
+
+
+async def load_payload_bundle(
+    *,
+    message: CollectedPayloadMessage,
+) -> ReferencePayloadBundle | LivePayloadBundle:
+    """Load exact S3 bytes and enforce the configured trust boundary."""
+    if message.bucket != PAYLOAD_BUCKET:
+        raise ValueError("Collected payload references an unexpected S3 bucket.")
+    expected_key = re.compile(
+        rf"{re.escape(PAYLOAD_PREFIX)}/v1/{message.job.kind}/"
+        r"\d{4}/\d{2}/\d{2}/"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json",
+    )
+    if expected_key.fullmatch(message.key) is None:
+        raise ValueError("Collected payload references an unexpected S3 key.")
+    response = S3.get_object(
+        Bucket=message.bucket,
+        Key=message.key,
+    )
+    body = response.get("Body")
+    if not hasattr(body, "read"):
+        raise RuntimeError("S3 GetObject response did not contain a readable body.")
+    raw_payload = cast("ReadableBody", body).read()
+    if len(raw_payload) != message.size_bytes:
+        raise ValueError("Collected payload size does not match its SQS message.")
+    if len(raw_payload) > MAX_COLLECTED_PAYLOAD_BYTES:
+        raise ValueError("Collected payload exceeds the maximum size.")
+    actual_hash = hashlib.sha256(raw_payload).hexdigest()
+    if not hmac.compare_digest(actual_hash, message.sha256):
+        raise ValueError("Collected payload checksum does not match its SQS message.")
+    return PAYLOAD_BUNDLE_ADAPTER.validate_json(raw_payload)
 
 
 async def read_all_fixtures(*, season_id: str) -> list[Fixture]:
@@ -190,9 +304,8 @@ async def read_all_fixtures(*, season_id: str) -> list[Fixture]:
 
 async def requeue_live_job(*, job: LiveJob, delay_seconds: int) -> None:
     """Send a bounded-delay continuation to the ingestion queue."""
-    await asyncio.to_thread(
-        SQS.send_message,
-        QueueUrl=QUEUE_URL,
+    SQS.send_message(
+        QueueUrl=FETCH_QUEUE_URL,
         DelaySeconds=delay_seconds,
         MessageBody=job.model_dump_json(),
     )
@@ -203,8 +316,7 @@ async def reconcile_schedules(*, windows: list[MatchWindow]) -> None:
     existing = await list_live_schedule_names()
     desired = {window.schedule_name: window for window in windows}
     for obsolete_name in sorted(existing - desired.keys()):
-        await asyncio.to_thread(
-            SCHEDULER.delete_schedule,
+        SCHEDULER.delete_schedule(
             GroupName=SCHEDULE_GROUP_NAME,
             Name=obsolete_name,
         )
@@ -213,7 +325,7 @@ async def reconcile_schedules(*, windows: list[MatchWindow]) -> None:
         operation = (
             SCHEDULER.update_schedule if name in existing else SCHEDULER.create_schedule
         )
-        await asyncio.to_thread(operation, **parameters)
+        operation(**parameters)
 
 
 async def list_live_schedule_names() -> set[str]:
@@ -227,7 +339,7 @@ async def list_live_schedule_names() -> set[str]:
         }
         if next_token is not None:
             parameters["NextToken"] = next_token
-        response = await asyncio.to_thread(SCHEDULER.list_schedules, **parameters)
+        response = SCHEDULER.list_schedules(**parameters)
         schedules = response.get("Schedules", [])
         if not isinstance(schedules, list):
             raise RuntimeError("Scheduler returned an invalid schedule list.")
@@ -256,7 +368,7 @@ def schedule_parameters(*, window: MatchWindow) -> dict[str, object]:
         "ActionAfterCompletion": "DELETE",
         "State": "ENABLED",
         "Target": {
-            "Arn": QUEUE_ARN,
+            "Arn": FETCH_QUEUE_ARN,
             "RoleArn": SCHEDULE_TARGET_ROLE_ARN,
             "Input": window.job().model_dump_json(),
         },

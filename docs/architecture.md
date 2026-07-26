@@ -6,15 +6,17 @@ The relay remains a hexagonal modular monolith with dependency direction:
 composition roots → adapters → application → domain
 ```
 
-It has three explicit runtime compositions:
+It has four explicit runtime compositions:
 
 1. Local API: Uvicorn/FastAPI, `asyncpg`, local PostgreSQL 17.7, the in-process
    ingestion scheduler, and Typer administration commands.
 2. Production API: module-global FastAPI and Mangum handler, RDS Data API
    persistence, no lifespan handling, no FPL client, and no scheduler.
-3. Production ingestion: one strict SQS job per Lambda invocation, FPL client,
-   RDS Data API persistence, advisory locking, and EventBridge schedule
-   reconciliation; it does not construct the web application.
+3. Production collection: a NAS container long-polls strict SQS fetch jobs,
+   calls FPL, and publishes raw bundles through private S3 and a result queue.
+4. Production ingestion: one collected bundle per Lambda invocation, strict
+   validation, RDS Data API persistence, advisory locking, and EventBridge
+   schedule reconciliation; it has no upstream HTTP client.
 
 Production infrastructure has two independent top-level CloudFormation stacks:
 

@@ -41,14 +41,16 @@ connect to a separate maintenance database before recreating the configured app
 database.
 
 Production uses AWS SAM, Lambda, Aurora PostgreSQL Serverless v2 with Data API,
-SQS/EventBridge Scheduler, and S3/CloudFront in `eu-west-2`. Local Compose
-continues to use PostgreSQL 17.7 and `asyncpg`.
+SQS/EventBridge Scheduler, a NAS-hosted upstream collector, and S3/CloudFront in
+`eu-west-2`. Local Compose continues to use PostgreSQL 17.7 and `asyncpg`.
 
 See [docs/deployment.md](docs/deployment.md) for the complete AWS deployment
 runbook.
 See [docs/api.md](docs/api.md) for the exposed HTTP API.
 See [docs/architecture.md](docs/architecture.md) for package boundaries.
 See [docs/client.md](docs/client.md) for the local React data explorer.
+See [docs/collector.md](docs/collector.md) for NAS collector deployment and
+operations.
 
 ## Local Data Explorer
 
