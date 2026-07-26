@@ -51,6 +51,8 @@ See [docs/architecture.md](docs/architecture.md) for package boundaries.
 See [docs/client.md](docs/client.md) for the local React data explorer.
 See [docs/collector.md](docs/collector.md) for NAS collector deployment and
 operations.
+See [docs/infrastructure-migrations.md](docs/infrastructure-migrations.md) for
+ordered one-time AWS transitions and their SSM ledger.
 
 ## Local Data Explorer
 

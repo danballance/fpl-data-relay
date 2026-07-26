@@ -21,25 +21,23 @@ uv run aws iam create-user --user-name $COLLECTOR_USER_NAME
 ```
 
 Resolve its ARN and pass it as `CollectorPrincipalArn` when deploying the
-application stack. After deployment, resolve `CollectorRoleArn`, attach an
-inline policy allowing only `sts:AssumeRole` for that ARN, and create one access
-key. Never place that key in the repository or Compose environment.
+application stack. The production deployment workflow resolves
+`CollectorRoleArn` and idempotently writes the exact `AssumeFplCollectorRole`
+inline policy. It also fails if the source user has another inline policy, an
+attached managed policy, or group membership.
 
-Copy `deploy/nas/assume-role-policy.json.example` to a temporary file outside
-the repository, replace `REPLACE_WITH_COLLECTOR_ROLE_ARN`, and apply it:
+After the workflow succeeds, create one access key. Never place that key in the
+repository or Compose environment:
 
 ```fish
-uv run aws iam put-user-policy \
-  --user-name $COLLECTOR_USER_NAME \
-  --policy-name AssumeFplCollectorRole \
-  --policy-document file:///absolute/path/to/assume-role-policy.json
-
 uv run aws iam create-access-key \
   --user-name $COLLECTOR_USER_NAME
 ```
 
-The second command displays the secret exactly once. Store it directly in the
-NAS credentials file and do not retain it in shell history or project files.
+The command displays the secret exactly once. Store it directly in the NAS
+credentials file and do not retain it in shell history or project files.
+`deploy/nas/assume-role-policy.json.example` remains available only for manual
+deployment recovery.
 
 On the NAS, create:
 

@@ -1,0 +1,404 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: fpl-data-relay-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    env:
+      DEPLOY_CONFIG: deploy/production.toml
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - uses: aws-actions/setup-sam@v3
+        with:
+          use-installer: true
+          token: ${{ github.token }}
+
+      - name: Install locked tooling
+        run: |
+          uv python install 3.14
+          uv sync --frozen --group dev
+
+      - name: Load explicit production configuration
+        run: |
+          uv run python -c '
+          import os
+          from pathlib import Path
+          from fpl_data_relay.infrastructure_migrations.models import ProductionConfig
+          config = ProductionConfig.from_toml(path=Path("deploy/production.toml"))
+          values = {
+              "AWS_ACCOUNT_ID": config.account_id,
+              "AWS_REGION": config.region,
+              "AWS_DEFAULT_REGION": config.region,
+              "DATA_STACK_NAME": config.data_stack_name,
+              "APP_STACK_NAME": config.application_stack_name,
+              "ALERT_EMAIL": config.alert_email,
+              "COLLECTOR_SOURCE_USER_NAME": config.collector_source_user_name,
+              "COLLECTOR_PRINCIPAL_ARN": config.collector_source_user_arn,
+              "PAYLOAD_PREFIX": config.payload_prefix,
+              "COLLECTOR_IMAGE": config.collector_image,
+          }
+          with Path(os.environ["GITHUB_ENV"]).open("a") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+              output.write(
+                  "MIGRATION_STATE="
+                  + os.environ["RUNNER_TEMP"]
+                  + "/infrastructure-migrations.json\n"
+              )
+          '
+
+      - name: Require successful CI for this commit
+        run: |
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yaml/runs?head_sha=${GITHUB_SHA}&status=completed" \
+            > "${RUNNER_TEMP}/ci-runs.json"
+          jq -e \
+            --arg sha "${GITHUB_SHA}" \
+            'any(.workflow_runs[];
+              .head_sha == $sha
+              and .event == "push"
+              and .conclusion == "success")' \
+            "${RUNNER_TEMP}/ci-runs.json"
+
+      - name: Require immutable collector image
+        run: |
+          printf '%s' "${GH_TOKEN}" |
+            docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker manifest inspect "${COLLECTOR_IMAGE}:sha-${GITHUB_SHA}"
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS target and begin migration run
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          test "${account}" = "${AWS_ACCOUNT_ID}"
+          uv run fpl-infrastructure-migrate begin \
+            --config "${DEPLOY_CONFIG}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --state "${MIGRATION_STATE}"
+
+      - name: Build data template
+        run: |
+          sam build \
+            --template-file template-data.yaml \
+            --build-dir .aws-sam/data-build
+
+      - name: Create data-stack change set
+        run: |
+          if aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" > /dev/null 2>&1; then
+            before="$(aws cloudformation list-change-sets \
+              --stack-name "${DATA_STACK_NAME}" \
+              --query "sort_by(Summaries[?Status=='CREATE_COMPLETE'], &CreationTime)[-1].ChangeSetId" \
+              --output text)"
+          else
+            before="None"
+          fi
+          sam deploy \
+            --template-file .aws-sam/data-build/template.yaml \
+            --stack-name "${DATA_STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --disable-rollback \
+            --no-confirm-changeset \
+            --no-execute-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides "AlertEmail=${ALERT_EMAIL}"
+          after="$(aws cloudformation list-change-sets \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query "sort_by(Summaries[?Status=='CREATE_COMPLETE'], &CreationTime)[-1].ChangeSetId" \
+            --output text)"
+          if test "${after}" = "${before}" || test "${after}" = "None"; then
+            echo "DATA_CHANGE_SET=" >> "${GITHUB_ENV}"
+          else
+            echo "DATA_CHANGE_SET=${after}" >> "${GITHUB_ENV}"
+            type="$(aws cloudformation describe-change-set \
+              --change-set-name "${after}" \
+              --query ChangeSetType \
+              --output text)"
+            echo "DATA_CHANGE_SET_TYPE=${type}" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Check data-stack safety
+        if: env.DATA_CHANGE_SET != ''
+        run: |
+          uv run fpl-infrastructure-migrate check-change-set \
+            --config "${DEPLOY_CONFIG}" \
+            --change-set-arn "${DATA_CHANGE_SET}" \
+            --policy data
+
+      - name: Prepare data-stack migrations
+        run: |
+          uv run fpl-infrastructure-migrate prepare \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary data-stack \
+            --state "${MIGRATION_STATE}"
+
+      - name: Execute data-stack change set
+        if: env.DATA_CHANGE_SET != ''
+        run: |
+          if test "${DATA_CHANGE_SET_TYPE}" = "CREATE"; then
+            aws cloudformation execute-change-set \
+              --change-set-name "${DATA_CHANGE_SET}" \
+              --disable-rollback
+            aws cloudformation wait stack-create-complete \
+              --stack-name "${DATA_STACK_NAME}"
+          else
+            aws cloudformation execute-change-set \
+              --change-set-name "${DATA_CHANGE_SET}" \
+              --no-disable-rollback
+            aws cloudformation wait stack-update-complete \
+              --stack-name "${DATA_STACK_NAME}"
+          fi
+
+      - name: Verify protected data stack
+        run: |
+          aws cloudformation update-termination-protection \
+            --stack-name "${DATA_STACK_NAME}" \
+            --enable-termination-protection
+          status="$(aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text)"
+          case "${status}" in
+            CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+            *) exit 1 ;;
+          esac
+          protection="$(aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query 'Stacks[0].EnableTerminationProtection' \
+            --output text)"
+          test "${protection}" = "True"
+          deletion_protection="$(aws rds describe-db-clusters \
+            --db-cluster-identifier "$(aws cloudformation describe-stacks \
+              --stack-name "${DATA_STACK_NAME}" \
+              --query "Stacks[0].Outputs[?OutputKey=='DatabaseClusterIdentifier'].OutputValue | [0]" \
+              --output text)" \
+            --query 'DBClusters[0].DeletionProtection' \
+            --output text)"
+          test "${deletion_protection}" = "True"
+
+      - name: Finalize data-stack migrations
+        run: |
+          uv run fpl-infrastructure-migrate finalize \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary data-stack \
+            --state "${MIGRATION_STATE}"
+
+      - name: Apply database migrations
+        run: |
+          export DATABASE_EXECUTOR=rds_data
+          export DATABASE_RESOURCE_ARN
+          export DATABASE_SECRET_ARN
+          export DATABASE_NAME
+          DATABASE_RESOURCE_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabaseClusterArn'].OutputValue | [0]" \
+            --output text)"
+          DATABASE_SECRET_ARN="$(aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabaseSecretArn'].OutputValue | [0]" \
+            --output text)"
+          DATABASE_NAME="$(aws cloudformation describe-stacks \
+            --stack-name "${DATA_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabaseName'].OutputValue | [0]" \
+            --output text)"
+          uv run fpl-relay db status
+          uv run fpl-relay db apply
+          uv run fpl-relay db status
+
+      - name: Build application template
+        run: |
+          sam build \
+            --template-file template-app.yaml \
+            --build-dir .aws-sam/app-build
+
+      - name: Create application-stack change set
+        run: |
+          if aws cloudformation describe-stacks \
+            --stack-name "${APP_STACK_NAME}" > /dev/null 2>&1; then
+            before="$(aws cloudformation list-change-sets \
+              --stack-name "${APP_STACK_NAME}" \
+              --query "sort_by(Summaries[?Status=='CREATE_COMPLETE'], &CreationTime)[-1].ChangeSetId" \
+              --output text)"
+          else
+            before="None"
+          fi
+          sam deploy \
+            --template-file .aws-sam/app-build/template.yaml \
+            --stack-name "${APP_STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-disable-rollback \
+            --no-confirm-changeset \
+            --no-execute-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "DataStackName=${DATA_STACK_NAME}" \
+              "AlertEmail=${ALERT_EMAIL}" \
+              "CollectorPrincipalArn=${COLLECTOR_PRINCIPAL_ARN}" \
+              "PayloadPrefix=${PAYLOAD_PREFIX}"
+          after="$(aws cloudformation list-change-sets \
+            --stack-name "${APP_STACK_NAME}" \
+            --query "sort_by(Summaries[?Status=='CREATE_COMPLETE'], &CreationTime)[-1].ChangeSetId" \
+            --output text)"
+          if test "${after}" = "${before}" || test "${after}" = "None"; then
+            echo "APP_CHANGE_SET=" >> "${GITHUB_ENV}"
+          else
+            echo "APP_CHANGE_SET=${after}" >> "${GITHUB_ENV}"
+            type="$(aws cloudformation describe-change-set \
+              --change-set-name "${after}" \
+              --query ChangeSetType \
+              --output text)"
+            echo "APP_CHANGE_SET_TYPE=${type}" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Check application-stack safety
+        if: env.APP_CHANGE_SET != ''
+        run: |
+          uv run fpl-infrastructure-migrate check-change-set \
+            --config "${DEPLOY_CONFIG}" \
+            --change-set-arn "${APP_CHANGE_SET}" \
+            --policy application
+
+      - name: Arm application failure guard
+        run: echo "APP_FAILURE_GUARD_ARMED=true" >> "${GITHUB_ENV}"
+
+      - name: Prepare application-stack migrations
+        run: |
+          uv run fpl-infrastructure-migrate prepare \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary application-stack \
+            --state "${MIGRATION_STATE}"
+
+      - name: Execute application-stack change set
+        if: env.APP_CHANGE_SET != ''
+        run: |
+          aws cloudformation execute-change-set \
+            --change-set-name "${APP_CHANGE_SET}" \
+            --no-disable-rollback
+          if test "${APP_CHANGE_SET_TYPE}" = "CREATE"; then
+            aws cloudformation wait stack-create-complete \
+              --stack-name "${APP_STACK_NAME}"
+          else
+            aws cloudformation wait stack-update-complete \
+              --stack-name "${APP_STACK_NAME}"
+          fi
+
+      - name: Reconcile collector source identity
+        run: |
+          uv run fpl-infrastructure-migrate reconcile-collector-user \
+            --config "${DEPLOY_CONFIG}"
+
+      - name: Finalize application-stack migrations
+        run: |
+          uv run fpl-infrastructure-migrate finalize \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary application-stack \
+            --state "${MIGRATION_STATE}"
+
+      - name: Build frontend
+        run: |
+          npm --prefix client ci
+          npm --prefix client run build
+
+      - name: Publish frontend
+        run: |
+          frontend_bucket="$(aws cloudformation describe-stacks \
+            --stack-name "${APP_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue | [0]" \
+            --output text)"
+          distribution_id="$(aws cloudformation describe-stacks \
+            --stack-name "${APP_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue | [0]" \
+            --output text)"
+          cloudfront_url="$(aws cloudformation describe-stacks \
+            --stack-name "${APP_STACK_NAME}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue | [0]" \
+            --output text)"
+          aws s3 sync client/dist/ "s3://${frontend_bucket}/" \
+            --delete \
+            --exclude index.html \
+            --cache-control 'public,max-age=31536000,immutable'
+          aws s3 cp client/dist/index.html \
+            "s3://${frontend_bucket}/index.html" \
+            --cache-control 'no-cache' \
+            --content-type text/html
+          invalidation_id="$(aws cloudfront create-invalidation \
+            --distribution-id "${distribution_id}" \
+            --paths /index.html \
+            --query 'Invalidation.Id' \
+            --output text)"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${distribution_id}" \
+            --id "${invalidation_id}"
+          echo "CLOUDFRONT_URL=${cloudfront_url}" >> "${GITHUB_ENV}"
+
+      - name: Smoke test deployed relay
+        run: |
+          curl --fail --show-error --retry 8 --retry-delay 5 \
+            "${CLOUDFRONT_URL}/api/healthz"
+          curl --fail --show-error --retry 8 --retry-delay 5 \
+            "${CLOUDFRONT_URL}/api/readyz"
+          curl --fail --show-error --retry 8 --retry-delay 5 \
+            "${CLOUDFRONT_URL}/api/v1/change-events?after_id=0&limit=100"
+
+      - name: Finalize post-deployment migrations
+        run: |
+          uv run fpl-infrastructure-migrate prepare \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary post-deployment \
+            --state "${MIGRATION_STATE}"
+          uv run fpl-infrastructure-migrate finalize \
+            --config "${DEPLOY_CONFIG}" \
+            --boundary post-deployment \
+            --state "${MIGRATION_STATE}"
+
+      - name: Commit and verify infrastructure migrations
+        run: |
+          uv run fpl-infrastructure-migrate commit \
+            --config "${DEPLOY_CONFIG}" \
+            --state "${MIGRATION_STATE}"
+          uv run fpl-infrastructure-migrate verify \
+            --config "${DEPLOY_CONFIG}"
+
+      - name: Secure fetch queue after application failure
+        if: failure() && env.APP_FAILURE_GUARD_ARMED == 'true'
+        run: |
+          uv run fpl-infrastructure-migrate secure-failure \
+            --config "${DEPLOY_CONFIG}"

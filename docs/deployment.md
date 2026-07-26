@@ -22,12 +22,60 @@ There is no NAT Gateway, RDS Proxy, Aurora reader, WAF, custom domain, or
 always-running application compute. Aurora is configured for 0–2 ACUs and
 pauses after 300 idle seconds.
 
-## Prerequisites and explicit deployment values
+## Normal production deployment
+
+Production changes are deployed by the manual
+`.github/workflows/deploy-production.yaml` workflow. It is intentionally not
+triggered by a push. Select **Deploy production** in GitHub Actions and run it
+from `main`.
+
+Create a GitHub environment named `production`, then configure these secrets
+either on that environment or at repository level:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+
+They currently belong to the existing `rustapis` deployment user. The workflow
+validates that the credentials resolve to account `757771412865` before any
+deployment operation. Replacing this administrator credential with a
+narrowly-scoped deployment role is a later security task.
+
+All non-secret production values are reviewed in
+`deploy/production.toml`. Do not duplicate them in workflow YAML or
+`samconfig.toml`.
+
+The workflow:
+
+1. requires successful `CI` for the exact `main` commit and its immutable
+   `sha-<commit>` collector image;
+2. creates and inspects data and application change sets;
+3. rejects removal or possible replacement of any data-stack resource and of
+   the physical fetch queue;
+4. applies database and infrastructure migrations;
+5. deploys both stacks and reconciles the NAS source-user policy;
+6. publishes the frontend, waits for CloudFront invalidation, and smoke tests
+   the public relay.
+
+An empty change set is successful. Run the workflow again after any interrupted
+or failed deployment. Once the application migration guard is armed, failures
+leave the fetch queue without an enabled Lambda consumer so jobs accumulate
+safely until repair.
+
+The workflow never starts the NAS collector, changes its access keys, or submits
+a reference job. Perform the controlled end-to-end submission only after the
+NAS container reports healthy.
+
+See [infrastructure-migrations.md](infrastructure-migrations.md) for the
+immutable migration ledger and the first collector-split transition.
+
+## Manual recovery prerequisites and explicit values
 
 Install `uv`, Node.js, Docker, the AWS CLI, and AWS SAM CLI. Configure AWS
 credentials with permission to create every resource in both templates.
 
-Set every deployment value explicitly:
+The remaining command-by-command sections are a recovery procedure, not the
+normal deployment path. Set every value explicitly from
+`deploy/production.toml`:
 
 ```fish
 set -x AWS_REGION eu-west-2
@@ -35,10 +83,8 @@ set -x AWS_DEFAULT_REGION eu-west-2
 set -x DATA_STACK_NAME fpl-relay-data
 set -x APP_STACK_NAME fpl-relay-app
 set -x ALERT_EMAIL you@example.com
-set -x FPL_API_BASE_URL https://fantasy.premierleague.com/api
-set -x FPL_CLIENT_USER_AGENT fpl-data-relay/production
 set -x COLLECTOR_PRINCIPAL_ARN arn:aws:iam::123456789012:user/fpl-relay-nas-source
-set -x PAYLOAD_PREFIX payloads
+set -x PAYLOAD_PREFIX payloads/v1
 
 uv run aws sts get-caller-identity
 uv run aws configure get region
@@ -97,7 +143,7 @@ uv run sam validate --lint \
   --region $AWS_REGION
 ```
 
-## 1. Deploy the durable data stack
+## Manual recovery: deploy the durable data stack
 
 The initial data deployment preserves successfully created resources if
 provisioning fails. This is intentional: automatic rollback must not partially
@@ -170,7 +216,7 @@ template or permissions, and deploy the same data stack again with
 `--disable-rollback`. Do not delete or roll back a data stack merely to retry a
 correctable provisioning failure.
 
-## 2. Apply production migrations
+## Manual recovery: apply database migrations
 
 Apply migrations after the data stack is healthy and before creating scheduled
 ingestion infrastructure. Production administration uses RDS Data API and never
@@ -189,7 +235,7 @@ uv run fpl-relay db status
 `db apply` executes pending versions strictly in order. The destructive
 `db drop-and-create` command rejects the `rds_data` executor.
 
-## 3. Build and deploy the disposable application stack
+## Manual recovery: deploy the disposable application stack
 
 The custom Makefile exports the locked `uv.lock`, installs only the production
 dependency set for CPython 3.14/x86_64, and copies only the Python package into
@@ -201,7 +247,9 @@ uv run sam build \
   --build-dir .aws-sam/app-build
 ```
 
-When migrating an already deployed stack, disable the former Lambda event
+The normal workflow performs this as infrastructure migration
+`0001_split_collector_ingestion`. During manual recovery of an unmarked legacy
+stack, disable the former Lambda event
 source mapping before the stack update so it cannot consume fetch jobs while
 the handler and queue wiring change. Resolve the fetch queue from the current
 stack's legacy output, then disable and verify the mapping:
@@ -333,7 +381,7 @@ If initial application creation fails, normal rollback removes the disposable
 resources. A resulting `ROLLBACK_COMPLETE` application stack can be deleted and
 created again without touching the data stack.
 
-## 4. Deploy the NAS collector
+## Manual recovery: deploy the NAS collector
 
 Follow [collector.md](collector.md) to create the assume-role-only source
 identity, install the AWS profiles and private GHCR credentials, populate the
@@ -341,7 +389,7 @@ Compose environment from the outputs above, and start the long-polling worker.
 
 Verify the container is healthy before sending the first job.
 
-## 5. Seed reference data
+## Manual recovery: seed reference data
 
 Send the strict versioned reference job to the disposable queue:
 
@@ -357,7 +405,7 @@ Lambda logs, and future match-window schedules in the `$APP_STACK_NAME-live`
 EventBridge Scheduler group. The daily reference schedule runs at 04:00 in the
 `Europe/London` time zone.
 
-## 6. Build and upload the frontend
+## Manual recovery: build and upload the frontend
 
 The React build uses relative `/api` requests. CloudFront strips that prefix
 before forwarding to API Gateway:
@@ -384,7 +432,7 @@ uv run aws cloudfront create-invalidation \
 The S3 origin remains private. SPA rewriting runs only on the S3 behavior,
 while `/api/*` uses the uncached API behavior.
 
-## 6. Smoke test and pause/resume acceptance
+## Manual recovery: smoke test and pause/resume acceptance
 
 ```fish
 uv run curl --fail "$CLOUDFRONT_URL/api/healthz"
