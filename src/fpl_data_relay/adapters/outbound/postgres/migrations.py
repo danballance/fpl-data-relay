@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS relay_schema_migrations (
     )
 )
 """
+MIGRATION_TABLE_LOOKUP_SQL = (
+    "SELECT to_regclass('relay_schema_migrations')::text AS migration_table"
+)
 
 
 class Migration(BaseModel):
@@ -84,9 +87,7 @@ async def apply_migrations(*, pool: PoolProtocol) -> None:
 async def migration_status(*, pool: PoolProtocol) -> SchemaStatus:
     """Return validated applied and pending migration versions without mutation."""
     async with pool.acquire() as connection:
-        migration_table = await connection.fetchval(
-            "SELECT to_regclass('relay_schema_migrations')",
-        )
+        migration_table = await connection.fetchval(MIGRATION_TABLE_LOOKUP_SQL)
     if migration_table is None:
         applied: list[AppliedMigration] = []
     else:

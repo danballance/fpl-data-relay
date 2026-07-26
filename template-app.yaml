@@ -1,11 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Cost-conscious serverless production stack for FPL Data Relay.
+Description: Disposable serverless application stack for FPL Data Relay.
 
 Parameters:
+  DataStackName:
+    Type: String
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+    Description: Name of the independently deployed FPL Relay data stack.
   AlertEmail:
     Type: String
-    Description: Email address for budget and operational notifications.
+    Description: Email address for disposable operational notifications.
   FplApiBaseUrl:
     Type: String
     Description: Public FPL API base URL.
@@ -20,87 +24,14 @@ Globals:
     Environment:
       Variables:
         DATABASE_EXECUTOR: rds_data
-        DATABASE_RESOURCE_ARN: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
-        DATABASE_SECRET_ARN: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
-        DATABASE_NAME: fplrelay
+        DATABASE_RESOURCE_ARN:
+          Fn::ImportValue: !Sub "${DataStackName}-DatabaseClusterArn"
+        DATABASE_SECRET_ARN:
+          Fn::ImportValue: !Sub "${DataStackName}-DatabaseSecretArn"
+        DATABASE_NAME:
+          Fn::ImportValue: !Sub "${DataStackName}-DatabaseName"
 
 Resources:
-  DatabaseVpc:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.42.0.0/24
-      EnableDnsHostnames: true
-      EnableDnsSupport: true
-      Tags:
-        - Key: Name
-          Value: fpl-relay-database
-
-  DatabaseSubnetA:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref DatabaseVpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: 10.42.0.0/26
-      MapPublicIpOnLaunch: false
-
-  DatabaseSubnetB:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref DatabaseVpc
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: 10.42.0.64/26
-      MapPublicIpOnLaunch: false
-
-  DatabaseSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      DBSubnetGroupDescription: Isolated subnets for FPL Relay Aurora.
-      SubnetIds:
-        - !Ref DatabaseSubnetA
-        - !Ref DatabaseSubnetB
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Aurora accessed only through the RDS Data API.
-      VpcId: !Ref DatabaseVpc
-      SecurityGroupEgress: []
-
-  DatabaseCluster:
-    Type: AWS::RDS::DBCluster
-    DeletionPolicy: Snapshot
-    UpdateReplacePolicy: Snapshot
-    Properties:
-      Engine: aurora-postgresql
-      EngineMode: provisioned
-      EngineVersion: "17.7"
-      DatabaseName: fplrelay
-      MasterUsername: relay_admin
-      ManageMasterUserPassword: true
-      EnableHttpEndpoint: true
-      Port: 5432
-      DBSubnetGroupName: !Ref DatabaseSubnetGroup
-      VpcSecurityGroupIds:
-        - !Ref DatabaseSecurityGroup
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: 0
-        MaxCapacity: 2
-        SecondsUntilAutoPause: 300
-      BackupRetentionPeriod: 7
-      DeletionProtection: true
-      StorageEncrypted: true
-      CopyTagsToSnapshot: true
-
-  DatabaseWriter:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBClusterIdentifier: !Ref DatabaseCluster
-      DBInstanceClass: db.serverless
-      Engine: aurora-postgresql
-      PubliclyAccessible: false
-      EnablePerformanceInsights: false
-      MonitoringInterval: 0
-
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -129,11 +60,13 @@ Resources:
                 - rds-data:CommitTransaction
                 - rds-data:ExecuteStatement
                 - rds-data:RollbackTransaction
-              Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseClusterArn"
             - Sid: ReadDatabaseSecret
               Effect: Allow
               Action: secretsmanager:GetSecretValue
-              Resource: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseSecretArn"
       Events:
         Root:
           Type: HttpApi
@@ -167,7 +100,7 @@ Resources:
   LiveScheduleGroup:
     Type: AWS::Scheduler::ScheduleGroup
     Properties:
-      Name: fpl-relay-live
+      Name: !Sub "${AWS::StackName}-live"
 
   ScheduleTargetRole:
     Type: AWS::IAM::Role
@@ -191,7 +124,7 @@ Resources:
   DailyReferenceSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
-      Name: fpl-relay-reference-daily
+      Name: !Sub "${AWS::StackName}-reference-daily"
       Description: Refresh FPL reference data at 04:00 Europe/London.
       ScheduleExpression: cron(0 4 * * ? *)
       ScheduleExpressionTimezone: Europe/London
@@ -236,21 +169,25 @@ Resources:
                 - rds-data:CommitTransaction
                 - rds-data:ExecuteStatement
                 - rds-data:RollbackTransaction
-              Resource: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseClusterArn"
             - Sid: ReadDatabaseSecret
               Effect: Allow
               Action: secretsmanager:GetSecretValue
-              Resource: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseSecretArn"
             - Sid: ManageLiveSchedules
               Effect: Allow
               Action:
                 - scheduler:CreateSchedule
                 - scheduler:DeleteSchedule
-                - scheduler:ListSchedules
                 - scheduler:UpdateSchedule
               Resource:
                 - !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/${LiveScheduleGroup}/fpl-live-*"
-                - !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/${LiveScheduleGroup}"
+            - Sid: ListLiveSchedules
+              Effect: Allow
+              Action: scheduler:ListSchedules
+              Resource: "*"
             - Sid: PassScheduleTargetRole
               Effect: Allow
               Action: iam:PassRole
@@ -327,38 +264,10 @@ Resources:
       AlarmActions:
         - !Ref AlertTopic
 
-  MonthlyBudget:
-    Type: AWS::Budgets::Budget
-    Properties:
-      Budget:
-        BudgetLimit:
-          Amount: 20
-          Unit: USD
-        BudgetName: fpl-relay-monthly
-        BudgetType: COST
-        TimeUnit: MONTHLY
-      NotificationsWithSubscribers:
-        - Notification:
-            ComparisonOperator: GREATER_THAN
-            NotificationType: FORECASTED
-            Threshold: 80
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - Address: !Ref AlertEmail
-              SubscriptionType: EMAIL
-        - Notification:
-            ComparisonOperator: GREATER_THAN
-            NotificationType: ACTUAL
-            Threshold: 100
-            ThresholdType: PERCENTAGE
-          Subscribers:
-            - Address: !Ref AlertEmail
-              SubscriptionType: EMAIL
-
   FrontendBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
@@ -441,7 +350,9 @@ Resources:
           AllowedMethods: [GET, HEAD, OPTIONS]
           CachedMethods: [GET, HEAD, OPTIONS]
           Compress: true
+          # AWS managed policy: Managed-CachingOptimized
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # AWS managed policy: Managed-SecurityHeadersPolicy
           ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
           FunctionAssociations:
             - EventType: viewer-request
@@ -453,8 +364,11 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS]
             CachedMethods: [GET, HEAD, OPTIONS]
             Compress: true
-            CachePolicyId: 413f1604-6f3c-4fca-93d6-1c7e7e43f4c5
+            # AWS managed policy: Managed-CachingDisabled
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # AWS managed policy: Managed-AllViewerExceptHostHeader
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            # AWS managed policy: Managed-SecurityHeadersPolicy
             ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
             FunctionAssociations:
               - EventType: viewer-request
@@ -488,9 +402,5 @@ Outputs:
     Value: !Ref FrontendBucket
   CloudFrontDistributionId:
     Value: !Ref FrontendDistribution
-  DatabaseClusterArn:
-    Value: !Sub "arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:cluster:${DatabaseCluster}"
-  DatabaseSecretArn:
-    Value: !GetAtt DatabaseCluster.MasterUserSecret.SecretArn
   IngestionQueueUrl:
     Value: !Ref IngestionQueue

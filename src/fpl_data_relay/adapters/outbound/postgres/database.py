@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Protocol, cast
 
 from fpl_data_relay.adapters.outbound.postgres.migrations import (
+    MIGRATION_TABLE_LOOKUP_SQL,
     apply_migrations,
     migration_status,
 )
@@ -295,9 +296,7 @@ class PostgresDatabase(_PostgresOperations):
     async def check_schema_version(self, *, expected_version: int) -> None:
         """Raise if the stored schema version differs from the expected one."""
         async with self._pool.acquire() as connection:
-            migration_table = await connection.fetchval(
-                "SELECT to_regclass('relay_schema_migrations')",
-            )
+            migration_table = await connection.fetchval(MIGRATION_TABLE_LOOKUP_SQL)
             if migration_table is None:
                 raise SchemaUnavailableError(
                     "Database migration history is not available.",

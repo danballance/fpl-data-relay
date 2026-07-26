@@ -6,6 +6,11 @@ import pytest
 from botocore.exceptions import ClientError
 
 from fpl_data_relay.adapters.outbound import rds_data
+from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
+from fpl_data_relay.adapters.outbound.postgres.migrations import (
+    MIGRATIONS,
+    migration_status,
+)
 from fpl_data_relay.adapters.outbound.rds_data import (
     RdsDataConnection,
     RdsDataPool,
@@ -27,6 +32,7 @@ class FakeDataClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.formatted_records = "[]"
+        self.formatted_record_responses: list[str] = []
         self.error_code: str | None = None
         self.error_message = "failed"
 
@@ -49,8 +55,13 @@ class FakeDataClient:
         if operation == "begin":
             return {"transactionId": "transaction-1"}
         if operation == "execute":
+            formatted_records = (
+                self.formatted_record_responses.pop(0)
+                if self.formatted_record_responses
+                else self.formatted_records
+            )
             return {
-                "formattedRecords": self.formatted_records,
+                "formattedRecords": formatted_records,
                 "numberOfRecordsUpdated": 2,
             }
         return {}
@@ -138,6 +149,59 @@ async def test_data_api_fetch_decodes_rows_and_values() -> None:
     }
     assert await database.fetchval("SELECT id FROM rows") == 1
     assert await database.execute("CREATE TABLE example (id integer)") == "OK 2"
+
+
+@pytest.mark.asyncio
+async def test_data_api_migration_status_casts_regclass_to_text() -> None:
+    client = FakeDataClient()
+    client.formatted_records = '[{"migration_table":null}]'
+    pool = RdsDataPool(
+        client=client,
+        resource_arn="cluster",
+        secret_arn="secret",
+        database_name="relay",
+    )
+
+    status = await migration_status(pool=pool)
+
+    assert status.applied_versions == []
+    assert status.pending_versions == [1]
+    operation, parameters = client.calls[0]
+    assert operation == "execute"
+    assert parameters["sql"] == (
+        "SELECT to_regclass('relay_schema_migrations')::text AS migration_table"
+    )
+
+
+@pytest.mark.asyncio
+async def test_data_api_schema_check_uses_supported_catalog_result_types() -> None:
+    migration = MIGRATIONS[0]
+    client = FakeDataClient()
+    client.formatted_record_responses = [
+        '[{"migration_table":"relay_schema_migrations"}]',
+        f'[{{"max":{migration.version}}}]',
+    ]
+    pool = RdsDataPool(
+        client=client,
+        resource_arn="cluster",
+        secret_arn="secret",
+        database_name="relay",
+    )
+    database = PostgresDatabase(pool=pool)
+
+    await database.check_schema_version(expected_version=migration.version)
+
+    execute_calls = [
+        parameters
+        for operation, parameters in client.calls
+        if operation == "execute"
+    ]
+    assert execute_calls[0]["sql"] == (
+        "SELECT to_regclass('relay_schema_migrations')::text AS migration_table"
+    )
+    assert execute_calls[1]["sql"] == (
+        "SELECT MAX(version) FROM relay_schema_migrations"
+    )
 
 
 @pytest.mark.asyncio

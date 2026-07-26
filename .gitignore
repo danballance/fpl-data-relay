@@ -5,6 +5,7 @@
 .venv/
 *.egg-info/
 __pycache__/
+samconfig.toml
 
 client/node_modules/
 client/dist/

@@ -16,6 +16,21 @@ It has three explicit runtime compositions:
    RDS Data API persistence, advisory locking, and EventBridge schedule
    reconciliation; it does not construct the web application.
 
+Production infrastructure has two independent top-level CloudFormation stacks:
+
+1. The durable data stack owns the VPC, isolated subnets, Aurora cluster and
+   writer, managed secret, and monthly cost budget. Aurora deletion protection,
+   snapshot policies, stack termination protection, and exported outputs protect
+   this boundary.
+2. The disposable application stack owns API Gateway, Lambdas, IAM, SQS,
+   EventBridge Scheduler, operational SNS and alarms, logs, S3, and CloudFront.
+   It imports the database ARN, secret ARN, and database name from the data
+   stack.
+
+The stacks are not nested. Application rollback and deletion cannot modify the
+data stack, and CloudFormation blocks data-stack deletion while its exports are
+still imported.
+
 `DATABASE_EXECUTOR` must be exactly `asyncpg` or `rds_data`. Each executor has
 explicit required configuration and there is no fallback between them.
 
