@@ -4,12 +4,13 @@ WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
+ENV PATH="/app/.venv/bin:$PATH"
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --group local
+RUN uv sync --frozen --no-dev --group local --group aws
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-dev", "--group", "local", "fpl-relay", "serve"]
+CMD ["fpl-relay", "serve"]

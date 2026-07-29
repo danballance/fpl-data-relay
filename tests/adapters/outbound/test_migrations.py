@@ -7,11 +7,20 @@ from fpl_data_relay.adapters.outbound.postgres.migrations import (
     AppliedMigration,
     MigrationError,
     apply_migrations,
+    migration_row_values,
     migration_status,
     split_sql_statements,
     validate_migration_history,
 )
 from tests.conftest import FakePostgresPool
+
+
+class ItemsRow:
+    def __init__(self, *, values: dict[str, object]) -> None:
+        self._values = values
+
+    def items(self) -> list[tuple[str, object]]:
+        return list(self._values.items())
 
 
 def applied_initial() -> AppliedMigration:
@@ -26,6 +35,15 @@ def applied_initial() -> AppliedMigration:
 def test_migration_checksum_is_sha256() -> None:
     migration = MIGRATIONS[0]
     assert migration.checksum == sha256(migration.sql.encode()).hexdigest()
+
+
+def test_migration_row_values_accepts_asyncpg_mapping_shape() -> None:
+    values: dict[str, object] = {
+        "version": 1,
+        "name": "initial_schema",
+        "checksum": "a" * 64,
+    }
+    assert migration_row_values(row=ItemsRow(values=values)) == values
 
 
 def test_split_sql_statements_handles_quotes_comments_and_dollar_blocks() -> None:

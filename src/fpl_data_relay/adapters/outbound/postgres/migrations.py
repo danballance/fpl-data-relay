@@ -1,8 +1,8 @@
 """Ordered, checksum-validated PostgreSQL migrations."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
-from typing import cast
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -50,6 +50,12 @@ class AppliedMigration(BaseModel):
     version: int
     name: str
     checksum: str
+
+
+class RowProtocol(Protocol):
+    """Mapping-like row shape returned by asyncpg."""
+
+    def items(self) -> Iterable[tuple[str, object]]: ...
 
 
 MIGRATIONS = (
@@ -122,16 +128,23 @@ async def read_applied_migrations(*, pool: PoolProtocol) -> list[AppliedMigratio
         )
     migrations: list[AppliedMigration] = []
     for row in rows:
-        if not isinstance(row, Mapping):
-            raise TypeError(
-                f"Unsupported migration row type: {type(row).__name__}.",
-            )
         migrations.append(
             AppliedMigration.model_validate(
-                dict(cast("Mapping[str, object]", row)),
+                migration_row_values(row=row),
             ),
         )
     return migrations
+
+
+def migration_row_values(*, row: object) -> dict[str, object]:
+    """Normalize a mapping-like migration row into a plain dictionary."""
+    if isinstance(row, Mapping):
+        mapping = cast("Mapping[str, object]", row)
+        return {key: mapping[key] for key in mapping}
+    if hasattr(row, "items"):
+        mapping_like = cast("RowProtocol", row)
+        return {key: value for key, value in mapping_like.items()}
+    raise TypeError(f"Unsupported migration row type: {type(row).__name__}.")
 
 
 def validate_migration_history(*, applied: list[AppliedMigration]) -> None:

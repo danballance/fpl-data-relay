@@ -1,518 +1,190 @@
 # AWS Serverless Deployment
 
-Production is deployed to `eu-west-2` as two independent top-level
-CloudFormation stacks:
+Production runs in `eu-west-2` as two independent CloudFormation stacks:
 
-1. `template-data.yaml` defines durable, protected data infrastructure.
-2. `template-app.yaml` defines disposable application infrastructure.
+1. `fpl-relay-data` is durable. It owns the VPC, isolated subnets, Aurora
+   PostgreSQL 17.7, the managed database secret, and the monthly budget.
+2. `fpl-relay-app` is disposable. It owns API Gateway, Lambda, the fetch and
+   result queues, short-lived payload storage, Scheduler, operational alarms,
+   the frontend bucket, and CloudFront.
 
-The data stack owns the VPC, isolated database subnets, Aurora PostgreSQL 17.7
-Serverless v2 cluster and writer, managed database secret, and monthly budget.
-The application stack owns API Gateway, both Lambdas, fetch/result SQS queues
-and their dead-letter queues, collected-payload S3 storage, EventBridge
-Scheduler resources, the NAS collector role, operational SNS and alarms, the
-private frontend bucket, and CloudFront.
-
-The application imports database outputs from the data stack. CloudFormation
-therefore prevents deletion of the data stack while the application stack still
-uses those exports. The stacks are deliberately not nested: application
-creation, update, rollback, and deletion cannot modify the data stack.
+The application stack imports the database outputs. It cannot replace or delete
+the Aurora cluster or writer: the data template enables RDS deletion protection
+and snapshot policies, the deployment enables stack termination protection,
+and `deploy/data-stack-policy.json` denies replacement or deletion of those two
+resources.
 
 There is no NAT Gateway, RDS Proxy, Aurora reader, WAF, custom domain, or
-always-running application compute. Aurora is configured for 0–2 ACUs and
-pauses after 300 idle seconds.
+always-running AWS application compute.
 
-## Normal production deployment
+## Normal deployment
 
-Production changes are deployed by the manual
-`.github/workflows/deploy-production.yaml` workflow. It is intentionally not
-triggered by a push. Select **Deploy production** in GitHub Actions and run it
-from `main`.
-
-Create a GitHub environment named `production`, then configure these secrets
-either on that environment or at repository level:
+Run **Deploy production** manually from `main` in GitHub Actions. Configure the
+`production` environment with:
 
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 
-They currently belong to the existing `rustapis` deployment user. The workflow
-validates that the credentials resolve to account `757771412865` before any
-deployment operation. Replacing this administrator credential with a
-narrowly-scoped deployment role is a later security task.
+All non-secret production values are explicit in the workflow environment.
+The workflow verifies the target AWS account and the commit-specific collector
+image, deploys and verifies the data stack, applies database migrations,
+deploys the application stack, publishes the frontend, and smoke-tests the
+public API.
 
-All non-secret production values are reviewed in
-`deploy/production.toml`. Do not duplicate them in workflow YAML or
-`samconfig.toml`.
+The workflow passes these required application parameters:
 
-The workflow:
+- `DataStackName=fpl-relay-data`
+- `AlertEmail=nixprivacy@pm.me`
+- `CollectorUserName=fpl-relay-nas-source`
+- `PayloadPrefix=payloads`
 
-1. requires successful `CI` for the exact `main` commit and its immutable
-   `sha-<commit>` collector image;
-2. creates and inspects data and application change sets;
-3. rejects removal or possible replacement of any data-stack resource and of
-   the physical fetch queue;
-4. applies database and infrastructure migrations;
-5. deploys both stacks and reconciles the NAS source-user policy;
-6. publishes the frontend, waits for CloudFront invalidation, and smoke tests
-   the public relay.
+The payload builder adds its own schema-version segment, so objects are stored
+under `payloads/v1/...`.
 
-An empty change set is successful. Run the workflow again after any interrupted
-or failed deployment. Once the application migration guard is armed, failures
-leave the fetch queue without an enabled Lambda consumer so jobs accumulate
-safely until repair.
+## Clean collector cutover
 
-The workflow never starts the NAS collector, changes its access keys, or submits
-a reference job. Perform the controlled end-to-end submission only after the
-NAS container reports healthy.
+This project does not preserve the former disposable application stack.
+Perform this once before the first deployment of the simplified template:
 
-See [infrastructure-migrations.md](infrastructure-migrations.md) for the
-immutable migration ledger and the first collector-split transition.
+1. Stop the NAS collector if it is running.
+2. Empty the application stack's frontend bucket.
+3. Delete `fpl-relay-app` and wait for `DELETE_COMPLETE`. Its queues and queued
+   messages are intentionally discarded; `fpl-relay-data` is not modified.
+4. Delete the legacy `AssumeFplCollectorRole` inline policy from
+   `fpl-relay-nas-source`.
+5. Run the production workflow from the intended `main` commit.
+6. Populate the NAS `.env` from the new outputs, install the direct AWS profile,
+   and start the SHA-tagged collector.
+7. Send one reference job and verify queue, S3, Lambda, and database activity.
 
-## Manual recovery prerequisites and explicit values
+The existing IAM access key is retained. Credential rotation is a separate
+operation.
 
-Install `uv`, Node.js, Docker, the AWS CLI, and AWS SAM CLI. Configure AWS
-credentials with permission to create every resource in both templates.
+## Application outputs
 
-The remaining command-by-command sections are a recovery procedure, not the
-normal deployment path. Set every value explicitly from
-`deploy/production.toml`:
+Resolve an output with:
 
 ```fish
-set -x AWS_REGION eu-west-2
-set -x AWS_DEFAULT_REGION eu-west-2
-set -x DATA_STACK_NAME fpl-relay-data
-set -x APP_STACK_NAME fpl-relay-app
-set -x ALERT_EMAIL you@example.com
-set -x COLLECTOR_PRINCIPAL_ARN arn:aws:iam::123456789012:user/fpl-relay-nas-source
-set -x PAYLOAD_PREFIX payloads/v1
-
-uv run aws sts get-caller-identity
-uv run aws configure get region
+set -x OUTPUT_KEY FetchQueueUrl
+uv run aws cloudformation describe-stacks \
+  --region eu-west-2 \
+  --stack-name fpl-relay-app \
+  --query "Stacks[0].Outputs[?OutputKey=='$OUTPUT_KEY'].OutputValue | [0]" \
+  --output text
 ```
 
-The reported account must be the intended production account and the configured
-region must be `eu-west-2`.
+The collector uses:
 
-## AWS compatibility preflight
+- `FetchQueueUrl`
+- `FetchDeadLetterQueueUrl`
+- `ResultQueueUrl`
+- `ResultDeadLetterQueueUrl`
+- `PayloadBucketName`
+- `PayloadPrefix`
 
-The templates were checked against the AWS service catalog and documentation on
-25 July 2026. Before deployment, verify the external engine version and managed
-CloudFront policy identifier that static SAM lint cannot resolve:
+Frontend deployment uses `FrontendBucketName`, `CloudFrontDistributionId`, and
+`CloudFrontUrl`. `ApiEndpoint` is available for direct diagnostics.
 
-```fish
-uv run aws rds describe-orderable-db-instance-options \
-  --region $AWS_REGION \
-  --engine aurora-postgresql \
-  --db-instance-class db.serverless \
-  --query "OrderableDBInstanceOptions[?EngineVersion=='17.7'].EngineVersion"
+## Manual recovery
 
-uv run aws cloudfront get-cache-policy \
-  --id 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-```
-
-The first command must include `17.7`. The second must return
-`Managed-CachingDisabled`. `template-app.yaml` records the names of every
-AWS-managed CloudFront policy beside its UUID.
-
-## Local and repository verification
-
-Local development remains Uvicorn, `asyncpg`, PostgreSQL 17.7, and the
-in-process ingestion scheduler:
-
-```fish
-uv run docker compose up --build
-```
-
-The Compose volume is named `postgres-17-data`, leaving the former PostgreSQL
-18 volume untouched. Delete the old volume manually only after the PostgreSQL
-17.7 setup and required local data have been verified.
-
-Run all quality and infrastructure gates:
-
-```fish
-uv run --group dev ruff check
-uv run --group dev ty check
-uv run --group dev lint-imports
-uv run --group dev python -m pytest --cov ./src/fpl_data_relay tests
-uv run npm --prefix client run check
-uv run sam validate --lint \
-  --template-file template-data.yaml \
-  --region $AWS_REGION
-uv run sam validate --lint \
-  --template-file template-app.yaml \
-  --region $AWS_REGION
-```
-
-## Manual recovery: deploy the durable data stack
-
-The initial data deployment preserves successfully created resources if
-provisioning fails. This is intentional: automatic rollback must not partially
-tear down a newly created cluster or writer.
+Use the same explicit values as the workflow. Deploy and protect the data stack:
 
 ```fish
 uv run sam deploy \
   --template-file template-data.yaml \
-  --stack-name $DATA_STACK_NAME \
-  --region $AWS_REGION \
+  --stack-name fpl-relay-data \
+  --region eu-west-2 \
   --resolve-s3 \
   --disable-rollback \
-  --parameter-overrides \
-    AlertEmail=$ALERT_EMAIL
-```
+  --no-confirm-changeset \
+  --no-fail-on-empty-changeset \
+  --parameter-overrides AlertEmail=nixprivacy@pm.me
 
-Do not deploy the application until the data stack reaches `CREATE_COMPLETE`.
-Then enable stack-level termination protection:
+uv run aws cloudformation set-stack-policy \
+  --region eu-west-2 \
+  --stack-name fpl-relay-data \
+  --stack-policy-body file://deploy/data-stack-policy.json
 
-```fish
 uv run aws cloudformation update-termination-protection \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
+  --region eu-west-2 \
+  --stack-name fpl-relay-data \
   --enable-termination-protection
 ```
 
-Resolve and verify the durable outputs:
-
-```fish
-set -x DATABASE_CLUSTER_IDENTIFIER (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='DatabaseClusterIdentifier'].OutputValue | [0]" \
-  --output text)
-
-set -x DATABASE_RESOURCE_ARN (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='DatabaseClusterArn'].OutputValue | [0]" \
-  --output text)
-
-set -x DATABASE_SECRET_ARN (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='DatabaseSecretArn'].OutputValue | [0]" \
-  --output text)
-
-set -x DATABASE_NAME (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='DatabaseName'].OutputValue | [0]" \
-  --output text)
-
-uv run aws rds describe-db-clusters \
-  --region $AWS_REGION \
-  --db-cluster-identifier $DATABASE_CLUSTER_IDENTIFIER \
-  --query 'DBClusters[0].DeletionProtection'
-
-uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --query 'Stacks[0].EnableTerminationProtection'
-```
-
-Both verification commands must return `true`.
-
-If initial provisioning fails, the stack remains in `CREATE_FAILED` and
-successfully created resources remain present. Inspect stack events, correct the
-template or permissions, and deploy the same data stack again with
-`--disable-rollback`. Do not delete or roll back a data stack merely to retry a
-correctable provisioning failure.
-
-## Manual recovery: apply database migrations
-
-Apply migrations after the data stack is healthy and before creating scheduled
-ingestion infrastructure. Production administration uses RDS Data API and never
-falls back to `asyncpg`:
+Resolve `DatabaseClusterArn`, `DatabaseSecretArn`, and `DatabaseName` from the
+data outputs, export them as `DATABASE_RESOURCE_ARN`, `DATABASE_SECRET_ARN`, and
+`DATABASE_NAME`, then apply the database schema:
 
 ```fish
 set -x DATABASE_EXECUTOR rds_data
-
-uv run fpl-relay config-check
 uv run fpl-relay db status
 uv run fpl-relay db apply
 uv run fpl-relay db status
 ```
 
-`db status` is read-only and verifies migration names and SHA-256 checksums.
-`db apply` executes pending versions strictly in order. The destructive
-`db drop-and-create` command rejects the `rds_data` executor.
-
-## Manual recovery: deploy the disposable application stack
-
-The custom Makefile exports the locked `uv.lock`, installs only the production
-dependency set for CPython 3.14/x86_64, and copies only the Python package into
-each Lambda artifact:
+Build and deploy the disposable stack:
 
 ```fish
 uv run sam build \
   --template-file template-app.yaml \
   --build-dir .aws-sam/app-build
-```
 
-The normal workflow performs this as infrastructure migration
-`0001_split_collector_ingestion`. During manual recovery of an unmarked legacy
-stack, disable the former Lambda event
-source mapping before the stack update so it cannot consume fetch jobs while
-the handler and queue wiring change. Resolve the fetch queue from the current
-stack's legacy output, then disable and verify the mapping:
-
-```fish
-set -x OLD_FETCH_QUEUE_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='IngestionQueueUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x OLD_FETCH_QUEUE_ARN (uv run aws sqs get-queue-attributes \
-  --region $AWS_REGION \
-  --queue-url $OLD_FETCH_QUEUE_URL \
-  --attribute-names QueueArn \
-  --query 'Attributes.QueueArn' \
-  --output text)
-
-set -x OLD_MAPPING_UUID (uv run aws lambda list-event-source-mappings \
-  --region $AWS_REGION \
-  --event-source-arn $OLD_FETCH_QUEUE_ARN \
-  --query 'EventSourceMappings[0].UUID' \
-  --output text)
-
-uv run aws lambda update-event-source-mapping \
-  --region $AWS_REGION \
-  --uuid $OLD_MAPPING_UUID \
-  --no-enabled
-
-uv run aws lambda wait event-source-mapping-updated \
-  --region $AWS_REGION \
-  --uuid $OLD_MAPPING_UUID
-
-uv run aws lambda get-event-source-mapping \
-  --region $AWS_REGION \
-  --uuid $OLD_MAPPING_UUID \
-  --query State \
-  --output text
-```
-
-The final command must return `Disabled`. Leave the mapping disabled if the
-deployment is interrupted; SQS safely retains pending fetch jobs. For a fresh
-application stack, skip this migration-only step.
-
-Deploy only after that check succeeds:
-
-```fish
 uv run sam deploy \
   --template-file .aws-sam/app-build/template.yaml \
-  --stack-name $APP_STACK_NAME \
-  --region $AWS_REGION \
+  --stack-name fpl-relay-app \
+  --region eu-west-2 \
   --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --no-disable-rollback \
+  --no-confirm-changeset \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
-    DataStackName=$DATA_STACK_NAME \
-    AlertEmail=$ALERT_EMAIL \
-    CollectorPrincipalArn=$COLLECTOR_PRINCIPAL_ARN \
-    PayloadPrefix=$PAYLOAD_PREFIX
+    DataStackName=fpl-relay-data \
+    AlertEmail=nixprivacy@pm.me \
+    CollectorUserName=fpl-relay-nas-source \
+    PayloadPrefix=payloads
 ```
 
-The `DataStackName` parameter is required and has no default. Missing exports,
-an incorrect stack name, or an attempt to deploy in another region fails during
-CloudFormation evaluation. There is no database fallback.
+If initial application creation rolls back, delete the resulting
+`ROLLBACK_COMPLETE` stack and create it again. Do not modify or delete the data
+stack to recover an application deployment.
 
-Confirm the operational SNS email subscription after each fresh application
-stack creation. The monthly budget notification belongs to the durable data
-stack and remains active when the application stack is absent.
+## Verification and operations
 
-Resolve the disposable application outputs:
+The data stack must report `CREATE_COMPLETE` or `UPDATE_COMPLETE`, termination
+protection `true`, a non-empty stack policy, and Aurora deletion protection
+`true`.
 
-```fish
-set -x FRONTEND_BUCKET_NAME (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue | [0]" \
-  --output text)
+After each application deployment:
 
-set -x CLOUDFRONT_DISTRIBUTION_ID (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue | [0]" \
-  --output text)
-
-set -x CLOUDFRONT_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x FETCH_QUEUE_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='FetchQueueUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x FETCH_DEAD_LETTER_QUEUE_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='FetchDeadLetterQueueUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x COLLECTED_PAYLOAD_QUEUE_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadQueueUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x COLLECTED_PAYLOAD_DEAD_LETTER_QUEUE_URL (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadDeadLetterQueueUrl'].OutputValue | [0]" \
-  --output text)
-
-set -x COLLECTED_PAYLOAD_BUCKET (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CollectedPayloadBucketName'].OutputValue | [0]" \
-  --output text)
-
-set -x COLLECTOR_ROLE_ARN (uv run aws cloudformation describe-stacks \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='CollectorRoleArn'].OutputValue | [0]" \
-  --output text)
-```
-
-If initial application creation fails, normal rollback removes the disposable
-resources. A resulting `ROLLBACK_COMPLETE` application stack can be deleted and
-created again without touching the data stack.
-
-## Manual recovery: deploy the NAS collector
-
-Follow [collector.md](collector.md) to create the assume-role-only source
-identity, install the AWS profiles and private GHCR credentials, populate the
-Compose environment from the outputs above, and start the long-polling worker.
-
-Verify the container is healthy before sending the first job.
-
-## Manual recovery: seed reference data
-
-Send the strict versioned reference job to the disposable queue:
+1. Confirm the SNS operational-alert subscription after a fresh stack creation.
+2. Check `/api/healthz`, `/api/readyz`, and
+   `/api/v1/change-events?after_id=0&limit=100` through `CloudFrontUrl`.
+3. Confirm the NAS collector is healthy.
+4. Send a strict reference job:
 
 ```fish
 uv run aws sqs send-message \
-  --region $AWS_REGION \
+  --region eu-west-2 \
   --queue-url $FETCH_QUEUE_URL \
   --message-body '{"version":1,"kind":"reference"}'
 ```
 
-Verify collector logs, the private payload bucket, result-queue ingestion
-Lambda logs, and future match-window schedules in the `$APP_STACK_NAME-live`
-EventBridge Scheduler group. The daily reference schedule runs at 04:00 in the
-`Europe/London` time zone.
+The fetch queue should be consumed, an object should appear under
+`payloads/v1/reference/`, the result queue should drain through the ingestion
+Lambda, and the API should expose persisted reference data.
 
-## Manual recovery: build and upload the frontend
+## Teardown
 
-The React build uses relative `/api` requests. CloudFront strips that prefix
-before forwarding to API Gateway:
+Stop the NAS collector first. Empty both disposable buckets, then delete
+`fpl-relay-app`. CloudFormation removes the direct collector-user policy with
+the stack.
 
-```fish
-uv run npm --prefix client ci
-uv run npm --prefix client run build
+Deleting `fpl-relay-data` is a separate, deliberate disaster-recovery action.
+It requires removing termination protection and overriding the stack policy.
+The Aurora deletion policy creates a final snapshot. Never include data-stack
+deletion in routine application or collector teardown.
 
-uv run aws s3 sync client/dist/ "s3://$FRONTEND_BUCKET_NAME/" \
-  --delete \
-  --exclude index.html \
-  --cache-control 'public,max-age=31536000,immutable'
-
-uv run aws s3 cp client/dist/index.html \
-  "s3://$FRONTEND_BUCKET_NAME/index.html" \
-  --cache-control 'no-cache' \
-  --content-type text/html
-
-uv run aws cloudfront create-invalidation \
-  --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
-  --paths /index.html
-```
-
-The S3 origin remains private. SPA rewriting runs only on the S3 behavior,
-while `/api/*` uses the uncached API behavior.
-
-## Manual recovery: smoke test and pause/resume acceptance
-
-```fish
-uv run curl --fail "$CLOUDFRONT_URL/api/healthz"
-uv run curl --fail "$CLOUDFRONT_URL/api/readyz"
-uv run curl --fail \
-  "$CLOUDFRONT_URL/api/v1/change-events?after_id=0&limit=100"
-```
-
-Verify API throttling, the reference-data screens, match schedules, CloudWatch
-alarms, and budget notifications. Leave the system without database traffic for
-more than five minutes and verify Aurora reaches 0 ACUs. Opening a
-database-backed screen during resume must produce HTTP 503,
-`Retry-After: 5`, and:
-
-```json
-{
-  "code": "database_waking",
-  "detail": "The database is waking from idle. Retry shortly.",
-  "retry_after_seconds": 5
-}
-```
-
-The client displays “Service waking up,” retries eight times at five-second
-intervals, and exposes manual retry if the database is still unavailable.
-
-## Delete and recreate only the application stack
-
-The frontend bucket contains reproducible build artifacts, but CloudFormation
-can delete only empty S3 buckets. Empty both disposable buckets before
-deliberate stack deletion:
-
-```fish
-uv run aws s3 rm "s3://$FRONTEND_BUCKET_NAME/" --recursive
-uv run aws s3 rm "s3://$COLLECTED_PAYLOAD_BUCKET/" --recursive
-
-uv run aws cloudformation delete-stack \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME
-
-uv run aws cloudformation wait stack-delete-complete \
-  --region $AWS_REGION \
-  --stack-name $APP_STACK_NAME
-```
-
-This deletes API, compute, queues and messages, schedules, operational
-notifications, logs, alarms, frontend hosting, and CloudFront. It does not
-modify the data stack.
-
-## Deliberately delete the data stack
-
-Deleting production data is exceptional and destructive. First delete the
-application stack so no imports remain. Then disable both protection layers:
-
-```fish
-uv run aws cloudformation update-termination-protection \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME \
-  --no-enable-termination-protection
-
-uv run aws rds modify-db-cluster \
-  --region $AWS_REGION \
-  --db-cluster-identifier $DATABASE_CLUSTER_IDENTIFIER \
-  --no-deletion-protection \
-  --apply-immediately
-
-uv run aws rds wait db-cluster-available \
-  --region $AWS_REGION \
-  --db-cluster-identifier $DATABASE_CLUSTER_IDENTIFIER
-
-uv run aws cloudformation delete-stack \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME
-
-uv run aws cloudformation wait stack-delete-complete \
-  --region $AWS_REGION \
-  --stack-name $DATA_STACK_NAME
-```
-
-The Aurora cluster has `DeletionPolicy: Snapshot`, so CloudFormation requests a
-final snapshot when this deliberate deletion is allowed to proceed.
-
-Production starts with an empty database populated through the NAS collector.
-Local PostgreSQL contents are not copied.
+For local Compose, recreate services without `--volumes`. This selects the
+versioned PostgreSQL 17 volume while leaving any older PostgreSQL 18 volume
+recoverable.

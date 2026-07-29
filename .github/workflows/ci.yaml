@@ -35,6 +35,15 @@ jobs:
       - run: npm --prefix client run check
       - run: sam validate --lint --template-file template-data.yaml --region eu-west-2
       - run: sam validate --lint --template-file template-app.yaml --region eu-west-2
+      - run: docker compose --env-file .env.example config --quiet
+      - run: |
+          cp deploy/nas/.env.example deploy/nas/.env
+          docker compose \
+            --file deploy/nas/compose.yaml \
+            --env-file deploy/nas/.env.example \
+            config --quiet
+      - run: docker build --file Dockerfile --tag fpl-relay:test .
+      - run: docker run --rm fpl-relay:test fpl-relay --help
       - run: docker build --file Dockerfile.collector --tag fpl-collector:test .
       - run: docker run --rm fpl-collector:test fpl-collector --help
       - run: docker run --rm fpl-collector:test python -c 'import importlib.util; assert importlib.util.find_spec("fastapi") is None'

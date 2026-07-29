@@ -27,7 +27,8 @@ Production infrastructure has two independent top-level CloudFormation stacks:
 2. The disposable application stack owns API Gateway, Lambdas, IAM, SQS,
    EventBridge Scheduler, operational SNS and alarms, logs, S3, and CloudFront.
    It imports the database ARN, secret ARN, and database name from the data
-   stack.
+   stack. Its single collector-user policy grants the NAS identity direct,
+   resource-scoped access to the fetch queue, result queue, and payload prefix.
 
 The stacks are not nested. Application rollback and deletion cannot modify the
 data stack, and CloudFormation blocks data-stack deletion while its exports are

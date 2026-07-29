@@ -1,9 +1,8 @@
 services:
   collector:
     image: ghcr.io/danballance/fpl-data-relay-collector:${COLLECTOR_IMAGE_TAG:?COLLECTOR_IMAGE_TAG is required}
-    pull_policy: always
     env_file:
-      - ${COLLECTOR_ENV_FILE:?COLLECTOR_ENV_FILE is required}
+      - .env
     volumes:
       - /volume1/docker/appdata/fpl-data-relay-collector/aws:/home/collector/.aws:ro
     read_only: true

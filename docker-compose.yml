@@ -13,10 +13,9 @@ services:
       REFERENCE_POLL_SECONDS: ${FPL_REFERENCE_POLL_SECONDS:?FPL_REFERENCE_POLL_SECONDS is required}
       LIVE_POLL_SECONDS: ${FPL_LIVE_POLL_SECONDS:?FPL_LIVE_POLL_SECONDS is required}
       IDLE_POLL_SECONDS: ${FPL_IDLE_POLL_SECONDS:?FPL_IDLE_POLL_SECONDS is required}
-      POSTGRES_MAINTENANCE_DATABASE_URL: ${FPL_POSTGRES_MAINTENANCE_DATABASE_URL:-}
+      POSTGRES_MAINTENANCE_DATABASE_URL: ${FPL_POSTGRES_MAINTENANCE_DATABASE_URL:?FPL_POSTGRES_MAINTENANCE_DATABASE_URL is required}
     ports:
       - "8000:8000"
-    restart: unless-stopped
 
   postgres:
     image: postgres:17.7-alpine
@@ -34,7 +33,6 @@ services:
       retries: 5
     volumes:
       - postgres-17-data:/var/lib/postgresql/data
-    restart: unless-stopped
 
 volumes:
   postgres-17-data:

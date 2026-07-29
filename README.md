@@ -44,6 +44,17 @@ Production uses AWS SAM, Lambda, Aurora PostgreSQL Serverless v2 with Data API,
 SQS/EventBridge Scheduler, a NAS-hosted upstream collector, and S3/CloudFront in
 `eu-west-2`. Local Compose continues to use PostgreSQL 17.7 and `asyncpg`.
 
+For a complete local container environment, copy `.env.example` to the ignored
+`.env` file and start both services:
+
+```fish
+cp .env.example .env
+uv run docker compose up --build
+```
+
+Stop the services with `uv run docker compose down`. Do not add `--volumes`
+unless the PostgreSQL 17 data is intentionally being discarded.
+
 See [docs/deployment.md](docs/deployment.md) for the complete AWS deployment
 runbook.
 See [docs/api.md](docs/api.md) for the exposed HTTP API.
@@ -51,8 +62,6 @@ See [docs/architecture.md](docs/architecture.md) for package boundaries.
 See [docs/client.md](docs/client.md) for the local React data explorer.
 See [docs/collector.md](docs/collector.md) for NAS collector deployment and
 operations.
-See [docs/infrastructure-migrations.md](docs/infrastructure-migrations.md) for
-ordered one-time AWS transitions and their SSM ledger.
 
 ## Local Data Explorer
 

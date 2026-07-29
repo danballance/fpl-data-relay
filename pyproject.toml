@@ -12,7 +12,6 @@ dependencies = [
 [project.scripts]
 fpl-relay = "fpl_data_relay.bootstrap:app"
 fpl-collector = "fpl_data_relay.collector_cli:app"
-fpl-infrastructure-migrate = "fpl_data_relay.infrastructure_migrations.cli:app"
 
 [dependency-groups]
 aws = [
