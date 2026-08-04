@@ -160,6 +160,9 @@ jobs:
             --stack-name "${DATA_STACK_NAME}" \
             --query "Stacks[0].Outputs[?OutputKey=='DatabaseName'].OutputValue | [0]" \
             --output text)"
+          uv run fpl-relay db wait-ready \
+            --attempts 12 \
+            --interval-seconds 5
           uv run fpl-relay db status
           uv run fpl-relay db apply
           uv run fpl-relay db status
