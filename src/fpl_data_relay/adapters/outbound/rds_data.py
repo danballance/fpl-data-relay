@@ -280,8 +280,10 @@ class RdsDataConnection:
                 raise SchemaUnavailableError(
                     "Database migration history is not available.",
                 ) from error
+            detail = f": {message}" if message else ""
             raise DatabaseUnavailableError(
-                f"RDS Data API request failed with {code or 'an unknown error'}.",
+                "RDS Data API request failed with "
+                f"{code or 'an unknown error'}{detail}.",
             ) from error
 
 
@@ -377,15 +379,45 @@ def data_api_statement(
             if not all(isinstance(value, int) for value in argument):
                 raise TypeError("Only integer array parameters are supported.")
             encoded_array = "{" + ",".join(str(value) for value in argument) + "}"
-            sql = sql.replace(f"${index}", f"CAST({placeholder} AS integer[])")
+            replacement = f"CAST({placeholder} AS integer[])"
             field: DataApiField = {"stringValue": encoded_array}
         else:
-            sql = sql.replace(f"${index}", placeholder)
+            replacement = temporal_parameter_expression(
+                placeholder=placeholder,
+                value=argument,
+            )
             field = data_api_field(value=argument)
+        sql = replace_positional_placeholder(
+            sql=sql,
+            index=index,
+            replacement=replacement,
+        )
         parameters.append({"name": name, "value": field})
     if PARAMETER_PATTERN.search(sql):
         raise ValueError("SQL contains a placeholder without a matching argument.")
     return sql, parameters
+
+
+def temporal_parameter_expression(*, placeholder: str, value: object) -> str:
+    """Cast temporal string parameters to their explicit PostgreSQL types."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Datetime parameters must be timezone-aware.")
+        return f"CAST({placeholder} AS timestamptz)"
+    if isinstance(value, date):
+        return f"CAST({placeholder} AS date)"
+    return placeholder
+
+
+def replace_positional_placeholder(
+    *,
+    sql: str,
+    index: int,
+    replacement: str,
+) -> str:
+    """Replace one asyncpg placeholder without corrupting larger indexes."""
+    pattern = re.compile(rf"\${index}(?!\d)")
+    return pattern.sub(replacement, sql)
 
 
 def data_api_field(*, value: object) -> DataApiField:

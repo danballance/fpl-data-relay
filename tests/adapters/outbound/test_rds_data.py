@@ -129,6 +129,36 @@ def test_data_api_statement_translates_positionals_and_integer_arrays() -> None:
     assert parameters[1]["value"] == {"stringValue": "{1,2}"}
 
 
+def test_data_api_statement_casts_temporal_parameters() -> None:
+    timestamp = datetime(2026, 8, 21, 17, 30, tzinfo=UTC)
+    day = date(2026, 8, 21)
+
+    sql, parameters = data_api_statement(
+        query=(
+            "INSERT INTO rows "
+            "(timestamp_value, date_value, value_3, value_4, value_5, "
+            "value_6, value_7, value_8, value_9, value_10) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+        ),
+        arguments=(timestamp, day, 3, 4, 5, 6, 7, 8, 9, 10),
+    )
+
+    assert "VALUES (CAST(:p1 AS timestamptz), CAST(:p2 AS date)," in sql
+    assert sql.endswith(":p9, :p10)")
+    assert parameters[0]["value"] == {
+        "stringValue": "2026-08-21T17:30:00+00:00",
+    }
+    assert parameters[1]["value"] == {"stringValue": "2026-08-21"}
+
+
+def test_data_api_statement_rejects_naive_datetimes() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        data_api_statement(
+            query="SELECT $1",
+            arguments=(datetime(2026, 8, 21, 17, 30),),
+        )
+
+
 def test_data_api_statement_rejects_invalid_arrays_and_missing_arguments() -> None:
     with pytest.raises(TypeError, match="integer array"):
         data_api_statement(query="SELECT $1", arguments=(["bad"],))
@@ -260,6 +290,12 @@ async def test_data_api_classifies_waking_and_other_client_errors() -> None:
         'ERROR: relation "relay_schema_migrations" does not exist'
     )
     with pytest.raises(SchemaUnavailableError):
+        await connection(client=client).fetch("SELECT 1")
+    client.error_code = "DatabaseErrorException"
+    client.error_message = (
+        'ERROR: column "first_deadline_time" is of type timestamp with time zone'
+    )
+    with pytest.raises(DatabaseUnavailableError, match="first_deadline_time"):
         await connection(client=client).fetch("SELECT 1")
 
 
