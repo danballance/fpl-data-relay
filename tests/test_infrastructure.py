@@ -113,7 +113,7 @@ def test_data_stack_has_layered_database_protection() -> None:
     assert set(deny["Action"]) == {"Update:Delete", "Update:Replace"}
     assert set(deny["Resource"]) == {
         "LogicalResourceId/DatabaseCluster",
-        "LogicalResourceId/DatabaseInstance",
+        "LogicalResourceId/DatabaseWriter",
     }
 
 
