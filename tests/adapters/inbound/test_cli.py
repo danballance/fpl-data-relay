@@ -11,6 +11,7 @@ from fpl_data_relay.adapters.outbound.postgres.schema_manager import (
     PostgresSchemaManager,
 )
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import (
     IngestionResult,
     IngestionService,
@@ -26,6 +27,8 @@ from tests.conftest import FakeClient, FakePostgresPool, InMemoryStore
 class FakeCliOperations:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int | None, int | None]] = []
+        self.waking_attempts_remaining = 0
+        self.schema_status_error: RuntimeError | None = None
 
     def validate_config(self) -> None:
         self.calls.append(("config", None, None))
@@ -35,6 +38,11 @@ class FakeCliOperations:
 
     async def schema_status(self) -> SchemaStatus:
         self.calls.append(("status", None, None))
+        if self.schema_status_error is not None:
+            raise self.schema_status_error
+        if self.waking_attempts_remaining > 0:
+            self.waking_attempts_remaining -= 1
+            raise DatabaseWakingError("waking")
         return SchemaStatus(applied_versions=[1], pending_versions=[])
 
     async def drop_and_create_database(self) -> None:
@@ -111,6 +119,90 @@ def test_cli_drop_and_create_requires_confirmation() -> None:
     assert "without --yes" in refused.output
     assert accepted.exit_code == 0
     assert operations.calls == [("drop", None, None)]
+
+
+def test_cli_wait_ready_retries_only_database_waking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = FakeCliOperations()
+    operations.waking_attempts_remaining = 2
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        "fpl_data_relay.adapters.inbound.cli.app.time.sleep",
+        fake_sleep,
+    )
+    result = CliRunner().invoke(
+        create_cli_app(operations=operations),
+        ["db", "wait-ready", "--attempts", "3", "--interval-seconds", "5"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == (
+        "database waking attempt=1/3\n"
+        "database waking attempt=2/3\n"
+        "database ready attempt=3/3\n"
+    )
+    assert operations.calls == [("status", None, None)] * 3
+    assert sleeps == [5, 5]
+
+
+def test_cli_wait_ready_exhausts_attempts_without_a_final_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = FakeCliOperations()
+    operations.waking_attempts_remaining = 2
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        "fpl_data_relay.adapters.inbound.cli.app.time.sleep",
+        fake_sleep,
+    )
+    result = CliRunner().invoke(
+        create_cli_app(operations=operations),
+        ["db", "wait-ready", "--attempts", "2", "--interval-seconds", "4"],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, DatabaseWakingError)
+    assert result.output == (
+        "database waking attempt=1/2\n"
+        "database waking attempt=2/2\n"
+    )
+    assert sleeps == [4]
+
+
+def test_cli_wait_ready_fails_immediately_for_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = FakeCliOperations()
+    operations.schema_status_error = RuntimeError("invalid credentials")
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        "fpl_data_relay.adapters.inbound.cli.app.time.sleep",
+        fake_sleep,
+    )
+    result = CliRunner().invoke(
+        create_cli_app(operations=operations),
+        ["db", "wait-ready", "--attempts", "12", "--interval-seconds", "5"],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "invalid credentials"
+    assert result.output == ""
+    assert operations.calls == [("status", None, None)]
+    assert sleeps == []
 
 
 def test_cli_ingestion_commands_preserve_options_and_output() -> None:

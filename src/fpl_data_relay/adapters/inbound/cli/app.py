@@ -1,11 +1,13 @@
 """Typer command line adapter for relay operations."""
 
 import asyncio
+import time
 from typing import Annotated, Protocol
 
 import typer
 
 from fpl_data_relay.application.database import SCHEMA_VERSION
+from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import IngestionResult
 from fpl_data_relay.application.ports.administration import SchemaStatus
 
@@ -60,6 +62,40 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
         applied = ",".join(str(version) for version in status.applied_versions)
         pending = ",".join(str(version) for version in status.pending_versions)
         typer.echo(f"applied=[{applied}] pending=[{pending}]")
+
+    @db_app.command("wait-ready")
+    def db_wait_ready(
+        *,
+        attempts: Annotated[
+            int,
+            typer.Option(
+                "--attempts",
+                min=1,
+                help="Maximum database readiness attempts.",
+            ),
+        ],
+        interval_seconds: Annotated[
+            int,
+            typer.Option(
+                "--interval-seconds",
+                min=1,
+                help="Seconds between Aurora resume attempts.",
+            ),
+        ],
+    ) -> None:
+        """Wait for an auto-paused Aurora database to resume."""
+        for attempt in range(1, attempts + 1):
+            try:
+                asyncio.run(operations.schema_status())
+            except DatabaseWakingError:
+                typer.echo(f"database waking attempt={attempt}/{attempts}")
+                if attempt == attempts:
+                    raise
+                time.sleep(interval_seconds)
+            else:
+                typer.echo(f"database ready attempt={attempt}/{attempts}")
+                return
+        raise AssertionError("Database readiness loop completed unexpectedly.")
 
     @db_app.command("drop-and-create")
     def db_drop_and_create(

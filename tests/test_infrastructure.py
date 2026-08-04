@@ -132,6 +132,9 @@ def test_production_deployment_is_one_direct_manual_workflow() -> None:
     assert "CAPABILITY_NAMED_IAM" in workflow
     assert '"CollectorUserName=${COLLECTOR_USER_NAME}"' in workflow
     assert "PAYLOAD_PREFIX: payloads" in workflow
+    assert "uv run fpl-relay db wait-ready" in workflow
+    assert "--attempts 12" in workflow
+    assert "--interval-seconds 5" in workflow
     assert "AWS_ACCESS_KEY_ID" in workflow
     assert "AWS_SECRET_ACCESS_KEY" in workflow
 

@@ -117,6 +117,7 @@ data outputs, export them as `DATABASE_RESOURCE_ARN`, `DATABASE_SECRET_ARN`, and
 
 ```fish
 set -x DATABASE_EXECUTOR rds_data
+uv run fpl-relay db wait-ready --attempts 12 --interval-seconds 5
 uv run fpl-relay db status
 uv run fpl-relay db apply
 uv run fpl-relay db status
