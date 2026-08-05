@@ -104,7 +104,7 @@ def next_live_delay(
     database_waking: bool,
 ) -> int | None:
     """Return the next SQS delay or stop after the final window poll."""
-    if now.tzinfo is None:
+    if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware.")
     if now >= job.window_end:
         return None
@@ -128,7 +128,7 @@ def build_match_windows(
     now: datetime,
 ) -> tuple[list[MatchWindow], list[int]]:
     """Build merged future windows and return fixtures missing schedule data."""
-    if now.tzinfo is None:
+    if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware.")
     missing_fixture_ids: list[int] = []
     candidates: list[MatchWindow] = []
@@ -136,14 +136,19 @@ def build_match_windows(
         if fixture.event is None or fixture.kickoff_time is None:
             missing_fixture_ids.append(fixture.id)
             continue
-        end = fixture.kickoff_time + WINDOW_AFTER_KICKOFF
+        kickoff_time = fixture.kickoff_time
+        if kickoff_time.tzinfo is None or kickoff_time.utcoffset() is None:
+            raise ValueError(
+                f"Fixture {fixture.id} kickoff_time must be timezone-aware.",
+            )
+        end = kickoff_time + WINDOW_AFTER_KICKOFF
         if end <= now:
             continue
         candidates.append(
             MatchWindow(
                 season_id=season_id,
                 event_id=fixture.event,
-                start=max(fixture.kickoff_time - WINDOW_BEFORE_KICKOFF, now),
+                start=max(kickoff_time - WINDOW_BEFORE_KICKOFF, now),
                 end=end,
             ),
         )

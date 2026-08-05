@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Protocol, cast
 
 from fpl_data_relay.adapters.outbound.postgres.migrations import (
@@ -1315,12 +1315,27 @@ def change_event_from_row(*, row: object) -> ChangeEvent:
 
 def event_from_row(*, row: object) -> Event:
     """Convert a row to Event."""
-    return Event.model_validate(filter_row_values(values=row_values(row=row)))
+    values = filter_row_values(values=row_values(row=row))
+    if "deadline_time" in values:
+        values["deadline_time"] = optional_datetime(
+            values=values,
+            key="deadline_time",
+        )
+    return Event.model_validate(values)
 
 
 def season_from_row(*, row: object) -> Season:
     """Convert a row to Season."""
-    return Season.model_validate(filter_row_values(values=row_values(row=row)))
+    values = filter_row_values(values=row_values(row=row))
+    values["first_deadline_time"] = require_datetime(
+        values=values,
+        key="first_deadline_time",
+    )
+    values["last_deadline_time"] = require_datetime(
+        values=values,
+        key="last_deadline_time",
+    )
+    return Season.model_validate(values)
 
 
 def phase_from_row(*, row: object) -> Phase:
@@ -1340,14 +1355,21 @@ def element_type_from_row(*, row: object) -> ElementType:
 
 def element_from_row(*, row: object) -> Element:
     """Convert a row to Element."""
-    return Element.model_validate(filter_row_values(values=row_values(row=row)))
+    values = filter_row_values(values=row_values(row=row))
+    if "news_added" in values:
+        values["news_added"] = optional_datetime(values=values, key="news_added")
+    return Element.model_validate(values)
 
 
 def fixture_from_row(*, row: object) -> Fixture:
     """Convert a row to Fixture without nested stats."""
-    return Fixture.model_validate(
-        filter_row_values(values=row_values(row=row)) | {"stats": []},
-    )
+    values = filter_row_values(values=row_values(row=row))
+    if "kickoff_time" in values:
+        values["kickoff_time"] = optional_datetime(
+            values=values,
+            key="kickoff_time",
+        )
+    return Fixture.model_validate(values | {"stats": []})
 
 
 def event_status_day_from_row(*, row: object) -> EventStatusDay:
@@ -1408,13 +1430,32 @@ def optional_int(*, values: dict[str, object], key: str) -> int | None:
 
 
 def require_datetime(*, values: dict[str, object], key: str) -> datetime:
-    """Return a required datetime field from row values."""
+    """Return a required database datetime normalized to aware UTC."""
     value = values[key]
+    return normalize_database_datetime(value=value, key=key)
+
+
+def optional_datetime(*, values: dict[str, object], key: str) -> datetime | None:
+    """Return a nullable database datetime normalized to aware UTC."""
+    value = values[key]
+    if value is None:
+        return None
+    return normalize_database_datetime(value=value, key=key)
+
+
+def normalize_database_datetime(*, value: object, key: str) -> datetime:
+    """Restore the timezone omitted by RDS Data API formatted records."""
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    raise TypeError(f"Expected {key} to be datetime, found {type(value).__name__}.")
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise TypeError(
+            f"Expected {key} to be datetime, found {type(value).__name__}.",
+        )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def require_date(*, values: dict[str, object], key: str) -> date:

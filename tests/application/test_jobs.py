@@ -94,6 +94,21 @@ def test_match_windows_skip_finished_windows_and_require_aware_now() -> None:
             fixtures=[],
             now=now.replace(tzinfo=None),
         )
+    with pytest.raises(
+        ValueError,
+        match="Fixture 2 kickoff_time must be timezone-aware",
+    ):
+        build_match_windows(
+            season_id="2026-27",
+            fixtures=[
+                fixture(
+                    fixture_id=2,
+                    event_id=1,
+                    kickoff=now.replace(tzinfo=None),
+                ),
+            ],
+            now=now,
+        )
 
 
 def test_live_requeue_delays_and_window_termination() -> None:
