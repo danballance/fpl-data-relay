@@ -5,6 +5,10 @@ import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { useTableUrlState } from "../lib/query-state";
+import {
+  ApiDocsActions,
+  type ApiOperation,
+} from "./ApiDocsLink";
 import { DataTable } from "./DataTable";
 import { JsonView } from "./JsonView";
 import { PageHeader } from "./PageHeader";
@@ -12,6 +16,7 @@ import { RecordInspector } from "./RecordInspector";
 import { StatusPanel } from "./StatusPanel";
 
 export interface DetailLoader<T> {
+  apiOperation: ApiOperation;
   queryKey: readonly unknown[];
   load: (id: string, signal: AbortSignal) => Promise<T>;
 }
@@ -29,6 +34,7 @@ export function ResourcePage<T>({
   eyebrow,
   title,
   description,
+  apiOperations,
   query,
   records: recordsOverride,
   columns,
@@ -44,6 +50,7 @@ export function ResourcePage<T>({
   eyebrow: string;
   title: string;
   description: string;
+  apiOperations: readonly ApiOperation[];
   query: ResourceQuery;
   records?: T[];
   columns: ColumnDef<T>[];
@@ -101,14 +108,17 @@ export function ResourcePage<T>({
         title={title}
         description={description}
         actions={
-          <button
-            className="button"
-            disabled={query.isFetching}
-            type="button"
-            onClick={() => void query.refetch()}
-          >
-            {query.isFetching ? "Refreshing…" : "Refresh"}
-          </button>
+          <>
+            <ApiDocsActions operations={apiOperations} />
+            <button
+              className="button"
+              disabled={query.isFetching}
+              type="button"
+              onClick={() => void query.refetch()}
+            >
+              {query.isFetching ? "Refreshing…" : "Refresh"}
+            </button>
+          </>
         }
       />
       {beforeTable}
@@ -152,6 +162,7 @@ export function ResourcePage<T>({
           error={detailQuery.error ?? null}
           onClose={close}
           renderFields={renderDetail}
+          apiOperation={detailLoader?.apiOperation}
         />
       )}
     </>

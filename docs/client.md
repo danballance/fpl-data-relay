@@ -17,6 +17,13 @@ running the client. Both commands load the explicit proxy target from
 Vite proxies `/api` to the configured relay and removes the prefix. Production
 uses the same paths through CloudFront.
 
+The Explorer navigation links to Swagger UI at `/api/docs`. Resource pages
+deep-link to the documented OpenAPI operation that supplies the visible data;
+record inspectors link to their detail operation. Pages with multiple visible
+operations expose a compact endpoint menu, and the Fixtures link follows the
+selected season or event scope. Documentation opens in a new tab so the
+Explorer's current selection and filters remain in place.
+
 Before rendering database-backed routes, the client calls `/api/readyz`. A
 `database_waking` response shows a full-page waking state and retries every
 five seconds for eight attempts. Manual retry is available after exhaustion.

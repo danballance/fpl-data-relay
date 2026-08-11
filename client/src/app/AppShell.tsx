@@ -5,6 +5,7 @@ import {
   useLocation,
 } from "react-router-dom";
 
+import { ApiDocsLink } from "../components/ApiDocsLink";
 import { useSelection } from "./selection";
 
 const NAVIGATION = [
@@ -143,9 +144,16 @@ export function AppShell() {
             </section>
           ))}
         </nav>
-        <p className="sidebar-note">
-          Read-only. Responses come from stored relay data.
-        </p>
+        <div className="sidebar-footer">
+          <ApiDocsLink
+            label="API reference"
+            operation={null}
+            variant="navigation"
+          />
+          <p className="sidebar-note">
+            Read-only. Responses come from stored relay data.
+          </p>
+        </div>
       </aside>
       <main className="main-content">
         <Outlet />

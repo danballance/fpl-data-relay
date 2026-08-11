@@ -16,6 +16,7 @@ import type {
   EntityChange,
   IngestionStatus,
 } from "../../api/types";
+import { API_OPERATIONS } from "../../components/ApiDocsLink";
 import { ResourcePage } from "../../components/ResourcePage";
 import { StructuredValue } from "../../components/StructuredValue";
 import { formatDateTime } from "../../lib/format";
@@ -377,12 +378,19 @@ export function ActivityPage() {
       eyebrow="Change feed"
       title="Activity"
       description="Accurate entity changes, ingestion freshness, and source checks."
+      apiOperations={[
+        API_OPERATIONS.listRecentChangeEvents,
+        API_OPERATIONS.listChangeEvents,
+        API_OPERATIONS.listChangeEventHistory,
+        API_OPERATIONS.getIngestionStatus,
+      ]}
       query={changesQuery}
       records={filteredEvents}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={(row) => `Change ${row.id} · ${row.event_name}`}
       detailLoader={{
+        apiOperation: API_OPERATIONS.listEntityChanges,
         queryKey: ["change-event-entities"],
         load: async (id, signal) => {
           const event = eventsRef.current.find((item) => item.id === Number(id));

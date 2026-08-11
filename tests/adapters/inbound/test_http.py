@@ -150,7 +150,7 @@ def test_readyz_returns_stable_database_errors(
     assert response.headers.get("Retry-After") == retry_after
 
 
-def test_default_documentation_endpoints_are_exposed() -> None:
+def test_documentation_endpoints_are_prefix_safe() -> None:
     app = build_test_app()
     with TestClient(app) as client:
         openapi_response = client.get("/openapi.json")
@@ -161,16 +161,25 @@ def test_default_documentation_endpoints_are_exposed() -> None:
     assert openapi_response.json()["openapi"] == "3.1.0"
     assert swagger_response.status_code == 200
     assert "SwaggerUIBundle" in swagger_response.text
-    assert "url: '/openapi.json'" in swagger_response.text
+    assert "url: './openapi.json'" in swagger_response.text
+    assert '"deepLinking": true' in swagger_response.text
     assert "cdn.jsdelivr.net/npm/swagger-ui-dist@5" in swagger_response.text
     assert redoc_response.status_code == 200
     assert "FPL Data Relay - ReDoc" in redoc_response.text
+    assert 'spec-url="./openapi.json"' in redoc_response.text
 
 
 def test_openapi_documents_concrete_api_contracts() -> None:
     schema = build_test_app().openapi()
     paths = schema["paths"]
     components = schema["components"]["schemas"]
+
+    assert schema["servers"] == [
+        {
+            "url": ".",
+            "description": "The relay endpoint serving this OpenAPI document.",
+        }
+    ]
 
     expected_operation_ids = {
         "/healthz": "get_health",

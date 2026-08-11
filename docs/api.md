@@ -5,7 +5,11 @@ does not proxy FPL requests on demand. Production is anonymous and public
 through CloudFront `/api/*`; API Gateway throttles the default route at five
 requests per second with a burst of ten.
 
-OpenAPI is available at `/openapi.json`, `/docs`, and `/redoc`.
+The OpenAPI schema is available directly from the API at `/openapi.json`, with
+Swagger UI at `/docs` and ReDoc at `/redoc`. Through the Explorer and its
+CloudFront/Vite API proxy, use `/api/openapi.json`, `/api/docs`, and
+`/api/redoc`. The documentation uses relative schema and server URLs, so
+Swagger's **Try it out** requests work through either access path.
 
 ## Liveness and readiness
 

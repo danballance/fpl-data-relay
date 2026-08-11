@@ -12,6 +12,7 @@ import type {
   Season,
   Team,
 } from "../../api/types";
+import { API_OPERATIONS } from "../../components/ApiDocsLink";
 import { ResourcePage } from "../../components/ResourcePage";
 import { SelectionRequired } from "../../components/SelectionRequired";
 import {
@@ -59,11 +60,13 @@ export function SeasonsPage() {
       eyebrow="Relay"
       title="Seasons"
       description="Derived season boundaries stored by the relay."
+      apiOperations={[API_OPERATIONS.listSeasons]}
       query={query}
       columns={columns}
       getRowId={(row) => row.id}
       getRowLabel={(row) => row.id}
       detailLoader={{
+        apiOperation: API_OPERATIONS.getSeason,
         queryKey: ["season"],
         load: (id, signal) => api.getSeason(id, signal),
       }}
@@ -125,11 +128,13 @@ export function EventsPage() {
       eyebrow={seasonId}
       title="Events"
       description="Gameweek metadata stored for the selected season."
+      apiOperations={[API_OPERATIONS.listEvents]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={(row) => row.name}
       detailLoader={{
+        apiOperation: API_OPERATIONS.getEvent,
         queryKey: ["event", seasonId],
         load: (id, signal) => api.getEvent(seasonId, Number(id), signal),
       }}
@@ -164,6 +169,7 @@ export function PhasesPage() {
       eyebrow={seasonId}
       title="Phases"
       description="Competition phases and their event boundaries."
+      apiOperations={[API_OPERATIONS.listPhases]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}
@@ -203,11 +209,13 @@ export function TeamsPage() {
       eyebrow={seasonId}
       title="Teams"
       description="Premier League teams and normalized strength values."
+      apiOperations={[API_OPERATIONS.listTeams]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={(row) => row.name}
       detailLoader={{
+        apiOperation: API_OPERATIONS.getTeam,
         queryKey: ["team", seasonId],
         load: (id, signal) => api.getTeam(seasonId, Number(id), signal),
       }}
@@ -245,6 +253,7 @@ export function ElementTypesPage() {
       eyebrow={seasonId}
       title="Element types"
       description="Player position definitions stored for the selected season."
+      apiOperations={[API_OPERATIONS.listElementTypes]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}
@@ -314,12 +323,14 @@ export function PlayersPage() {
       eyebrow={selection.seasonId}
       title="Players"
       description="Normalized player records with resolved team and position names."
+      apiOperations={[API_OPERATIONS.listElements]}
       query={query}
       records={records}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={playerName}
       detailLoader={{
+        apiOperation: API_OPERATIONS.getElement,
         queryKey: ["element", selection.seasonId],
         load: (id, signal) =>
           api.getElement(selection.seasonId!, Number(id), signal),
@@ -459,6 +470,11 @@ export function FixturesPage() {
           ? "Fixtures assigned to the selected event."
           : "All fixtures stored for the selected season."
       }
+      apiOperations={[
+        eventScope
+          ? API_OPERATIONS.listEventFixtures
+          : API_OPERATIONS.listFixtures,
+      ]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}

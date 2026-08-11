@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { useSelection } from "../../app/selection";
 import { useRelayApi } from "../../api/provider";
 import type { EventStatusDay, LiveElement } from "../../api/types";
+import { API_OPERATIONS } from "../../components/ApiDocsLink";
 import { ResourcePage } from "../../components/ResourcePage";
 import { SelectionRequired } from "../../components/SelectionRequired";
 import {
@@ -53,6 +54,7 @@ export function EventStatusPage() {
       description={`Latest stored event-status response${
         query.data?.leagues ? ` · leagues: ${query.data.leagues}` : ""
       }.`}
+      apiOperations={[API_OPERATIONS.getEventStatus]}
       query={query}
       records={query.data?.status}
       columns={columns}
@@ -114,11 +116,13 @@ export function LivePlayersPage() {
       eyebrow={`${selection.seasonId} · ${lookups.event(selection.eventId)}`}
       title="Live players"
       description="Live player totals and fixture-level points explanations."
+      apiOperations={[API_OPERATIONS.listLiveElements]}
       query={query}
       columns={columns}
       getRowId={(row) => String(row.id)}
       getRowLabel={(row) => lookups.element(row.id)}
       detailLoader={{
+        apiOperation: API_OPERATIONS.getLiveElement,
         queryKey: [
           "live-element",
           selection.seasonId,

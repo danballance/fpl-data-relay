@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 
+import { ApiDocsLink, type ApiOperation } from "./ApiDocsLink";
 import { JsonView } from "./JsonView";
 import { StatusPanel } from "./StatusPanel";
 import { StructuredValue } from "./StructuredValue";
@@ -12,6 +13,7 @@ export function RecordInspector({
   error,
   onClose,
   renderFields,
+  apiOperation,
 }: {
   title: string;
   record: unknown;
@@ -19,6 +21,7 @@ export function RecordInspector({
   error: unknown;
   onClose: () => void;
   renderFields?: (record: unknown) => ReactNode;
+  apiOperation?: ApiOperation;
 }) {
   const [mode, setMode] = useState<"fields" | "json">("fields");
 
@@ -36,14 +39,23 @@ export function RecordInspector({
             <p className="eyebrow">Record detail</p>
             <h2>{title}</h2>
           </div>
-          <button
-            aria-label="Close details"
-            className="icon-button"
-            type="button"
-            onClick={onClose}
-          >
-            ×
-          </button>
+          <div className="inspector__actions">
+            {apiOperation === undefined ? null : (
+              <ApiDocsLink
+                label="API endpoint"
+                operation={apiOperation}
+                variant="inline"
+              />
+            )}
+            <button
+              aria-label="Close details"
+              className="icon-button"
+              type="button"
+              onClick={onClose}
+            >
+              ×
+            </button>
+          </div>
         </header>
         <div className="tab-list" role="tablist" aria-label="Detail format">
           <button

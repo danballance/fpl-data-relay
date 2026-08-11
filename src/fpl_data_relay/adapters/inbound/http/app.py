@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from typing import Annotated, NoReturn
 
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from fpl_data_relay.adapters.inbound.http.schemas import (
     ChangeEventHistoryResponse,
@@ -72,6 +73,12 @@ OPENAPI_TAGS = [
     {
         "name": "Change Events",
         "description": "Cursor-based change-event replay.",
+    },
+]
+OPENAPI_SERVERS = [
+    {
+        "url": ".",
+        "description": "The relay endpoint serving this OpenAPI document.",
     },
 ]
 
@@ -143,8 +150,28 @@ def create_app(
         ),
         version="0.1.0",
         openapi_tags=OPENAPI_TAGS,
+        servers=OPENAPI_SERVERS,
+        docs_url=None,
+        redoc_url=None,
         lifespan=lifespan,
     )
+
+    @app.get("/docs", include_in_schema=False)
+    async def swagger_ui() -> HTMLResponse:
+        """Serve Swagger UI from direct and reverse-proxied API paths."""
+        return get_swagger_ui_html(
+            openapi_url="./openapi.json",
+            title=f"{app.title} - Swagger UI",
+            swagger_ui_parameters={"deepLinking": True},
+        )
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc() -> HTMLResponse:
+        """Serve ReDoc from direct and reverse-proxied API paths."""
+        return get_redoc_html(
+            openapi_url="./openapi.json",
+            title=f"{app.title} - ReDoc",
+        )
 
     @app.exception_handler(DatabaseWakingError)
     async def database_waking(

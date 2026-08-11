@@ -297,6 +297,38 @@ select:disabled {
   background: var(--accent-soft);
 }
 
+.sidebar-footer {
+  display: grid;
+  gap: 14px;
+}
+
+.api-docs-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.api-docs-link:hover {
+  text-decoration: underline;
+}
+
+.api-docs-link--navigation {
+  margin: 0 10px;
+  padding: 9px 10px;
+  border: 1px solid #b8d7c9;
+  border-radius: 5px;
+  background: var(--accent-soft);
+}
+
+.api-docs-link--navigation:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
 .sidebar-note {
   margin: 0 10px;
   color: #88928d;
@@ -332,7 +364,49 @@ select:disabled {
 
 .page-header__actions {
   display: flex;
+  align-items: flex-start;
   gap: 8px;
+}
+
+.api-docs-menu {
+  position: relative;
+}
+
+.api-docs-menu > summary {
+  list-style: none;
+}
+
+.api-docs-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.api-docs-menu[open] > summary {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.api-docs-menu > div {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  width: 210px;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgb(25 37 31 / 12%);
+}
+
+.api-docs-menu .api-docs-link {
+  padding: 8px;
+  border-radius: 4px;
+}
+
+.api-docs-menu .api-docs-link:hover {
+  background: var(--surface-subtle);
+  text-decoration: none;
 }
 
 .eyebrow {
@@ -594,6 +668,12 @@ tbody tr:hover {
 .inspector__header h2 {
   margin: 0;
   font-size: 1.25rem;
+}
+
+.inspector__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .icon-button {
@@ -1131,6 +1211,15 @@ code {
     display: none;
   }
 
+  .sidebar-footer {
+    flex: none;
+  }
+
+  .api-docs-link--navigation {
+    margin: 0;
+    white-space: nowrap;
+  }
+
   .sidebar nav a {
     white-space: nowrap;
   }
@@ -1176,6 +1265,7 @@ code {
   }
 
   .page-header__actions {
+    flex-wrap: wrap;
     justify-self: start;
   }
 

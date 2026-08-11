@@ -11,6 +11,11 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import { RelayApiError } from "../api/errors";
+import {
+  ApiDocsActions,
+  API_OPERATIONS,
+  swaggerOperationHref,
+} from "./ApiDocsLink";
 import { DataTable } from "./DataTable";
 import { JsonView } from "./JsonView";
 import { RecordInspector } from "./RecordInspector";
@@ -129,8 +134,15 @@ describe("shared explorer components", () => {
         loading={false}
         error={null}
         onClose={close}
+        apiOperation={API_OPERATIONS.getSeason}
       />,
     );
+    const endpointLink = screen.getByRole("link", { name: /API endpoint/ });
+    expect(endpointLink).toHaveAttribute(
+      "href",
+      "/api/docs#/Reference%20Data/get_season",
+    );
+    expect(endpointLink).toHaveAttribute("target", "_blank");
     expect(screen.getByText("Relay")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "Raw JSON" }));
     expect(screen.getByTestId("json-view")).toHaveTextContent('"id": 1');
@@ -140,6 +152,28 @@ describe("shared explorer components", () => {
     expect(close).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByRole("button", { name: "Close details" }));
     expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds typed operation links and rejects empty action groups", () => {
+    expect(swaggerOperationHref(API_OPERATIONS.getEventStatus)).toBe(
+      "/api/docs#/Live%20Data/get_event_status",
+    );
+    render(
+      <ApiDocsActions
+        operations={[
+          API_OPERATIONS.listRecentChangeEvents,
+          API_OPERATIONS.getIngestionStatus,
+        ]}
+      />,
+    );
+    expect(screen.getByText("API endpoints")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Recent changes/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/list_recent_change_events",
+    );
+    expect(() => render(<ApiDocsActions operations={[]} />)).toThrow(
+      "API documentation actions require at least one operation.",
+    );
   });
 
   it("renders inspector loading and error content", () => {
@@ -209,11 +243,13 @@ describe("shared explorer components", () => {
             eyebrow="Test"
             title="Records"
             description="Test records."
+            apiOperations={[API_OPERATIONS.listSeasons]}
             query={query}
             columns={[{ accessorKey: "name", header: "Name" }]}
             getRowId={(row: Row) => String(row.id)}
             getRowLabel={(row: Row) => row.name}
             detailLoader={{
+              apiOperation: API_OPERATIONS.getSeason,
               queryKey: ["record"],
               load: async () => ({ id: 1, name: "Detailed relay" }),
             }}
@@ -243,6 +279,7 @@ describe("shared explorer components", () => {
             eyebrow="Test"
             title="Loading"
             description="Loading."
+            apiOperations={[API_OPERATIONS.listSeasons]}
             query={{
               data: undefined,
               error: null,
@@ -267,6 +304,7 @@ describe("shared explorer components", () => {
             eyebrow="Test"
             title="Error"
             description="Error."
+            apiOperations={[API_OPERATIONS.listSeasons]}
             query={{
               data: undefined,
               error: new Error("request failed"),

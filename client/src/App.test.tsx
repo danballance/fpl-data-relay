@@ -40,6 +40,10 @@ describe("relay explorer application", () => {
     );
     expect(screen.getByText("Version 2")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThan(0);
+    const apiReference = screen.getByRole("link", { name: /API reference/ });
+    expect(apiReference).toHaveAttribute("href", "/api/docs");
+    expect(apiReference).toHaveAttribute("target", "_blank");
+    expect(apiReference).toHaveAttribute("rel", "noreferrer");
     await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
     await userEvent.selectOptions(screen.getByLabelText("Event"), "");
     await userEvent.selectOptions(screen.getByLabelText("Event"), "1");
@@ -54,35 +58,89 @@ describe("relay explorer application", () => {
   });
 
   it.each([
-    ["/seasons", "Seasons", "2025-26"],
-    ["/events?season=2025-26&event=1", "Events", "Gameweek 1"],
-    ["/phases?season=2025-26&event=1", "Phases", "Overall"],
-    ["/teams?season=2025-26&event=1", "Teams", "Northbridge FC"],
+    [
+      "/seasons",
+      "Seasons",
+      "2025-26",
+      "/api/docs#/Reference%20Data/list_seasons",
+    ],
+    [
+      "/events?season=2025-26&event=1",
+      "Events",
+      "Gameweek 1",
+      "/api/docs#/Reference%20Data/list_events",
+    ],
+    [
+      "/phases?season=2025-26&event=1",
+      "Phases",
+      "Overall",
+      "/api/docs#/Reference%20Data/list_phases",
+    ],
+    [
+      "/teams?season=2025-26&event=1",
+      "Teams",
+      "Northbridge FC",
+      "/api/docs#/Reference%20Data/list_teams",
+    ],
     [
       "/element-types?season=2025-26&event=1",
       "Element types",
       "Midfielder",
+      "/api/docs#/Reference%20Data/list_element_types",
     ],
-    ["/players?season=2025-26&event=1", "Players", "Ada Striker"],
-    ["/fixtures?season=2025-26&event=1", "Fixtures", "Northbridge FC"],
+    [
+      "/players?season=2025-26&event=1",
+      "Players",
+      "Ada Striker",
+      "/api/docs#/Reference%20Data/list_elements",
+    ],
+    [
+      "/fixtures?season=2025-26&event=1",
+      "Fixtures",
+      "Northbridge FC",
+      "/api/docs#/Reference%20Data/list_fixtures",
+    ],
     [
       "/event-status?season=2025-26&event=1",
       "Event status",
       "Bonus added",
+      "/api/docs#/Live%20Data/get_event_status",
     ],
     [
       "/live-players?season=2025-26&event=1",
       "Live players",
       "Ada Striker",
+      "/api/docs#/Live%20Data/list_live_elements",
     ],
-    ["/activity?season=2025-26&event=1", "Activity", "elements"],
-  ])("renders the curated %s route", async (path, heading, tableText) => {
+    [
+      "/activity?season=2025-26&event=1",
+      "Activity",
+      "elements",
+      "/api/docs#/Change%20Events/list_recent_change_events",
+    ],
+  ])("renders and documents the curated %s route", async (
+    path,
+    heading,
+    tableText,
+    swaggerHref,
+  ) => {
     renderApplication(path);
     expect(
       await screen.findByRole("heading", { name: heading }),
     ).toBeInTheDocument();
     const table = await screen.findByRole("table");
     expect(await within(table).findByText(tableText)).toBeInTheDocument();
+    if (heading === "Activity") {
+      await userEvent.click(screen.getByText("API endpoints"));
+      expect(screen.getByRole("link", { name: /Recent changes/ })).toHaveAttribute(
+        "href",
+        swaggerHref,
+      );
+    } else {
+      expect(
+        screen.getByRole("link", { name: /Explore endpoint/ }),
+      ).toHaveAttribute("href", swaggerHref);
+    }
   });
 
   it("supports player filters, search, detail loading, and raw JSON", async () => {
@@ -127,6 +185,10 @@ describe("relay explorer application", () => {
     expect(
       await screen.findByRole("heading", { name: "Beth Keeper" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /API endpoint/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Reference%20Data/get_element",
+    );
     await userEvent.click(screen.getByRole("tab", { name: "Raw JSON" }));
     expect(
       within(screen.getByRole("dialog")).getByTestId("json-view"),
@@ -140,6 +202,9 @@ describe("relay explorer application", () => {
     const api = makeFakeRelayApi({ listEventFixtures });
     renderApplication("/fixtures?season=2025-26&event=1", api);
     expect(await screen.findByText("Northbridge FC")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Explore endpoint/ }),
+    ).toHaveAttribute("href", "/api/docs#/Reference%20Data/list_fixtures");
     await userEvent.selectOptions(
       screen.getByRole("combobox", { name: /Scope/ }),
       "event",
@@ -151,6 +216,12 @@ describe("relay explorer application", () => {
       "2025-26",
       1,
       expect.any(AbortSignal),
+    );
+    expect(
+      screen.getByRole("link", { name: /Explore endpoint/ }),
+    ).toHaveAttribute(
+      "href",
+      "/api/docs#/Reference%20Data/list_event_fixtures",
     );
   });
 
@@ -413,6 +484,23 @@ describe("relay explorer application", () => {
     expect(
       await within(await screen.findByRole("table")).findByText("elements"),
     ).toBeInTheDocument();
+    await userEvent.click(screen.getByText("API endpoints"));
+    expect(screen.getByRole("link", { name: /Recent changes/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/list_recent_change_events",
+    );
+    expect(screen.getByRole("link", { name: /Catch-up polling/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/list_change_events",
+    );
+    expect(screen.getByRole("link", { name: /Older history/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/list_change_event_history",
+    );
+    expect(screen.getByRole("link", { name: /Ingestion status/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/get_ingestion_status",
+    );
     await userEvent.click(screen.getByRole("button", { name: "Load older" }));
     expect(
       await within(screen.getByRole("table")).findAllByText("fixtures"),
@@ -443,6 +531,10 @@ describe("relay explorer application", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Inspect" }));
     const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("link", { name: /API endpoint/ })).toHaveAttribute(
+      "href",
+      "/api/docs#/Change%20Events/list_entity_changes",
+    );
     expect(within(dialog).getByText("Player price")).toBeInTheDocument();
     expect(within(dialog).getByText("£7.5m")).toBeInTheDocument();
     expect(within(dialog).getByText("£7.6m")).toBeInTheDocument();
