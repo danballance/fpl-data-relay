@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   changeEvent,
   element,
+  entityChange,
   elementType,
   event,
   fixture,
   health,
+  ingestionStatus,
   liveElement,
   season,
   status,
@@ -53,7 +55,19 @@ describe("relay API adapter", () => {
       if (url.endsWith("/events/current")) return jsonResponse(event);
       if (url.endsWith("/events")) return jsonResponse([event]);
       if (url.endsWith("/phases")) return jsonResponse([]);
-      if (url.startsWith("http://relay/v1/change-events")) {
+      if (url.startsWith("http://relay/v1/change-events/recent")) {
+        return jsonResponse({ items: [changeEvent], next_before_id: null });
+      }
+      if (url.startsWith("http://relay/v1/change-events/history")) {
+        return jsonResponse({ items: [changeEvent], next_before_id: null });
+      }
+      if (url.includes("/v1/change-events/1/entity-changes")) {
+        return jsonResponse({ items: [entityChange], next_after_id: null });
+      }
+      if (url.endsWith("/v1/ingestion-status")) {
+        return jsonResponse(ingestionStatus);
+      }
+      if (url.startsWith("http://relay/v1/change-events?")) {
         return jsonResponse({ items: [changeEvent], next_after_id: null });
       }
       if (url.endsWith("/v1/seasons/2025-26")) return jsonResponse(season);
@@ -99,9 +113,32 @@ describe("relay API adapter", () => {
       items: [changeEvent],
       next_after_id: null,
     });
+    expect(await api.listRecentChangeEvents(100, signal)).toEqual({
+      items: [changeEvent],
+      next_before_id: null,
+    });
+    expect(await api.listChangeEventHistory(1, 100, signal)).toEqual({
+      items: [changeEvent],
+      next_before_id: null,
+    });
+    expect(await api.listEntityChanges(1, 0, 100, signal)).toEqual({
+      items: [entityChange],
+      next_after_id: null,
+    });
+    expect(await api.getIngestionStatus(signal)).toEqual(ingestionStatus);
     expect(requested).toContain(
       "http://relay/v1/change-events?after_id=0&limit=100",
     );
+    expect(requested).toContain(
+      "http://relay/v1/change-events/recent?limit=100",
+    );
+    expect(requested).toContain(
+      "http://relay/v1/change-events/history?before_id=1&limit=100",
+    );
+    expect(requested).toContain(
+      "http://relay/v1/change-events/1/entity-changes?after_id=0&limit=100",
+    );
+    expect(requested).toContain("http://relay/v1/ingestion-status");
   });
 
   it("rejects an empty base URL", () => {

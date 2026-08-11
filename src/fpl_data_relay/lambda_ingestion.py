@@ -33,7 +33,10 @@ from fpl_data_relay.application.bundles import (
     ReferencePayloadBundle,
 )
 from fpl_data_relay.application.errors import DatabaseWakingError
-from fpl_data_relay.application.ingestion.service import IngestionService
+from fpl_data_relay.application.ingestion.service import (
+    IngestionResult,
+    IngestionService,
+)
 from fpl_data_relay.application.jobs import (
     LiveJob,
     MatchWindow,
@@ -106,6 +109,7 @@ RDS_SETTINGS = load_rds_data_settings_from_environment()
 FETCH_QUEUE_URL = os.environ["FETCH_QUEUE_URL"]
 SCHEDULE_GROUP_NAME = os.environ["LIVE_SCHEDULE_GROUP_NAME"]
 SCHEDULE_TARGET_ROLE_ARN = os.environ["SCHEDULE_TARGET_ROLE_ARN"]
+SCHEDULE_DEAD_LETTER_QUEUE_ARN = os.environ["SCHEDULE_DEAD_LETTER_QUEUE_ARN"]
 FETCH_QUEUE_ARN = os.environ["FETCH_QUEUE_ARN"]
 PAYLOAD_BUCKET = os.environ["PAYLOAD_BUCKET"]
 PAYLOAD_PREFIX = os.environ["PAYLOAD_PREFIX"].strip("/")
@@ -165,7 +169,7 @@ async def process_collected_payload(
             model=Fixture,
             payload=bundle.fixtures,
         )
-        await ingestion.ingest_reference_payload(
+        result = await ingestion.ingest_reference_payload(
             bootstrap=bootstrap,
             fixtures=fixtures,
             fetched_at=bundle.fetched_at,
@@ -184,7 +188,23 @@ async def process_collected_payload(
                 "fixture_missing_schedule_data",
                 extra={"fixture_id": fixture_id, "season_id": season.id},
             )
-        await reconcile_schedules(windows=windows)
+        schedule_result = await reconcile_schedules(windows=windows)
+        LOGGER.info(
+            "ingestion_completed",
+            extra={
+                "job_kind": bundle.job.kind,
+                "source": bundle.job.kind,
+                "sources": ["bootstrap-static", "fixtures"],
+                "season_id": result.season_id,
+                "event_id": result.current_event_id,
+                "changed_count": result.changed_count,
+                "unchanged_count": result.unchanged_count,
+                "changed_entity_counts": changed_entity_counts(result=result),
+                "schedules_created": schedule_result.created_count,
+                "schedules_updated": schedule_result.updated_count,
+                "schedules_deleted": schedule_result.deleted_count,
+            },
+        )
         return {"status": "reference_ingested", "job_kind": bundle.job.kind}
     event_status = validate_fpl_model(
         model=EventStatusResponse,
@@ -225,7 +245,41 @@ async def process_collected_payload(
     )
     if delay is not None:
         await requeue_live_job(job=bundle.job, delay_seconds=delay)
+    LOGGER.info(
+        "ingestion_completed",
+        extra={
+            "job_kind": bundle.job.kind,
+            "source": bundle.job.kind,
+            "sources": [
+                "event-status",
+                "fixtures-current-event",
+                "event-live",
+            ],
+            "season_id": result.season_id,
+            "event_id": result.current_event_id,
+            "changed_count": result.changed_count,
+            "unchanged_count": result.unchanged_count,
+            "changed_entity_counts": changed_entity_counts(result=result),
+            "has_active_fixture": result.has_active_fixture,
+            "next_delay_seconds": delay,
+            "schedules_created": 0,
+            "schedules_updated": 0,
+            "schedules_deleted": 0,
+        },
+    )
     return {"status": "live_ingested", "job_kind": bundle.job.kind}
+
+
+def changed_entity_counts(*, result: IngestionResult) -> dict[str, dict[str, int]]:
+    """Return JSON-log-safe operation totals keyed by entity family."""
+    return {
+        family.value: {
+            "created": counts.created,
+            "updated": counts.updated,
+            "deleted": counts.deleted,
+        }
+        for family, counts in result.entity_change_counts.items()
+    }
 
 
 class UnavailableFplGateway:
@@ -311,11 +365,25 @@ async def requeue_live_job(*, job: LiveJob, delay_seconds: int) -> None:
     )
 
 
-async def reconcile_schedules(*, windows: list[MatchWindow]) -> None:
+class ScheduleReconciliationResult(BaseModel):
+    """Counts from one desired-versus-existing schedule reconciliation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    created_count: int
+    updated_count: int
+    deleted_count: int
+
+
+async def reconcile_schedules(
+    *,
+    windows: list[MatchWindow],
+) -> ScheduleReconciliationResult:
     """Create desired one-time schedules and prune obsolete relay schedules."""
     existing = await list_live_schedule_names()
     desired = {window.schedule_name: window for window in windows}
-    for obsolete_name in sorted(existing - desired.keys()):
+    obsolete = existing - desired.keys()
+    for obsolete_name in sorted(obsolete):
         SCHEDULER.delete_schedule(
             GroupName=SCHEDULE_GROUP_NAME,
             Name=obsolete_name,
@@ -326,6 +394,11 @@ async def reconcile_schedules(*, windows: list[MatchWindow]) -> None:
             SCHEDULER.update_schedule if name in existing else SCHEDULER.create_schedule
         )
         operation(**parameters)
+    return ScheduleReconciliationResult(
+        created_count=len(desired.keys() - existing),
+        updated_count=len(desired.keys() & existing),
+        deleted_count=len(obsolete),
+    )
 
 
 async def list_live_schedule_names() -> set[str]:
@@ -371,5 +444,10 @@ def schedule_parameters(*, window: MatchWindow) -> dict[str, object]:
             "Arn": FETCH_QUEUE_ARN,
             "RoleArn": SCHEDULE_TARGET_ROLE_ARN,
             "Input": window.job().model_dump_json(),
+            "DeadLetterConfig": {"Arn": SCHEDULE_DEAD_LETTER_QUEUE_ARN},
+            "RetryPolicy": {
+                "MaximumEventAgeInSeconds": 900,
+                "MaximumRetryAttempts": 3,
+            },
         },
     }

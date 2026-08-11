@@ -1,10 +1,13 @@
 """PostgreSQL persistence engine for normalised FPL relay data."""
 
 import contextlib
+import json
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime
 from typing import Protocol, cast
+
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from fpl_data_relay.adapters.outbound.postgres.migrations import (
     MIGRATION_TABLE_LOOKUP_SQL,
@@ -19,10 +22,18 @@ from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.domain.changes import (
     EVENT_NAMES,
     ChangeEvent,
+    ChangeKind,
+    EntityChange,
+    EntityChangeDraft,
     EntityFamily,
+    EntityFamilyDiff,
+    EntitySnapshot,
+    FieldChange,
     IngestionMetadata,
     IngestionSourceKey,
+    IngestionSourceStatus,
     UpsertOutcome,
+    diff_entity_snapshots,
 )
 from fpl_data_relay.domain.fixtures import (
     Fixture,
@@ -51,6 +62,8 @@ from fpl_data_relay.domain.rules import payload_sha256
 from fpl_data_relay.domain.types import JsonValue
 
 type StatScalar = int | float | str | bool | None
+
+FIELD_CHANGES_ADAPTER = TypeAdapter(list[FieldChange])
 
 
 class IngestionLockError(RuntimeError):
@@ -117,6 +130,74 @@ class PoolProtocol(Protocol):
         ...
 
 
+class NoOpTransaction(AbstractAsyncContextManager[object]):
+    """Transaction façade used only inside an already-open outer transaction."""
+
+    async def __aenter__(self) -> object:
+        return self
+
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object,
+    ) -> None:
+        del exception_type, exception, traceback
+
+
+class BoundConnection:
+    """Delegate SQL to one connection while suppressing nested transactions."""
+
+    def __init__(self, *, connection: ConnectionProtocol) -> None:
+        self._connection = connection
+
+    def transaction(self) -> AbstractAsyncContextManager[object]:
+        return NoOpTransaction()
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        return await self._connection.execute(query, *arguments)
+
+    async def fetchrow(self, query: str, *arguments: object) -> object:
+        return await self._connection.fetchrow(query, *arguments)
+
+    async def fetch(self, query: str, *arguments: object) -> list[object]:
+        return await self._connection.fetch(query, *arguments)
+
+    async def fetchval(self, query: str, *arguments: object) -> object:
+        return await self._connection.fetchval(query, *arguments)
+
+
+class BoundAcquire(AbstractAsyncContextManager[ConnectionProtocol]):
+    """Yield a connection already owned by the outer persistence operation."""
+
+    def __init__(self, *, connection: ConnectionProtocol) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> ConnectionProtocol:
+        return BoundConnection(connection=self._connection)
+
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: object,
+    ) -> None:
+        del exception_type, exception, traceback
+
+
+class BoundPool:
+    """Pool façade that keeps several source writes in one transaction."""
+
+    def __init__(self, *, connection: ConnectionProtocol) -> None:
+        self._connection = connection
+
+    def acquire(self) -> ConnectionManagerProtocol:
+        return BoundAcquire(connection=self._connection)
+
+    async def close(self) -> None:
+        raise RuntimeError("A transaction-bound pool cannot be closed.")
+
+
 class _PostgresOperations(Protocol):
     """Persistence interface used by API and ingestion layers."""
 
@@ -134,6 +215,7 @@ class _PostgresOperations(Protocol):
         season: Season,
         bootstrap: BootstrapStatic,
         metadata: IngestionMetadata,
+        delete_missing: bool,
     ) -> UpsertOutcome:
         """Upsert bootstrap/reference entity families."""
         ...
@@ -285,6 +367,64 @@ class PostgresDatabase(_PostgresOperations):
         """Create a store around an asyncpg-compatible pool."""
         self._pool = pool
 
+    async def upsert_reference_snapshot(
+        self,
+        *,
+        season: Season,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        bootstrap_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        """Persist a complete reference bundle in one physical transaction."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            bound = PostgresDatabase(pool=BoundPool(connection=connection))
+            bootstrap_outcome = await bound.upsert_bootstrap(
+                season=season,
+                bootstrap=bootstrap,
+                metadata=bootstrap_metadata,
+                delete_missing=False,
+            )
+            fixtures_outcome = await bound.upsert_fixtures(
+                fixtures=fixtures,
+                metadata=fixtures_metadata,
+            )
+            await delete_bootstrap_rows_missing_from_snapshot(
+                connection=connection,
+                season_id=season.id,
+                bootstrap=bootstrap,
+            )
+        return [bootstrap_outcome, fixtures_outcome]
+
+    async def upsert_live_snapshot(
+        self,
+        *,
+        event_id: int,
+        status: EventStatusResponse,
+        fixtures: list[Fixture],
+        live: EventLiveResponse,
+        status_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+        live_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        """Persist a complete live bundle in one physical transaction."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            bound = PostgresDatabase(pool=BoundPool(connection=connection))
+            status_outcome = await bound.upsert_event_status(
+                status=status,
+                metadata=status_metadata,
+            )
+            fixtures_outcome = await bound.upsert_fixtures(
+                fixtures=fixtures,
+                metadata=fixtures_metadata,
+            )
+            live_outcome = await bound.upsert_event_live(
+                event_id=event_id,
+                live=live,
+                metadata=live_metadata,
+            )
+        return [status_outcome, fixtures_outcome, live_outcome]
+
     async def close(self) -> None:
         """Close the underlying connection pool."""
         await self._pool.close()
@@ -321,21 +461,27 @@ class PostgresDatabase(_PostgresOperations):
         season: Season,
         bootstrap: BootstrapStatic,
         metadata: IngestionMetadata,
+        delete_missing: bool,
     ) -> UpsertOutcome:
         """Upsert bootstrap/reference rows and emit entity-family events."""
-        families = [
-            EntityFamily.EVENTS,
-            EntityFamily.PHASES,
-            EntityFamily.TEAMS,
-            EntityFamily.ELEMENT_TYPES,
-            EntityFamily.ELEMENT_STATS,
-            EntityFamily.ELEMENTS,
-        ]
+        snapshots = bootstrap_snapshots(bootstrap=bootstrap)
         async with self._pool.acquire() as connection, connection.transaction():
-            if await source_is_unchanged(connection=connection, metadata=metadata):
+            comparison = await compare_source(
+                connection=connection,
+                metadata=metadata,
+            )
+            if comparison.unchanged:
                 return UpsertOutcome(changed=False, change_events=[])
             if season.id != metadata.season_id:
                 raise ValueError("Season id does not match ingestion metadata.")
+            diffs = await compare_snapshot_families(
+                connection=connection,
+                season_id=metadata.season_id,
+                source_event_id=metadata.event_id,
+                snapshots=snapshots,
+                authoritative=True,
+                source_exists=comparison.exists,
+            )
             await connection.execute(
                 """
                 UPDATE fpl_seasons
@@ -410,11 +556,23 @@ class PostgresDatabase(_PostgresOperations):
                         values=element.model_dump(),
                     ),
                 )
-            await upsert_source_metadata(connection=connection, metadata=metadata)
-            events = await insert_change_events(
+            if delete_missing:
+                await delete_removed_bootstrap_rows(
+                    connection=connection,
+                    season_id=metadata.season_id,
+                    diffs=diffs,
+                )
+            events = await persist_snapshot_diffs(
                 connection=connection,
-                families=families,
+                snapshots=snapshots,
+                diffs=diffs,
                 metadata=metadata,
+                authoritative=True,
+            )
+            await upsert_source_metadata(
+                connection=connection,
+                metadata=metadata,
+                logically_changed=bool(events),
             )
             return UpsertOutcome(changed=True, change_events=events)
 
@@ -425,9 +583,27 @@ class PostgresDatabase(_PostgresOperations):
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
         """Upsert fixture rows and stat entries."""
+        snapshots = {
+            EntityFamily.FIXTURES: [
+                snapshot_for_fixture(fixture=fixture) for fixture in fixtures
+            ],
+        }
+        authoritative = metadata.source_key is IngestionSourceKey.FIXTURES
         async with self._pool.acquire() as connection, connection.transaction():
-            if await source_is_unchanged(connection=connection, metadata=metadata):
+            comparison = await compare_source(
+                connection=connection,
+                metadata=metadata,
+            )
+            if comparison.unchanged:
                 return UpsertOutcome(changed=False, change_events=[])
+            diffs = await compare_snapshot_families(
+                connection=connection,
+                season_id=metadata.season_id,
+                source_event_id=metadata.event_id,
+                snapshots=snapshots,
+                authoritative=authoritative,
+                source_exists=comparison.exists,
+            )
             for fixture in fixtures:
                 fixture_values = values_for_season(
                     season_id=metadata.season_id,
@@ -452,11 +628,23 @@ class PostgresDatabase(_PostgresOperations):
                     season_id=metadata.season_id,
                     fixture=fixture,
                 )
-            await upsert_source_metadata(connection=connection, metadata=metadata)
-            events = await insert_change_events(
+            if authoritative:
+                await delete_removed_fixture_rows(
+                    connection=connection,
+                    season_id=metadata.season_id,
+                    diff=diffs[EntityFamily.FIXTURES],
+                )
+            events = await persist_snapshot_diffs(
                 connection=connection,
-                families=[EntityFamily.FIXTURES],
+                snapshots=snapshots,
+                diffs=diffs,
                 metadata=metadata,
+                authoritative=authoritative,
+            )
+            await upsert_source_metadata(
+                connection=connection,
+                metadata=metadata,
+                logically_changed=bool(events),
             )
             return UpsertOutcome(changed=True, change_events=events)
 
@@ -467,9 +655,26 @@ class PostgresDatabase(_PostgresOperations):
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
         """Upsert event-status days and response-level fields."""
+        snapshots = {
+            EntityFamily.EVENT_STATUS: [
+                snapshot_for_event_status(status=status, event_id=metadata.event_id),
+            ],
+        }
         async with self._pool.acquire() as connection, connection.transaction():
-            if await source_is_unchanged(connection=connection, metadata=metadata):
+            comparison = await compare_source(
+                connection=connection,
+                metadata=metadata,
+            )
+            if comparison.unchanged:
                 return UpsertOutcome(changed=False, change_events=[])
+            diffs = await compare_snapshot_families(
+                connection=connection,
+                season_id=metadata.season_id,
+                source_event_id=metadata.event_id,
+                snapshots=snapshots,
+                authoritative=True,
+                source_exists=comparison.exists,
+            )
             await connection.execute(
                 """
                 INSERT INTO fpl_event_status (
@@ -490,6 +695,10 @@ class PostgresDatabase(_PostgresOperations):
                 metadata.fetched_at,
                 metadata.checked_at,
             )
+            await connection.execute(
+                "DELETE FROM fpl_event_status_days WHERE season_id = $1",
+                metadata.season_id,
+            )
             for day in status.status:
                 await upsert_model_row(
                     connection=connection,
@@ -500,11 +709,17 @@ class PostgresDatabase(_PostgresOperations):
                         values=day.model_dump(),
                     ),
                 )
-            await upsert_source_metadata(connection=connection, metadata=metadata)
-            events = await insert_change_events(
+            events = await persist_snapshot_diffs(
                 connection=connection,
-                families=[EntityFamily.EVENT_STATUS],
+                snapshots=snapshots,
+                diffs=diffs,
                 metadata=metadata,
+                authoritative=True,
+            )
+            await upsert_source_metadata(
+                connection=connection,
+                metadata=metadata,
+                logically_changed=bool(events),
             )
             return UpsertOutcome(changed=True, change_events=events)
 
@@ -516,9 +731,30 @@ class PostgresDatabase(_PostgresOperations):
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
         """Upsert live element rows for one event."""
+        snapshots = {
+            EntityFamily.EVENT_LIVE: [
+                snapshot_for_live_element(
+                    live_element=live_element,
+                    event_id=event_id,
+                )
+                for live_element in live.elements
+            ],
+        }
         async with self._pool.acquire() as connection, connection.transaction():
-            if await source_is_unchanged(connection=connection, metadata=metadata):
+            comparison = await compare_source(
+                connection=connection,
+                metadata=metadata,
+            )
+            if comparison.unchanged:
                 return UpsertOutcome(changed=False, change_events=[])
+            diffs = await compare_snapshot_families(
+                connection=connection,
+                season_id=metadata.season_id,
+                source_event_id=event_id,
+                snapshots=snapshots,
+                authoritative=True,
+                source_exists=comparison.exists,
+            )
             await connection.execute(
                 """
                 DELETE FROM fpl_event_live_elements
@@ -544,11 +780,17 @@ class PostgresDatabase(_PostgresOperations):
                     event_id=event_id,
                     live_element=live_element,
                 )
-            await upsert_source_metadata(connection=connection, metadata=metadata)
-            events = await insert_change_events(
+            events = await persist_snapshot_diffs(
                 connection=connection,
-                families=[EntityFamily.EVENT_LIVE],
+                snapshots=snapshots,
+                diffs=diffs,
                 metadata=metadata,
+                authoritative=True,
+            )
+            await upsert_source_metadata(
+                connection=connection,
+                metadata=metadata,
+                logically_changed=bool(events),
             )
             return UpsertOutcome(changed=True, change_events=events)
 
@@ -809,7 +1051,8 @@ class PostgresDatabase(_PostgresOperations):
             rows = await connection.fetch(
                 """
                 SELECT id, season_id, entity_family, event_name, source_key,
-                       resource_key, event_id, payload_hash, fetched_at, created_at
+                       source_event_id, payload_hash, created_count, updated_count,
+                       deleted_count, fetched_at, created_at
                 FROM relay_change_events
                 WHERE id > $1
                 ORDER BY id ASC
@@ -819,6 +1062,83 @@ class PostgresDatabase(_PostgresOperations):
                 limit,
             )
         return [change_event_from_row(row=row) for row in rows]
+
+    async def list_recent_change_events(self, *, limit: int) -> list[ChangeEvent]:
+        """Return the newest bounded change-event page."""
+        return await self._fetch_change_events(
+            query="""
+                SELECT id, season_id, entity_family, event_name, source_key,
+                       source_event_id, payload_hash, created_count, updated_count,
+                       deleted_count, fetched_at, created_at
+                FROM relay_change_events
+                ORDER BY id DESC
+                LIMIT $1
+            """,
+            arguments=(limit,),
+        )
+
+    async def list_change_events_before(
+        self,
+        *,
+        before_id: int,
+        limit: int,
+    ) -> list[ChangeEvent]:
+        """Return a newest-first historical page before an event id."""
+        return await self._fetch_change_events(
+            query="""
+                SELECT id, season_id, entity_family, event_name, source_key,
+                       source_event_id, payload_hash, created_count, updated_count,
+                       deleted_count, fetched_at, created_at
+                FROM relay_change_events
+                WHERE id < $1
+                ORDER BY id DESC
+                LIMIT $2
+            """,
+            arguments=(before_id, limit),
+        )
+
+    async def list_entity_changes(
+        self,
+        *,
+        change_event_id: int,
+        after_id: int,
+        limit: int,
+    ) -> list[EntityChange]:
+        """Return field-level entity changes under one family event."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT id, change_event_id, entity_key, entity_label, change_kind,
+                       field_changes, created_at
+                FROM relay_entity_changes
+                WHERE change_event_id = $1 AND id > $2
+                ORDER BY id
+                LIMIT $3
+                """,
+                change_event_id,
+                after_id,
+                limit,
+            )
+        return [entity_change_from_row(row=row) for row in rows]
+
+    async def list_ingestion_source_statuses(
+        self,
+        *,
+        season_id: str,
+    ) -> list[IngestionSourceStatus]:
+        """Return latest source checks for one season."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT season_id, source_key, event_id, payload_hash, fetched_at,
+                       checked_at, last_changed_at
+                FROM relay_ingestion_sources
+                WHERE season_id = $1
+                ORDER BY source_key, event_id NULLS FIRST
+                """,
+                season_id,
+            )
+        return [ingestion_source_status_from_row(row=row) for row in rows]
 
     @contextlib.asynccontextmanager
     async def ingestion_lock(self) -> AsyncIterator[None]:
@@ -846,13 +1166,32 @@ class PostgresDatabase(_PostgresOperations):
             rows = await connection.fetch(query, *arguments)
         return [converter(row=row) for row in rows]
 
+    async def _fetch_change_events(
+        self,
+        *,
+        query: str,
+        arguments: tuple[object, ...],
+    ) -> list[ChangeEvent]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, *arguments)
+        return [change_event_from_row(row=row) for row in rows]
 
-async def source_is_unchanged(
+
+class SourceComparison(BaseModel):
+    """Existing-source and hash comparison result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    exists: bool
+    unchanged: bool
+
+
+async def compare_source(
     *,
     connection: ConnectionProtocol,
     metadata: IngestionMetadata,
-) -> bool:
-    """Return whether source hash is unchanged, updating checked_at when it is."""
+) -> SourceComparison:
+    """Compare source hashes and refresh checked time for unchanged payloads."""
     existing_hash = await connection.fetchval(
         """
         SELECT payload_hash
@@ -865,8 +1204,9 @@ async def source_is_unchanged(
         metadata.source_key.value,
         metadata.event_id,
     )
+    exists = existing_hash is not None
     if existing_hash != metadata.payload_hash:
-        return False
+        return SourceComparison(exists=exists, unchanged=False)
     await connection.execute(
         """
         UPDATE relay_ingestion_sources
@@ -880,27 +1220,33 @@ async def source_is_unchanged(
         metadata.event_id,
         metadata.checked_at,
     )
-    return True
+    return SourceComparison(exists=True, unchanged=True)
 
 
 async def upsert_source_metadata(
     *,
     connection: ConnectionProtocol,
     metadata: IngestionMetadata,
+    logically_changed: bool,
 ) -> None:
     """Upsert latest metadata for an upstream source."""
     await connection.execute(
         """
         INSERT INTO relay_ingestion_sources (
-            season_id, source_key, event_id, payload_hash, fetched_at, checked_at
+            season_id, source_key, event_id, payload_hash, fetched_at, checked_at,
+            last_changed_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (season_id, source_key, (COALESCE(event_id, 0)))
         DO UPDATE SET
             event_id = EXCLUDED.event_id,
             payload_hash = EXCLUDED.payload_hash,
             fetched_at = EXCLUDED.fetched_at,
             checked_at = EXCLUDED.checked_at,
+            last_changed_at = COALESCE(
+                EXCLUDED.last_changed_at,
+                relay_ingestion_sources.last_changed_at
+            ),
             updated_at = now()
         """,
         metadata.season_id,
@@ -909,41 +1255,519 @@ async def upsert_source_metadata(
         metadata.payload_hash,
         metadata.fetched_at,
         metadata.checked_at,
+        metadata.checked_at if logically_changed else None,
     )
 
 
-async def insert_change_events(
+async def compare_snapshot_families(
     *,
     connection: ConnectionProtocol,
-    families: list[EntityFamily],
-    metadata: IngestionMetadata,
-) -> list[ChangeEvent]:
-    """Insert change events for entity families."""
-    events: list[ChangeEvent] = []
-    for family in families:
-        row = await connection.fetchrow(
-            """
-            INSERT INTO relay_change_events (
-                season_id, entity_family, event_name, source_key, event_id,
-                payload_hash, fetched_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, season_id, entity_family, event_name, source_key, event_id,
-                      payload_hash, fetched_at, created_at
-            """,
-            metadata.season_id,
-            family.value,
-            EVENT_NAMES[family],
-            metadata.source_key.value,
-            metadata.event_id,
-            metadata.payload_hash,
-            metadata.fetched_at,
+    season_id: str,
+    source_event_id: int | None,
+    snapshots: dict[EntityFamily, list[EntitySnapshot]],
+    authoritative: bool,
+    source_exists: bool,
+) -> dict[EntityFamily, EntityFamilyDiff]:
+    """Load current snapshots and calculate one pure diff per family."""
+    diffs: dict[EntityFamily, EntityFamilyDiff] = {}
+    for family, current in snapshots.items():
+        previous = await list_entity_snapshots(
+            connection=connection,
+            season_id=season_id,
+            family=family,
+            source_event_id=(
+                source_event_id if family is EntityFamily.EVENT_LIVE else None
+            ),
         )
-        if row is None:
-            raise RuntimeError("Failed to insert relay change event.")
-        event = change_event_from_row(row=row)
-        events.append(event)
+        diffs[family] = diff_entity_snapshots(
+            previous=previous,
+            current=current,
+            authoritative=authoritative,
+            baseline=not source_exists and not previous,
+        )
+    return diffs
+
+
+async def persist_snapshot_diffs(
+    *,
+    connection: ConnectionProtocol,
+    snapshots: dict[EntityFamily, list[EntitySnapshot]],
+    diffs: dict[EntityFamily, EntityFamilyDiff],
+    metadata: IngestionMetadata,
+    authoritative: bool,
+) -> list[ChangeEvent]:
+    """Synchronize canonical snapshots and persist accurate family events."""
+    events: list[ChangeEvent] = []
+    for family, current in snapshots.items():
+        diff = diffs[family]
+        event = await insert_change_event(
+            connection=connection,
+            family=family,
+            diff=diff,
+            metadata=metadata,
+        )
+        if event is not None:
+            await insert_entity_changes(
+                connection=connection,
+                change_event_id=event.id,
+                changes=diff.changes,
+            )
+            events.append(event)
+        for snapshot in current:
+            await upsert_entity_snapshot(
+                connection=connection,
+                season_id=metadata.season_id,
+                family=family,
+                source_event_id=metadata.event_id,
+                snapshot=snapshot,
+            )
+        if authoritative:
+            for change in diff.changes:
+                if change.kind is ChangeKind.DELETED:
+                    await connection.execute(
+                        """
+                        DELETE FROM relay_entity_snapshots
+                        WHERE season_id = $1 AND entity_family = $2
+                          AND entity_key = $3
+                        """,
+                        metadata.season_id,
+                        family.value,
+                        change.entity_key,
+                    )
     return events
+
+
+async def insert_change_event(
+    *,
+    connection: ConnectionProtocol,
+    family: EntityFamily,
+    diff: EntityFamilyDiff,
+    metadata: IngestionMetadata,
+) -> ChangeEvent | None:
+    """Insert one non-empty family summary."""
+    if not diff.changes:
+        return None
+    row = await connection.fetchrow(
+        """
+        INSERT INTO relay_change_events (
+            season_id, entity_family, event_name, source_key, source_event_id,
+            payload_hash, created_count, updated_count, deleted_count, fetched_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id, season_id, entity_family, event_name, source_key,
+                  source_event_id, payload_hash, created_count, updated_count,
+                  deleted_count, fetched_at, created_at
+        """,
+        metadata.season_id,
+        family.value,
+        EVENT_NAMES[family],
+        metadata.source_key.value,
+        metadata.event_id,
+        metadata.payload_hash,
+        diff.created_count,
+        diff.updated_count,
+        diff.deleted_count,
+        metadata.fetched_at,
+    )
+    if row is None:
+        raise RuntimeError("Failed to insert relay change event.")
+    return change_event_from_row(row=row)
+
+
+async def insert_entity_changes(
+    *,
+    connection: ConnectionProtocol,
+    change_event_id: int,
+    changes: list[EntityChangeDraft],
+) -> None:
+    """Persist bounded JSON field changes under one family event."""
+    for change in changes:
+        encoded_fields = json.dumps(
+            [field.model_dump(mode="json") for field in change.fields],
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        await connection.execute(
+            """
+            INSERT INTO relay_entity_changes (
+                change_event_id, entity_key, entity_label, change_kind,
+                field_changes
+            )
+            VALUES ($1, $2, $3, $4, CAST($5 AS jsonb))
+            """,
+            change_event_id,
+            change.entity_key,
+            change.entity_label,
+            change.kind.value,
+            encoded_fields,
+        )
+
+
+async def list_entity_snapshots(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    family: EntityFamily,
+    source_event_id: int | None,
+) -> list[EntitySnapshot]:
+    """Read canonical snapshots for one family or event-live scope."""
+    if source_event_id is None:
+        rows = await connection.fetch(
+            """
+            SELECT entity_key, entity_label, snapshot
+            FROM relay_entity_snapshots
+            WHERE season_id = $1 AND entity_family = $2
+            ORDER BY entity_key
+            """,
+            season_id,
+            family.value,
+        )
+    else:
+        rows = await connection.fetch(
+            """
+            SELECT entity_key, entity_label, snapshot
+            FROM relay_entity_snapshots
+            WHERE season_id = $1 AND entity_family = $2
+              AND source_event_id = $3
+            ORDER BY entity_key
+            """,
+            season_id,
+            family.value,
+            source_event_id,
+        )
+    return [entity_snapshot_from_row(row=row) for row in rows]
+
+
+async def upsert_entity_snapshot(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    family: EntityFamily,
+    source_event_id: int | None,
+    snapshot: EntitySnapshot,
+) -> None:
+    """Store one canonical snapshot using JSON accepted by both executors."""
+    encoded = json.dumps(snapshot.data, separators=(",", ":"), sort_keys=True)
+    row_hash = payload_sha256(payload=snapshot.data)
+    await connection.execute(
+        """
+        INSERT INTO relay_entity_snapshots (
+            season_id, entity_family, source_event_id, entity_key, entity_label,
+            snapshot, row_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, CAST($6 AS jsonb), $7)
+        ON CONFLICT (season_id, entity_family, entity_key)
+        DO UPDATE SET
+            source_event_id = EXCLUDED.source_event_id,
+            entity_label = EXCLUDED.entity_label,
+            snapshot = EXCLUDED.snapshot,
+            row_hash = EXCLUDED.row_hash,
+            updated_at = now()
+        WHERE relay_entity_snapshots.row_hash IS DISTINCT FROM EXCLUDED.row_hash
+           OR relay_entity_snapshots.entity_label IS DISTINCT FROM EXCLUDED.entity_label
+           OR relay_entity_snapshots.source_event_id IS DISTINCT FROM
+              EXCLUDED.source_event_id
+        """,
+        season_id,
+        family.value,
+        source_event_id,
+        snapshot.entity_key,
+        snapshot.entity_label,
+        encoded,
+        row_hash,
+    )
+
+
+async def delete_removed_bootstrap_rows(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    diffs: dict[EntityFamily, EntityFamilyDiff],
+) -> None:
+    """Remove authoritative bootstrap entities in dependency-safe order."""
+    removed_element_ids = {
+        int(change.entity_key)
+        for change in diffs[EntityFamily.ELEMENTS].changes
+        if change.kind is ChangeKind.DELETED
+    }
+    removed_event_ids = {
+        int(change.entity_key)
+        for change in diffs[EntityFamily.EVENTS].changes
+        if change.kind is ChangeKind.DELETED
+    }
+    await delete_bootstrap_dependents(
+        connection=connection,
+        season_id=season_id,
+        removed_element_ids=removed_element_ids,
+        removed_event_ids=removed_event_ids,
+    )
+    tables = (
+        (EntityFamily.ELEMENTS, "fpl_elements", "id"),
+        (EntityFamily.PHASES, "fpl_phases", "id"),
+        (EntityFamily.ELEMENT_STATS, "fpl_element_stat_definitions", "name"),
+        (EntityFamily.ELEMENT_TYPES, "fpl_element_types", "id"),
+        (EntityFamily.TEAMS, "fpl_teams", "id"),
+        (EntityFamily.EVENTS, "fpl_events", "id"),
+    )
+    for family, table, key_column in tables:
+        for change in diffs[family].changes:
+            if change.kind is not ChangeKind.DELETED:
+                continue
+            key: object = (
+                change.entity_key
+                if family is EntityFamily.ELEMENT_STATS
+                else int(change.entity_key)
+            )
+            await connection.execute(
+                f"DELETE FROM {table} WHERE season_id = $1 AND {key_column} = $2",
+                season_id,
+                key,
+            )
+
+
+async def delete_bootstrap_rows_missing_from_snapshot(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    bootstrap: BootstrapStatic,
+) -> None:
+    """Delete missing reference rows after fixtures have been reconciled."""
+    specifications: tuple[tuple[str, str, set[object]], ...] = (
+        ("fpl_elements", "id", {element.id for element in bootstrap.elements}),
+        ("fpl_phases", "id", {phase.id for phase in bootstrap.phases}),
+        (
+            "fpl_element_stat_definitions",
+            "name",
+            {stat.name for stat in bootstrap.element_stats},
+        ),
+        (
+            "fpl_element_types",
+            "id",
+            {element_type.id for element_type in bootstrap.element_types},
+        ),
+        ("fpl_teams", "id", {team.id for team in bootstrap.teams}),
+        ("fpl_events", "id", {event.id for event in bootstrap.events}),
+    )
+    existing_by_table: dict[str, set[object]] = {}
+    for table, key_column, _desired_keys in specifications:
+        rows = await connection.fetch(
+            f"SELECT {key_column} FROM {table} WHERE season_id = $1",
+            season_id,
+        )
+        existing_by_table[table] = {
+            row_values(row=row)[key_column] for row in rows
+        }
+    await delete_bootstrap_dependents(
+        connection=connection,
+        season_id=season_id,
+        removed_element_ids={
+            cast("int", value)
+            for value in existing_by_table["fpl_elements"]
+            - {element.id for element in bootstrap.elements}
+        },
+        removed_event_ids={
+            cast("int", value)
+            for value in existing_by_table["fpl_events"]
+            - {event.id for event in bootstrap.events}
+        },
+    )
+    for table, key_column, desired_keys in specifications:
+        existing_keys = existing_by_table[table]
+        for removed_key in sorted(existing_keys - desired_keys, key=str):
+            await connection.execute(
+                f"DELETE FROM {table} WHERE season_id = $1 AND {key_column} = $2",
+                season_id,
+                removed_key,
+            )
+
+
+async def delete_bootstrap_dependents(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    removed_element_ids: set[int],
+    removed_event_ids: set[int],
+) -> None:
+    """Remove rows that reference authoritative bootstrap deletions."""
+    for element_id in sorted(removed_element_ids):
+        await connection.execute(
+            """
+            DELETE FROM fpl_fixture_stat_entries
+            WHERE season_id = $1 AND element = $2
+            """,
+            season_id,
+            element_id,
+        )
+        await connection.execute(
+            """
+            DELETE FROM fpl_event_live_elements
+            WHERE season_id = $1 AND element_id = $2
+            """,
+            season_id,
+            element_id,
+        )
+    for event_id in sorted(removed_event_ids):
+        await connection.execute(
+            """
+            DELETE FROM fpl_event_status_days
+            WHERE season_id = $1 AND event = $2
+            """,
+            season_id,
+            event_id,
+        )
+        await connection.execute(
+            """
+            DELETE FROM fpl_event_live_elements
+            WHERE season_id = $1 AND event_id = $2
+            """,
+            season_id,
+            event_id,
+        )
+
+
+async def delete_removed_fixture_rows(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    diff: EntityFamilyDiff,
+) -> None:
+    """Remove fixtures absent from the authoritative full fixture snapshot."""
+    for change in diff.changes:
+        if change.kind is ChangeKind.DELETED:
+            await connection.execute(
+                """
+                DELETE FROM fpl_event_live_explain_stats
+                WHERE season_id = $1 AND fixture_id = $2
+                """,
+                season_id,
+                int(change.entity_key),
+            )
+            await connection.execute(
+                "DELETE FROM fpl_fixtures WHERE season_id = $1 AND id = $2",
+                season_id,
+                int(change.entity_key),
+            )
+
+
+def bootstrap_snapshots(
+    *,
+    bootstrap: BootstrapStatic,
+) -> dict[EntityFamily, list[EntitySnapshot]]:
+    """Split the bootstrap aggregate into labelled canonical entities."""
+    return {
+        EntityFamily.EVENTS: [
+            snapshot_for_model(
+                entity_key=str(event.id),
+                entity_label=event.name,
+                model=event,
+            )
+            for event in bootstrap.events
+        ],
+        EntityFamily.PHASES: [
+            snapshot_for_model(
+                entity_key=str(phase.id),
+                entity_label=phase.name,
+                model=phase,
+            )
+            for phase in bootstrap.phases
+        ],
+        EntityFamily.TEAMS: [
+            snapshot_for_model(
+                entity_key=str(team.id),
+                entity_label=team.name,
+                model=team,
+            )
+            for team in bootstrap.teams
+        ],
+        EntityFamily.ELEMENT_TYPES: [
+            snapshot_for_model(
+                entity_key=str(element_type.id),
+                entity_label=element_type.singular_name,
+                model=element_type,
+            )
+            for element_type in bootstrap.element_types
+        ],
+        EntityFamily.ELEMENT_STATS: [
+            snapshot_for_model(
+                entity_key=stat.name,
+                entity_label=stat.label,
+                model=stat,
+            )
+            for stat in bootstrap.element_stats
+        ],
+        EntityFamily.ELEMENTS: [
+            snapshot_for_model(
+                entity_key=str(element.id),
+                entity_label=f"{element.web_name} ({element.id})",
+                model=element,
+            )
+            for element in bootstrap.elements
+        ],
+    }
+
+
+def snapshot_for_fixture(*, fixture: Fixture) -> EntitySnapshot:
+    """Build a labelled fixture snapshot including nested statistics."""
+    return snapshot_for_model(
+        entity_key=str(fixture.id),
+        entity_label=(
+            f"Fixture {fixture.id}: team {fixture.team_h} vs team {fixture.team_a}"
+        ),
+        model=fixture,
+    )
+
+
+def snapshot_for_event_status(
+    *,
+    status: EventStatusResponse,
+    event_id: int | None,
+) -> EntitySnapshot:
+    """Represent event status as one season-level aggregate."""
+    label = "Event status" if event_id is None else f"Gameweek {event_id} status"
+    return snapshot_for_model(entity_key="status", entity_label=label, model=status)
+
+
+def snapshot_for_live_element(
+    *,
+    live_element: LiveElement,
+    event_id: int,
+) -> EntitySnapshot:
+    """Build one event-scoped live player snapshot."""
+    return snapshot_for_model(
+        entity_key=f"{event_id}:{live_element.id}",
+        entity_label=f"Player {live_element.id} · GW {event_id}",
+        model=live_element,
+    )
+
+
+def snapshot_for_model(
+    *,
+    entity_key: str,
+    entity_label: str,
+    model: BaseModel,
+) -> EntitySnapshot:
+    """Convert a known Pydantic entity to canonical JSON-compatible data."""
+    data = cast("dict[str, JsonValue]", model.model_dump(mode="json"))
+    return EntitySnapshot(
+        entity_key=entity_key,
+        entity_label=entity_label,
+        data=data,
+    )
+
+
+def entity_snapshot_from_row(*, row: object) -> EntitySnapshot:
+    """Convert a JSONB snapshot row returned by either database executor."""
+    values = row_values(row=row)
+    raw_snapshot = values.get("snapshot")
+    if isinstance(raw_snapshot, str):
+        raw_snapshot = json.loads(raw_snapshot)
+    if not isinstance(raw_snapshot, dict):
+        raise TypeError("Entity snapshot must be a JSON object.")
+    return EntitySnapshot(
+        entity_key=require_str(values=values, key="entity_key"),
+        entity_label=require_str(values=values, key="entity_label"),
+        data=cast("dict[str, JsonValue]", raw_snapshot),
+    )
 
 
 async def upsert_model_row(
@@ -954,7 +1778,7 @@ async def upsert_model_row(
     values: dict[str, object],
 ) -> None:
     """Upsert one model row with a deterministic row hash."""
-    cleaned_values = {key: value for key, value in values.items() if value is not None}
+    cleaned_values = dict(values)
     cleaned_values["row_hash"] = payload_sha256(
         payload={
             key: hashable_value(value=value)
@@ -1281,35 +2105,58 @@ async def live_elements_from_rows(
 def change_event_from_row(*, row: object) -> ChangeEvent:
     """Convert a database row into a change-event model."""
     values = row_values(row=row)
-    source_key = values.get("source_key")
-    resource_key = values.get("resource_key")
-    entity_family_value = values.get("entity_family")
-    entity_family = (
-        EntityFamily.EVENTS
-        if entity_family_value is None
-        else EntityFamily(cast("str", entity_family_value))
-    )
     return ChangeEvent(
         id=require_int(values=values, key="id"),
-        season_id=(
-            None
-            if values.get("season_id") is None
-            else require_str(values=values, key="season_id")
+        season_id=require_str(values=values, key="season_id"),
+        entity_family=EntityFamily(
+            require_str(values=values, key="entity_family"),
         ),
-        entity_family=entity_family,
         event_name=require_str(values=values, key="event_name"),
-        source_key=(
-            None if source_key is None else IngestionSourceKey(cast("str", source_key))
+        source_key=IngestionSourceKey(
+            require_str(values=values, key="source_key"),
         ),
-        resource_key=(
-            None
-            if resource_key is None
-            else IngestionSourceKey(cast("str", resource_key))
+        source_event_id=optional_int(values=values, key="source_event_id"),
+        payload_hash=require_str(values=values, key="payload_hash"),
+        created_count=require_int(values=values, key="created_count"),
+        updated_count=require_int(values=values, key="updated_count"),
+        deleted_count=require_int(values=values, key="deleted_count"),
+        fetched_at=require_datetime(values=values, key="fetched_at"),
+        created_at=require_datetime(values=values, key="created_at"),
+    )
+
+
+def entity_change_from_row(*, row: object) -> EntityChange:
+    """Convert a JSONB entity-change row returned by either executor."""
+    values = row_values(row=row)
+    raw_fields = values.get("field_changes")
+    if isinstance(raw_fields, str):
+        raw_fields = json.loads(raw_fields)
+    if not isinstance(raw_fields, list):
+        raise TypeError("Entity field changes must be a JSON array.")
+    return EntityChange(
+        id=require_int(values=values, key="id"),
+        change_event_id=require_int(values=values, key="change_event_id"),
+        entity_key=require_str(values=values, key="entity_key"),
+        entity_label=require_str(values=values, key="entity_label"),
+        kind=ChangeKind(require_str(values=values, key="change_kind")),
+        fields=FIELD_CHANGES_ADAPTER.validate_python(raw_fields),
+        created_at=require_datetime(values=values, key="created_at"),
+    )
+
+
+def ingestion_source_status_from_row(*, row: object) -> IngestionSourceStatus:
+    """Convert a latest-source metadata row to its domain model."""
+    values = row_values(row=row)
+    return IngestionSourceStatus(
+        season_id=require_str(values=values, key="season_id"),
+        source_key=IngestionSourceKey(
+            require_str(values=values, key="source_key"),
         ),
         event_id=optional_int(values=values, key="event_id"),
         payload_hash=require_str(values=values, key="payload_hash"),
         fetched_at=require_datetime(values=values, key="fetched_at"),
-        created_at=require_datetime(values=values, key="created_at"),
+        checked_at=require_datetime(values=values, key="checked_at"),
+        last_changed_at=optional_datetime(values=values, key="last_changed_at"),
     )
 
 

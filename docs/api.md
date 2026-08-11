@@ -12,7 +12,7 @@ OpenAPI is available at `/openapi.json`, `/docs`, and `/redoc`.
 - `GET /healthz` checks only that the application is running. It never accesses
   the database.
 - `GET /readyz` checks database access and migration version and returns
-  `{"status":"ready","schema_version":1}`.
+  `{"status":"ready","schema_version":2}`.
 
 An Aurora resume returns HTTP 503, `Retry-After: 5`, and:
 
@@ -49,6 +49,7 @@ Paginated routes are:
 - `GET /v1/seasons/{season_id}/events/{event_id}/fixtures`
 - `GET /v1/seasons/{season_id}/events/{event_id}/live-elements`
 - `GET /v1/change-events`
+- `GET /v1/change-events/{change_event_id}/entity-changes`
 
 For example:
 
@@ -62,6 +63,36 @@ events, teams, elements, and live elements.
 
 There is no SSE endpoint, PostgreSQL listener, or `/v1/stream` route. Clients
 consume changes with cursor polling.
+
+## Change history and ingestion freshness
+
+`GET /v1/change-events` is the forward cursor used for catch-up polling. Each
+item is one accurate family summary with `created_count`, `updated_count`, and
+`deleted_count`. Unchanged families do not emit events.
+
+The explorer starts with `GET /v1/change-events/recent?limit=100`. This returns
+the newest events first and a `next_before_id`. Older pages are loaded only on
+request with:
+
+```text
+GET /v1/change-events/history?before_id=123&limit=100
+```
+
+Entity-level detail is separately bounded:
+
+```text
+GET /v1/change-events/123/entity-changes?after_id=0&limit=100
+```
+
+Each entity change contains its stable key, friendly label, operation, and
+top-level field changes. Before and after values have an explicit `present`
+flag, so an absent property is distinct from a present JSON `null`. Nested
+values remain structured JSON values.
+
+`GET /v1/ingestion-status` reports reference and live states, their expected
+cadence and stale threshold, last successful check, last actual change, and
+the current or next live window. An unchanged successful check advances
+freshness without creating a change event.
 
 Entity collections return 503 when their source data has not yet been ingested.
 Unknown individual entities return 404. Invalid pagination arguments return

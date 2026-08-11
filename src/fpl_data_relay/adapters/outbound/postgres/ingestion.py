@@ -15,6 +15,44 @@ class PostgresIngestionRepository:
     def __init__(self, *, database: PostgresDatabase) -> None:
         self._database = database
 
+    async def upsert_reference_snapshot(
+        self,
+        *,
+        season: Season,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        bootstrap_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        return await self._database.upsert_reference_snapshot(
+            season=season,
+            bootstrap=bootstrap,
+            fixtures=fixtures,
+            bootstrap_metadata=bootstrap_metadata,
+            fixtures_metadata=fixtures_metadata,
+        )
+
+    async def upsert_live_snapshot(
+        self,
+        *,
+        event_id: int,
+        status: EventStatusResponse,
+        fixtures: list[Fixture],
+        live: EventLiveResponse,
+        status_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+        live_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        return await self._database.upsert_live_snapshot(
+            event_id=event_id,
+            status=status,
+            fixtures=fixtures,
+            live=live,
+            status_metadata=status_metadata,
+            fixtures_metadata=fixtures_metadata,
+            live_metadata=live_metadata,
+        )
+
     async def upsert_bootstrap(
         self,
         *,
@@ -26,6 +64,7 @@ class PostgresIngestionRepository:
             season=season,
             bootstrap=bootstrap,
             metadata=metadata,
+            delete_missing=True,
         )
 
     async def upsert_fixtures(

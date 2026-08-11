@@ -93,7 +93,9 @@ async def test_narrow_postgres_adapters_expose_complete_use_cases() -> None:
     changes = ChangeFeed(
         repository=PostgresChangeEventRepository(database=database),
     )
-    assert len(await changes.list_events(after_id=0, limit=100)) == 10
+    events = await changes.list_events(after_id=0, limit=100)
+    assert len(events) == 1
+    assert events[0].entity_family.value == "fixtures"
 
 
 @pytest.mark.asyncio

@@ -379,6 +379,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/change-events/recent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List recent change events
+         * @description Return the newest bounded change-event summaries.
+         */
+        get: operations["list_recent_change_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/change-events/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List older change events
+         * @description Return a newest-first page before a known event id.
+         */
+        get: operations["list_change_event_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/change-events": {
         parameters: {
             query?: never;
@@ -399,28 +439,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/change-events/{change_event_id}/entity-changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List changed entities
+         * @description Return field-level entity changes under one family event.
+         */
+        get: operations["list_entity_changes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/ingestion-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Inspect automatic ingestion freshness */
+        get: operations["get_ingestion_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ChangeEventHistoryResponse
+         * @description Newest-first page of change-event summaries.
+         */
+        ChangeEventHistoryResponse: {
+            /** Items */
+            items: components["schemas"]["ChangeEventResponse"][];
+            /** Next Before Id */
+            next_before_id: number | null;
+        };
+        /**
          * ChangeEventResponse
-         * @description Public metadata describing one changed entity family.
+         * @description Public summary of accurate changes within one entity family.
          */
         ChangeEventResponse: {
             /** Id */
             id: number;
             /** Season Id */
-            season_id: string | null;
+            season_id: string;
             entity_family: components["schemas"]["EntityFamily"];
             /** Event Name */
             event_name: string;
-            source_key: components["schemas"]["IngestionSourceKey"] | null;
-            resource_key: components["schemas"]["IngestionSourceKey"] | null;
-            /** Event Id */
-            event_id: number | null;
+            source_key: components["schemas"]["IngestionSourceKey"];
+            /** Source Event Id */
+            source_event_id: number | null;
             /** Payload Hash */
             payload_hash: string;
+            /** Created Count */
+            created_count: number;
+            /** Updated Count */
+            updated_count: number;
+            /** Deleted Count */
+            deleted_count: number;
             /**
              * Fetched At
              * Format: date-time
@@ -434,13 +526,28 @@ export interface components {
         };
         /**
          * ChangeEventsResponse
-         * @description Page of change events after a caller-supplied event identifier.
+         * @description Forward cursor page of change-event summaries.
          */
         ChangeEventsResponse: {
             /** Items */
             items: components["schemas"]["ChangeEventResponse"][];
             /** Next After Id */
             next_after_id: number | null;
+        };
+        /**
+         * ChangeKind
+         * @description Supported entity-level operations.
+         * @enum {string}
+         */
+        ChangeKind: "created" | "updated" | "deleted";
+        /**
+         * ChangeValueResponse
+         * @description Public field value that distinguishes absence from JSON null.
+         */
+        ChangeValueResponse: {
+            /** Present */
+            present: boolean;
+            value: components["schemas"]["JsonValue"];
         };
         /** CursorPage[Element] */
         CursorPage_Element_: {
@@ -576,6 +683,38 @@ export interface components {
             element_count?: number | null;
         };
         /**
+         * EntityChangeResponse
+         * @description Public field-level changes for one logical entity.
+         */
+        EntityChangeResponse: {
+            /** Id */
+            id: number;
+            /** Change Event Id */
+            change_event_id: number;
+            /** Entity Key */
+            entity_key: string;
+            /** Entity Label */
+            entity_label: string;
+            kind: components["schemas"]["ChangeKind"];
+            /** Fields */
+            fields: components["schemas"]["FieldChangeResponse"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * EntityChangesResponse
+         * @description Cursor page of entity changes under one family event.
+         */
+        EntityChangesResponse: {
+            /** Items */
+            items: components["schemas"]["EntityChangeResponse"][];
+            /** Next After Id */
+            next_after_id: number | null;
+        };
+        /**
          * EntityFamily
          * @description Normalised entity families exposed by change events.
          * @enum {string}
@@ -658,6 +797,16 @@ export interface components {
             leagues?: string | null;
         };
         /**
+         * FieldChangeResponse
+         * @description Public before and after values for one top-level field.
+         */
+        FieldChangeResponse: {
+            /** Field */
+            field: string;
+            before: components["schemas"]["ChangeValueResponse"];
+            after: components["schemas"]["ChangeValueResponse"];
+        };
+        /**
          * Fixture
          * @description FPL fixture metadata from fixtures endpoints.
          */
@@ -738,6 +887,22 @@ export interface components {
          * @enum {string}
          */
         IngestionSourceKey: "bootstrap-static" | "fixtures" | "fixtures-current-event" | "event-status" | "event-live";
+        /**
+         * IngestionStatusResponse
+         * @description Reference and live automatic-ingestion freshness.
+         */
+        IngestionStatusResponse: {
+            /** Season Id */
+            season_id: string | null;
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            reference: components["schemas"]["PipelineStatusResponse"];
+            live: components["schemas"]["PipelineStatusResponse"];
+        };
+        JsonValue: unknown;
         /**
          * LiveElement
          * @description Live gameweek state for one FPL player/element.
@@ -839,6 +1004,29 @@ export interface components {
             start_event: number;
             /** Stop Event */
             stop_event: number;
+        };
+        /**
+         * PipelineStatusResponse
+         * @description Freshness status for one automatic ingestion stream.
+         */
+        PipelineStatusResponse: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "initializing" | "healthy" | "stale" | "idle" | "polling";
+            /** Expected Interval Seconds */
+            expected_interval_seconds: number;
+            /** Stale After Seconds */
+            stale_after_seconds: number;
+            /** Last Checked At */
+            last_checked_at: string | null;
+            /** Last Changed At */
+            last_changed_at: string | null;
+            /** Current Window End */
+            current_window_end: string | null;
+            /** Next Window Start */
+            next_window_start: string | null;
         };
         /**
          * ReadyResponse
@@ -1612,6 +1800,72 @@ export interface operations {
             };
         };
     };
+    list_recent_change_events: {
+        parameters: {
+            query: {
+                /** @description Maximum events to return. */
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChangeEventHistoryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_change_event_history: {
+        parameters: {
+            query: {
+                /** @description Return events older than this id. */
+                before_id: number;
+                /** @description Maximum events to return. */
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChangeEventHistoryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_change_events: {
         parameters: {
             query: {
@@ -1642,6 +1896,63 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_entity_changes: {
+        parameters: {
+            query: {
+                /** @description Return entity changes after this id. */
+                after_id: number;
+                /** @description Maximum changes to return. */
+                limit: number;
+            };
+            header?: never;
+            path: {
+                /** @description Stored change-event identifier. */
+                change_event_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntityChangesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_ingestion_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IngestionStatusResponse"];
                 };
             };
         };

@@ -6,16 +6,26 @@ from typing import cast
 
 import pytest
 
-from fpl_data_relay.adapters.outbound.postgres.database import IngestionLockError
+from fpl_data_relay.adapters.outbound.postgres.database import (
+    IngestionLockError,
+    bootstrap_snapshots,
+    snapshot_for_event_status,
+    snapshot_for_fixture,
+    snapshot_for_live_element,
+)
 from fpl_data_relay.application.database import SCHEMA_VERSION
 from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.domain.changes import (
     EVENT_NAMES,
     ChangeEvent,
+    EntityChange,
     EntityFamily,
+    EntitySnapshot,
     IngestionMetadata,
     IngestionSourceKey,
+    IngestionSourceStatus,
     UpsertOutcome,
+    diff_entity_snapshots,
 )
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
@@ -59,6 +69,15 @@ class InMemoryStore:
             str,
         ] = {}
         self.events: list[ChangeEvent] = []
+        self.entity_changes: list[EntityChange] = []
+        self.snapshots: dict[
+            tuple[str, EntityFamily, str],
+            EntitySnapshot,
+        ] = {}
+        self.source_statuses: dict[
+            tuple[str, IngestionSourceKey, int | None],
+            IngestionSourceStatus,
+        ] = {}
         self.seasons: dict[str, Season] = {}
         self.fpl_events: dict[str, list[Event]] = {}
         self.phases: dict[str, list[Phase]] = {}
@@ -107,15 +126,57 @@ class InMemoryStore:
         self.elements[season.id] = bootstrap.elements
         return self._record_source(
             metadata=metadata,
-            families=[
-                EntityFamily.EVENTS,
-                EntityFamily.PHASES,
-                EntityFamily.TEAMS,
-                EntityFamily.ELEMENT_TYPES,
-                EntityFamily.ELEMENT_STATS,
-                EntityFamily.ELEMENTS,
-            ],
+            snapshots=bootstrap_snapshots(bootstrap=bootstrap),
+            authoritative=True,
         )
+
+    async def upsert_reference_snapshot(
+        self,
+        *,
+        season: Season,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        bootstrap_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        return [
+            await self.upsert_bootstrap(
+                season=season,
+                bootstrap=bootstrap,
+                metadata=bootstrap_metadata,
+            ),
+            await self.upsert_fixtures(
+                fixtures=fixtures,
+                metadata=fixtures_metadata,
+            ),
+        ]
+
+    async def upsert_live_snapshot(
+        self,
+        *,
+        event_id: int,
+        status: EventStatusResponse,
+        fixtures: list[Fixture],
+        live: EventLiveResponse,
+        status_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+        live_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        return [
+            await self.upsert_event_status(
+                status=status,
+                metadata=status_metadata,
+            ),
+            await self.upsert_fixtures(
+                fixtures=fixtures,
+                metadata=fixtures_metadata,
+            ),
+            await self.upsert_event_live(
+                event_id=event_id,
+                live=live,
+                metadata=live_metadata,
+            ),
+        ]
 
     async def upsert_fixtures(
         self,
@@ -127,7 +188,12 @@ class InMemoryStore:
             self.fixtures[(metadata.season_id, fixture.id)] = fixture
         return self._record_source(
             metadata=metadata,
-            families=[EntityFamily.FIXTURES],
+            snapshots={
+                EntityFamily.FIXTURES: [
+                    snapshot_for_fixture(fixture=fixture) for fixture in fixtures
+                ],
+            },
+            authoritative=metadata.source_key is IngestionSourceKey.FIXTURES,
         )
 
     async def upsert_event_status(
@@ -139,7 +205,15 @@ class InMemoryStore:
         self.event_status[metadata.season_id] = status
         return self._record_source(
             metadata=metadata,
-            families=[EntityFamily.EVENT_STATUS],
+            snapshots={
+                EntityFamily.EVENT_STATUS: [
+                    snapshot_for_event_status(
+                        status=status,
+                        event_id=metadata.event_id,
+                    ),
+                ],
+            },
+            authoritative=True,
         )
 
     async def upsert_event_live(
@@ -152,7 +226,16 @@ class InMemoryStore:
         self.live_elements[(metadata.season_id, event_id)] = live
         return self._record_source(
             metadata=metadata,
-            families=[EntityFamily.EVENT_LIVE],
+            snapshots={
+                EntityFamily.EVENT_LIVE: [
+                    snapshot_for_live_element(
+                        live_element=element,
+                        event_id=event_id,
+                    )
+                    for element in live.elements
+                ],
+            },
+            authoritative=True,
         )
 
     async def list_seasons(self) -> list[Season]:
@@ -292,11 +375,51 @@ class InMemoryStore:
     ) -> list[ChangeEvent]:
         return [event for event in self.events if event.id > after_id][:limit]
 
+    async def list_recent_change_events(self, *, limit: int) -> list[ChangeEvent]:
+        return sorted(self.events, key=lambda event: event.id, reverse=True)[:limit]
+
+    async def list_change_events_before(
+        self,
+        *,
+        before_id: int,
+        limit: int,
+    ) -> list[ChangeEvent]:
+        return sorted(
+            [event for event in self.events if event.id < before_id],
+            key=lambda event: event.id,
+            reverse=True,
+        )[:limit]
+
+    async def list_entity_changes(
+        self,
+        *,
+        change_event_id: int,
+        after_id: int,
+        limit: int,
+    ) -> list[EntityChange]:
+        return [
+            change
+            for change in self.entity_changes
+            if change.change_event_id == change_event_id and change.id > after_id
+        ][:limit]
+
+    async def list_ingestion_source_statuses(
+        self,
+        *,
+        season_id: str,
+    ) -> list[IngestionSourceStatus]:
+        return [
+            status
+            for status in self.source_statuses.values()
+            if status.season_id == season_id
+        ]
+
     def _record_source(
         self,
         *,
         metadata: IngestionMetadata,
-        families: list[EntityFamily],
+        snapshots: dict[EntityFamily, list[EntitySnapshot]],
+        authoritative: bool,
     ) -> UpsertOutcome:
         source_identity = (
             metadata.season_id,
@@ -305,24 +428,87 @@ class InMemoryStore:
         )
         existing_hash = self.source_hashes.get(source_identity)
         if existing_hash == metadata.payload_hash:
+            existing = self.source_statuses[source_identity]
+            self.source_statuses[source_identity] = existing.model_copy(
+                update={"checked_at": metadata.checked_at},
+            )
             return UpsertOutcome(changed=False, change_events=[])
+        source_exists = source_identity in self.source_hashes
         self.source_hashes[source_identity] = metadata.payload_hash
         events: list[ChangeEvent] = []
-        for family in families:
+        for family, current in snapshots.items():
+            previous = [
+                snapshot
+                for (season_id, snapshot_family, _), snapshot in self.snapshots.items()
+                if season_id == metadata.season_id and snapshot_family is family
+                and (
+                    family is not EntityFamily.EVENT_LIVE
+                    or snapshot.entity_key.startswith(f"{metadata.event_id}:")
+                )
+            ]
+            diff = diff_entity_snapshots(
+                previous=previous,
+                current=current,
+                authoritative=authoritative,
+                baseline=not source_exists and not previous,
+            )
+            if not diff.changes:
+                for snapshot in current:
+                    identity = (metadata.season_id, family, snapshot.entity_key)
+                    self.snapshots[identity] = snapshot
+                continue
             event = ChangeEvent(
                 id=len(self.events) + 1,
                 season_id=metadata.season_id,
                 entity_family=family,
                 event_name=EVENT_NAMES[family],
                 source_key=metadata.source_key,
-                resource_key=metadata.source_key,
-                event_id=metadata.event_id,
+                source_event_id=metadata.event_id,
                 payload_hash=metadata.payload_hash,
+                created_count=diff.created_count,
+                updated_count=diff.updated_count,
+                deleted_count=diff.deleted_count,
                 fetched_at=metadata.fetched_at,
                 created_at=datetime.now(tz=UTC),
             )
             self.events.append(event)
             events.append(event)
+            for draft in diff.changes:
+                self.entity_changes.append(
+                    EntityChange(
+                        id=len(self.entity_changes) + 1,
+                        change_event_id=event.id,
+                        entity_key=draft.entity_key,
+                        entity_label=draft.entity_label,
+                        kind=draft.kind,
+                        fields=draft.fields,
+                        created_at=event.created_at,
+                    ),
+                )
+                if authoritative and draft.kind.value == "deleted":
+                    self.snapshots.pop(
+                        (metadata.season_id, family, draft.entity_key),
+                        None,
+                    )
+            for snapshot in current:
+                identity = (metadata.season_id, family, snapshot.entity_key)
+                self.snapshots[identity] = snapshot
+        prior_status = self.source_statuses.get(source_identity)
+        self.source_statuses[source_identity] = IngestionSourceStatus(
+            season_id=metadata.season_id,
+            source_key=metadata.source_key,
+            event_id=metadata.event_id,
+            payload_hash=metadata.payload_hash,
+            fetched_at=metadata.fetched_at,
+            checked_at=metadata.checked_at,
+            last_changed_at=(
+                metadata.checked_at
+                if events
+                else (
+                    None if prior_status is None else prior_status.last_changed_at
+                )
+            ),
+        )
         return UpsertOutcome(
             changed=True,
             change_events=events,

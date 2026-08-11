@@ -5,7 +5,9 @@ from typing import Protocol
 
 from fpl_data_relay.domain.changes import (
     ChangeEvent,
+    EntityChange,
     IngestionMetadata,
+    IngestionSourceStatus,
     UpsertOutcome,
 )
 from fpl_data_relay.domain.fixtures import Fixture
@@ -27,6 +29,32 @@ from fpl_data_relay.domain.reference import (
 
 class IngestionRepository(Protocol):
     """Writes and target lookups required by ingestion."""
+
+    async def upsert_reference_snapshot(
+        self,
+        *,
+        season: Season,
+        bootstrap: BootstrapStatic,
+        fixtures: list[Fixture],
+        bootstrap_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        """Persist one complete reference bundle atomically."""
+        ...
+
+    async def upsert_live_snapshot(
+        self,
+        *,
+        event_id: int,
+        status: EventStatusResponse,
+        fixtures: list[Fixture],
+        live: EventLiveResponse,
+        status_metadata: IngestionMetadata,
+        fixtures_metadata: IngestionMetadata,
+        live_metadata: IngestionMetadata,
+    ) -> list[UpsertOutcome]:
+        """Persist one complete live bundle atomically."""
+        ...
 
     async def upsert_bootstrap(
         self,
@@ -183,3 +211,26 @@ class ChangeEventRepository(Protocol):
         after_id: int,
         limit: int,
     ) -> list[ChangeEvent]: ...
+
+    async def list_recent_change_events(self, *, limit: int) -> list[ChangeEvent]: ...
+
+    async def list_change_events_before(
+        self,
+        *,
+        before_id: int,
+        limit: int,
+    ) -> list[ChangeEvent]: ...
+
+    async def list_entity_changes(
+        self,
+        *,
+        change_event_id: int,
+        after_id: int,
+        limit: int,
+    ) -> list[EntityChange]: ...
+
+    async def list_ingestion_source_statuses(
+        self,
+        *,
+        season_id: str,
+    ) -> list[IngestionSourceStatus]: ...

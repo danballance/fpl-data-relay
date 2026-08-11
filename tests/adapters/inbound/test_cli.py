@@ -72,6 +72,7 @@ def ingestion_result() -> IngestionResult:
         season_id="2025-26",
         current_event_id=3,
         has_active_fixture=True,
+        entity_change_counts={},
     )
 
 
@@ -95,7 +96,7 @@ def test_cli_preserves_config_schema_and_serve_commands() -> None:
     runner = CliRunner()
     app = create_cli_app(operations=operations)
     assert runner.invoke(app, ["config-check"]).output == "configuration ok\n"
-    assert "schema version 1 applied" in runner.invoke(app, ["db", "apply"]).output
+    assert "schema version 2 applied" in runner.invoke(app, ["db", "apply"]).output
     assert (
         runner.invoke(app, ["db", "status"]).output
         == "applied=[1] pending=[]\n"

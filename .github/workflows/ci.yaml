@@ -25,28 +25,10 @@ jobs:
         with:
           use-installer: true
           token: ${{ github.token }}
-      - run: uv python install 3.14
-      - run: uv sync --frozen --group dev
-      - run: uv run --group dev ruff check
-      - run: uv run --group dev ty check
-      - run: uv run --group dev lint-imports
-      - run: uv run --group dev python -m pytest --cov ./src/fpl_data_relay tests
-      - run: npm --prefix client ci
-      - run: npm --prefix client run check
-      - run: sam validate --lint --template-file template-data.yaml --region eu-west-2
-      - run: sam validate --lint --template-file template-app.yaml --region eu-west-2
-      - run: docker compose --env-file .env.example config --quiet
-      - run: |
-          cp deploy/nas/.env.example deploy/nas/.env
-          docker compose \
-            --file deploy/nas/compose.yaml \
-            --env-file deploy/nas/.env.example \
-            config --quiet
-      - run: docker build --file Dockerfile --tag fpl-relay:test .
-      - run: docker run --rm fpl-relay:test fpl-relay --help
-      - run: docker build --file Dockerfile.collector --tag fpl-collector:test .
-      - run: docker run --rm fpl-collector:test fpl-collector --help
-      - run: docker run --rm fpl-collector:test python -c 'import importlib.util; assert importlib.util.find_spec("fastapi") is None'
+      - name: Install locked dependencies
+        run: make install
+      - name: Run complete quality gate
+        run: make ci
 
   publish-collector:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

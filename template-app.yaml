@@ -116,6 +116,12 @@ Resources:
         deadLetterTargetArn: !GetAtt ResultDeadLetterQueue.Arn
         maxReceiveCount: 3
 
+  ScheduleDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
   PayloadBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
@@ -170,6 +176,11 @@ Resources:
     Properties:
       Name: !Sub "${AWS::StackName}-live"
 
+  ReferenceScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-reference"
+
   ScheduleTargetRole:
     Type: AWS::IAM::Role
     Properties:
@@ -187,15 +198,18 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: sqs:SendMessage
-                Resource: !GetAtt FetchQueue.Arn
+                Resource:
+                  - !GetAtt FetchQueue.Arn
+                  - !GetAtt ScheduleDeadLetterQueue.Arn
 
-  DailyReferenceSchedule:
+  ReferenceSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
-      Name: !Sub "${AWS::StackName}-reference-daily"
-      Description: Refresh FPL reference data at 04:00 Europe/London.
-      ScheduleExpression: cron(0 4 * * ? *)
-      ScheduleExpressionTimezone: Europe/London
+      Name: !Sub "${AWS::StackName}-reference-quarter-hour"
+      GroupName: !Ref ReferenceScheduleGroup
+      Description: Refresh FPL reference data every 15 minutes.
+      ScheduleExpression: cron(0/15 * * * ? *)
+      ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
       State: ENABLED
@@ -203,6 +217,11 @@ Resources:
         Arn: !GetAtt FetchQueue.Arn
         RoleArn: !GetAtt ScheduleTargetRole.Arn
         Input: '{"version":1,"kind":"reference"}'
+        DeadLetterConfig:
+          Arn: !GetAtt ScheduleDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 900
+          MaximumRetryAttempts: 3
 
   IngestionFunction:
     Type: AWS::Serverless::Function
@@ -214,6 +233,10 @@ Resources:
       MemorySize: 1024
       Timeout: 180
       ReservedConcurrentExecutions: 1
+      LoggingConfig:
+        ApplicationLogLevel: INFO
+        LogFormat: JSON
+        SystemLogLevel: WARN
       Environment:
         Variables:
           FETCH_QUEUE_URL: !Ref FetchQueue
@@ -222,6 +245,7 @@ Resources:
           PAYLOAD_PREFIX: !Ref PayloadPrefix
           LIVE_SCHEDULE_GROUP_NAME: !Ref LiveScheduleGroup
           SCHEDULE_TARGET_ROLE_ARN: !GetAtt ScheduleTargetRole.Arn
+          SCHEDULE_DEAD_LETTER_QUEUE_ARN: !GetAtt ScheduleDeadLetterQueue.Arn
       Policies:
         - SQSPollerPolicy:
             QueueName: !GetAtt ResultQueue.QueueName
@@ -326,6 +350,94 @@ Resources:
         - Name: QueueName
           Value: !GetAtt ResultDeadLetterQueue.QueueName
       Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  ScheduleDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler target deliveries reached the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ScheduleDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  ReferenceScheduleMissedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Reference scheduler made no attempt for 30 minutes.
+      Namespace: AWS/Scheduler
+      MetricName: InvocationAttemptCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref ReferenceScheduleGroup
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  ReferenceScheduleErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Reference scheduler could not deliver to its target.
+      Namespace: AWS/Scheduler
+      MetricName: TargetErrorCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref ReferenceScheduleGroup
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  LiveScheduleErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Live scheduler could not deliver to its target.
+      Namespace: AWS/Scheduler
+      MetricName: TargetErrorCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref LiveScheduleGroup
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  ScheduleDroppedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler exhausted delivery retries.
+      Namespace: AWS/Scheduler
+      MetricName: InvocationDroppedCount
+      Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
       Threshold: 1
@@ -535,6 +647,8 @@ Outputs:
     Value: !Ref ResultQueue
   ResultDeadLetterQueueUrl:
     Value: !Ref ResultDeadLetterQueue
+  ScheduleDeadLetterQueueUrl:
+    Value: !Ref ScheduleDeadLetterQueue
   PayloadBucketName:
     Value: !Ref PayloadBucket
   PayloadPrefix:

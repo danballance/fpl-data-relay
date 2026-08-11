@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from fpl_data_relay.application.ports.persistence import IngestionRepository
 from fpl_data_relay.application.ports.upstream import FplGateway
 from fpl_data_relay.domain.changes import (
+    EntityFamily,
     IngestionMetadata,
     IngestionSourceKey,
     UpsertOutcome,
@@ -24,6 +25,16 @@ from fpl_data_relay.domain.rules import (
 )
 
 
+class EntityChangeCounts(BaseModel):
+    """Created, updated, and deleted entity totals for one family."""
+
+    model_config = ConfigDict(frozen=True)
+
+    created: int
+    updated: int
+    deleted: int
+
+
 class IngestionResult(BaseModel):
     """Summary of entity-family changes produced by one ingestion cycle."""
 
@@ -34,6 +45,7 @@ class IngestionResult(BaseModel):
     season_id: str | None
     current_event_id: int | None
     has_active_fixture: bool
+    entity_change_counts: dict[EntityFamily, EntityChangeCounts]
 
 
 class IngestionService:
@@ -115,29 +127,25 @@ class IngestionService:
         """Persist reference resources while a lock is already held."""
         season = derive_season(bootstrap=bootstrap)
         current_event_id = select_current_event_id(bootstrap=bootstrap)
-        outcomes = [
-            await self._repository.upsert_bootstrap(
-                season=season,
-                bootstrap=bootstrap,
-                metadata=metadata_for_payload(
-                    season_id=season.id,
-                    source_key=IngestionSourceKey.BOOTSTRAP,
-                    event_id=None,
-                    payload=model_to_payload(model=bootstrap),
-                    fetched_at=fetched_at,
-                ),
+        outcomes = await self._repository.upsert_reference_snapshot(
+            season=season,
+            bootstrap=bootstrap,
+            fixtures=fixtures,
+            bootstrap_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.BOOTSTRAP,
+                event_id=None,
+                payload=model_to_payload(model=bootstrap),
+                fetched_at=fetched_at,
             ),
-            await self._repository.upsert_fixtures(
-                fixtures=fixtures,
-                metadata=metadata_for_payload(
-                    season_id=season.id,
-                    source_key=IngestionSourceKey.FIXTURES,
-                    event_id=None,
-                    payload=model_to_payload(model=fixtures),
-                    fetched_at=fetched_at,
-                ),
+            fixtures_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.FIXTURES,
+                event_id=None,
+                payload=model_to_payload(model=fixtures),
+                fetched_at=fetched_at,
             ),
-        ]
+        )
         return result_from_outcomes(
             outcomes=outcomes,
             season_id=season.id,
@@ -222,39 +230,33 @@ class IngestionService:
         fetched_at: datetime,
     ) -> IngestionResult:
         """Persist live resources while a lock is already held."""
-        outcomes = [
-            await self._repository.upsert_event_status(
-                status=event_status,
-                metadata=metadata_for_payload(
-                    season_id=season.id,
-                    source_key=IngestionSourceKey.EVENT_STATUS,
-                    event_id=current_event_id,
-                    payload=model_to_payload(model=event_status),
-                    fetched_at=fetched_at,
-                ),
-            ),
-            await self._repository.upsert_fixtures(
-                fixtures=current_fixtures,
-                metadata=metadata_for_payload(
-                    season_id=season.id,
-                    source_key=IngestionSourceKey.CURRENT_FIXTURES,
-                    event_id=current_event_id,
-                    payload=model_to_payload(model=current_fixtures),
-                    fetched_at=fetched_at,
-                ),
-            ),
-            await self._repository.upsert_event_live(
+        outcomes = await self._repository.upsert_live_snapshot(
+            event_id=current_event_id,
+            status=event_status,
+            fixtures=current_fixtures,
+            live=event_live,
+            status_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.EVENT_STATUS,
                 event_id=current_event_id,
-                live=event_live,
-                metadata=metadata_for_payload(
-                    season_id=season.id,
-                    source_key=IngestionSourceKey.EVENT_LIVE,
-                    event_id=current_event_id,
-                    payload=model_to_payload(model=event_live),
-                    fetched_at=fetched_at,
-                ),
+                payload=model_to_payload(model=event_status),
+                fetched_at=fetched_at,
             ),
-        ]
+            fixtures_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.CURRENT_FIXTURES,
+                event_id=current_event_id,
+                payload=model_to_payload(model=current_fixtures),
+                fetched_at=fetched_at,
+            ),
+            live_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.EVENT_LIVE,
+                event_id=current_event_id,
+                payload=model_to_payload(model=event_live),
+                fetched_at=fetched_at,
+            ),
+        )
         return result_from_outcomes(
             outcomes=outcomes,
             season_id=season.id,
@@ -336,12 +338,25 @@ def result_from_outcomes(
     """Summarize changed and unchanged writes for one ingestion phase."""
     changed_count = sum(len(outcome.change_events) for outcome in outcomes)
     unchanged_count = sum(1 for outcome in outcomes if not outcome.changed)
+    entity_change_counts: dict[EntityFamily, EntityChangeCounts] = {}
+    for outcome in outcomes:
+        for event in outcome.change_events:
+            previous = entity_change_counts.get(
+                event.entity_family,
+                EntityChangeCounts(created=0, updated=0, deleted=0),
+            )
+            entity_change_counts[event.entity_family] = EntityChangeCounts(
+                created=previous.created + event.created_count,
+                updated=previous.updated + event.updated_count,
+                deleted=previous.deleted + event.deleted_count,
+            )
     return IngestionResult(
         changed_count=changed_count,
         unchanged_count=unchanged_count,
         season_id=season_id,
         current_event_id=current_event_id,
         has_active_fixture=has_active_fixture,
+        entity_change_counts=entity_change_counts,
     )
 
 
@@ -351,10 +366,27 @@ def combine_results(
     second: IngestionResult,
 ) -> IngestionResult:
     """Merge reference and live ingestion summaries into one result."""
+    entity_change_counts: dict[EntityFamily, EntityChangeCounts] = {}
+    families = first.entity_change_counts.keys() | second.entity_change_counts.keys()
+    for family in families:
+        first_counts = first.entity_change_counts.get(
+            family,
+            EntityChangeCounts(created=0, updated=0, deleted=0),
+        )
+        second_counts = second.entity_change_counts.get(
+            family,
+            EntityChangeCounts(created=0, updated=0, deleted=0),
+        )
+        entity_change_counts[family] = EntityChangeCounts(
+            created=first_counts.created + second_counts.created,
+            updated=first_counts.updated + second_counts.updated,
+            deleted=first_counts.deleted + second_counts.deleted,
+        )
     return IngestionResult(
         changed_count=first.changed_count + second.changed_count,
         unchanged_count=first.unchanged_count + second.unchanged_count,
         season_id=second.season_id if second.season_id is not None else first.season_id,
         current_event_id=second.current_event_id,
         has_active_fixture=second.has_active_fixture,
+        entity_change_counts=entity_change_counts,
     )

@@ -100,14 +100,14 @@ async def test_apply_migrations_is_ordered_and_idempotent() -> None:
     pool = FakePostgresPool()
     assert (await migration_status(pool=pool)).model_dump() == {
         "applied_versions": [],
-        "pending_versions": [1],
+        "pending_versions": [1, 2],
     }
     await apply_migrations(pool=pool)
-    assert pool.schema_version == 1
-    assert len(pool.applied_migrations) == 1
+    assert pool.schema_version == 2
+    assert len(pool.applied_migrations) == 2
     await apply_migrations(pool=pool)
-    assert len(pool.applied_migrations) == 1
+    assert len(pool.applied_migrations) == 2
     assert (await migration_status(pool=pool)).model_dump() == {
-        "applied_versions": [1],
+        "applied_versions": [1, 2],
         "pending_versions": [],
     }

@@ -4,13 +4,15 @@ The read-only React application under `client/` runs locally through Vite and
 in production from the private S3/CloudFront origin. It calls only the relay;
 it never calls the upstream FPL API.
 
-Install and run locally:
+After the one-time root-level `make setup`, run the client on its own with:
 
 ```fish
-uv run npm --prefix client ci
-set -x RELAY_API_PROXY_TARGET http://127.0.0.1:8000
-uv run npm --prefix client run dev
+make client
 ```
+
+Use `make dev` instead to prepare and start PostgreSQL and the API before
+running the client. Both commands load the explicit proxy target from
+`client/.env.local`.
 
 Vite proxies `/api` to the configured relay and removes the prefix. Production
 uses the same paths through CloudFront.
@@ -22,20 +24,30 @@ Database and schema failures use distinct error states.
 
 The Activity page uses cursor polling rather than SSE. It:
 
-- requests pages of 100 until caught up;
+- initially requests the newest 100 family summaries;
+- loads older pages only when requested;
+- catches up from the greatest seen ID, following bounded forward pages;
 - polls every 15 seconds while the page is visible;
 - pauses when the document is hidden;
 - immediately catches up when visibility returns;
-- carries forward the latest known ID; and
 - relies on React Query to prevent overlapping requests.
 
-The UI exposes `Polling`, `Paused`, and `Error` states.
+Reference and live freshness cards distinguish initializing, healthy, stale,
+idle, and active polling states. Family, operation, and text filters narrow the
+newest-first feed. Inspecting a summary loads its affected entities and renders
+before/after field values, including explicit absent and null values. Player
+prices use millions, while player availability/news, fixture kickoff, and
+gameweek changes have recognizable labels. Raw JSON remains available.
+
+The UI exposes `Polling`, `Paused`, and `Error` states independently of source
+freshness.
 
 Run the complete frontend gate with:
 
 ```fish
-uv run npm --prefix client run check
+make check
 ```
 
-This performs strict TypeScript checking, ESLint, Vitest coverage at or above
-90%, and a production Vite build.
+This performs the Python gate plus strict TypeScript checking, ESLint, Vitest
+coverage at or above 90%, and a production Vite build. Use
+`uv run npm --prefix client run check` when diagnosing only the frontend.

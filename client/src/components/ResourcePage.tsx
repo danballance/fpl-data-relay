@@ -35,7 +35,9 @@ export function ResourcePage<T>({
   getRowId,
   getRowLabel,
   detailLoader,
+  beforeTable,
   controls,
+  renderDetail,
   emptyMessage,
   rawResponse,
 }: {
@@ -48,7 +50,9 @@ export function ResourcePage<T>({
   getRowId: (row: T) => string;
   getRowLabel: (row: T) => string;
   detailLoader?: DetailLoader<T>;
+  beforeTable?: ReactNode;
   controls?: ReactNode;
+  renderDetail?: (record: unknown) => ReactNode;
   emptyMessage: string;
   rawResponse?: unknown;
 }) {
@@ -107,6 +111,7 @@ export function ResourcePage<T>({
           </button>
         }
       />
+      {beforeTable}
       {controls === undefined ? null : (
         <div className="filter-bar">{controls}</div>
       )}
@@ -146,6 +151,7 @@ export function ResourcePage<T>({
           loading={detailQuery.isPending && detailLoader !== undefined}
           error={detailQuery.error ?? null}
           onClose={close}
+          renderFields={renderDetail}
         />
       )}
     </>

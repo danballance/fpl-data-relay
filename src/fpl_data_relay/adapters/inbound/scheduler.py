@@ -89,4 +89,5 @@ class RelayScheduler:
                 season_id=None,
                 current_event_id=None,
                 has_active_fixture=False,
+                entity_change_counts={},
             )

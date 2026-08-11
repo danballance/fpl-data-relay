@@ -16,6 +16,18 @@ services:
       POSTGRES_MAINTENANCE_DATABASE_URL: ${FPL_POSTGRES_MAINTENANCE_DATABASE_URL:?FPL_POSTGRES_MAINTENANCE_DATABASE_URL is required}
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
 
   postgres:
     image: postgres:17.7-alpine

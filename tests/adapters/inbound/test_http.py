@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -18,7 +18,11 @@ from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.config import Settings
 from fpl_data_relay.domain.changes import (
     ChangeEvent,
+    ChangeKind,
+    ChangeValue,
+    EntityChange,
     EntityFamily,
+    FieldChange,
     IngestionSourceKey,
 )
 from tests.conftest import FakeClient, InMemoryStore
@@ -102,7 +106,7 @@ def test_healthz_returns_schema_version() -> None:
     with TestClient(app) as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json()["schema_version"] == 1
+    assert response.json()["schema_version"] == 2
 
 
 @pytest.mark.parametrize(
@@ -195,6 +199,12 @@ def test_openapi_documents_concrete_api_contracts() -> None:
             "get_live_element"
         ),
         "/v1/change-events": "list_change_events",
+        "/v1/change-events/recent": "list_recent_change_events",
+        "/v1/change-events/history": "list_change_event_history",
+        "/v1/change-events/{change_event_id}/entity-changes": (
+            "list_entity_changes"
+        ),
+        "/v1/ingestion-status": "get_ingestion_status",
     }
     actual_operation_ids = {
         path: operation["get"]["operationId"] for path, operation in paths.items()
@@ -223,6 +233,10 @@ def test_openapi_documents_concrete_api_contracts() -> None:
             "Live Data",
         ],
         "/v1/change-events": ["Change Events"],
+        "/v1/change-events/recent": ["Change Events"],
+        "/v1/change-events/history": ["Change Events"],
+        "/v1/change-events/{change_event_id}/entity-changes": ["Change Events"],
+        "/v1/ingestion-status": ["Change Events"],
     }
     actual_tags = {
         path: operation["get"]["tags"] for path, operation in paths.items()
@@ -234,7 +248,7 @@ def test_openapi_documents_concrete_api_contracts() -> None:
         "Live Data",
         "Change Events",
     ]
-    assert "JsonValue" not in components
+    assert "JsonValue" in components
 
     collection_models = {
         "/v1/seasons": "Season",
@@ -456,9 +470,11 @@ def test_change_events_endpoint_filters_by_after_id() -> None:
             entity_family=EntityFamily.EVENTS,
             event_name="bootstrap.updated",
             source_key=IngestionSourceKey.BOOTSTRAP,
-            resource_key=IngestionSourceKey.BOOTSTRAP,
-            event_id=None,
+            source_event_id=None,
             payload_hash="a" * 64,
+            created_count=0,
+            updated_count=1,
+            deleted_count=0,
             fetched_at=timestamp,
             created_at=timestamp,
         ),
@@ -474,6 +490,128 @@ def test_change_events_endpoint_filters_by_after_id() -> None:
     assert response.status_code == 200
     assert response.json()["items"][0]["event_name"] == "bootstrap.updated"
     assert response.json()["items"][0]["season_id"] == "2025-26"
+
+
+def test_change_event_endpoints_page_newest_older_and_forward() -> None:
+    store = InMemoryStore()
+    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
+    store.events.extend(
+        ChangeEvent(
+            id=event_id,
+            season_id="2025-26",
+            entity_family=EntityFamily.ELEMENTS,
+            event_name="elements.updated",
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            source_event_id=None,
+            payload_hash=str(event_id) * 64,
+            created_count=0,
+            updated_count=1,
+            deleted_count=0,
+            fetched_at=timestamp,
+            created_at=timestamp,
+        )
+        for event_id in range(1, 4)
+    )
+    service = IngestionService(client=FakeClient(), repository=store)
+    app = create_test_app(
+        store=store,
+        ingestion_service=service,
+        start_scheduler=False,
+    )
+
+    with TestClient(app) as client:
+        recent = client.get("/v1/change-events/recent?limit=2").json()
+        older = client.get(
+            "/v1/change-events/history?before_id=3&limit=2",
+        ).json()
+        forward = client.get(
+            "/v1/change-events?after_id=1&limit=1",
+        ).json()
+
+    assert [item["id"] for item in recent["items"]] == [3, 2]
+    assert recent["next_before_id"] == 2
+    assert [item["id"] for item in older["items"]] == [2, 1]
+    assert older["next_before_id"] == 1
+    assert [item["id"] for item in forward["items"]] == [2]
+    assert forward["next_after_id"] == 2
+
+
+def test_entity_change_endpoint_preserves_absent_and_json_null() -> None:
+    store = InMemoryStore()
+    timestamp = datetime(2026, 6, 20, tzinfo=UTC)
+    store.entity_changes.append(
+        EntityChange(
+            id=1,
+            change_event_id=7,
+            entity_key="10",
+            entity_label="Ada (10)",
+            kind=ChangeKind.UPDATED,
+            fields=[
+                FieldChange(
+                    field="news",
+                    before=ChangeValue(present=False, value=None),
+                    after=ChangeValue(present=True, value=None),
+                ),
+            ],
+            created_at=timestamp,
+        ),
+    )
+    service = IngestionService(client=FakeClient(), repository=store)
+    app = create_test_app(
+        store=store,
+        ingestion_service=service,
+        start_scheduler=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/change-events/7/entity-changes?after_id=0&limit=1",
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["next_after_id"] == 1
+    field = body["items"][0]["fields"][0]
+    assert field["before"] == {"present": False, "value": None}
+    assert field["after"] == {"present": True, "value": None}
+
+
+def test_ingestion_status_initializes_before_first_snapshot() -> None:
+    app = build_test_app()
+    with TestClient(app) as client:
+        response = client.get("/v1/ingestion-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season_id"] is None
+    assert body["reference"]["state"] == "initializing"
+    assert body["live"]["state"] == "initializing"
+
+
+@pytest.mark.asyncio
+async def test_ingestion_status_reports_stale_reference_sources() -> None:
+    store = InMemoryStore()
+    service = IngestionService(client=FakeClient(), repository=store)
+    await service.ingest_reference_once()
+    stale_at = datetime.now(tz=UTC) - timedelta(minutes=11)
+    store.source_statuses = {
+        identity: status.model_copy(update={"checked_at": stale_at})
+        for identity, status in store.source_statuses.items()
+    }
+    app = create_test_app(
+        store=store,
+        ingestion_service=service,
+        start_scheduler=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/v1/ingestion-status")
+
+    assert response.status_code == 200
+    reference = response.json()["reference"]
+    assert reference["state"] == "stale"
+    assert reference["expected_interval_seconds"] == 300
+    assert reference["stale_after_seconds"] == 600
 
 
 def test_app_lifespan_starts_and_stops_scheduler() -> None:

@@ -2,19 +2,25 @@
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated, NoReturn
 
 from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from fpl_data_relay.adapters.inbound.http.schemas import (
+    ChangeEventHistoryResponse,
     ChangeEventsResponse,
     CursorPage,
+    EntityChangesResponse,
     ErrorResponse,
     HealthResponse,
+    IngestionStatusResponse,
+    PipelineStatusResponse,
     ReadyResponse,
     ServiceErrorResponse,
     public_change_event,
+    public_entity_change,
 )
 from fpl_data_relay.adapters.inbound.scheduler import RelayScheduler
 from fpl_data_relay.application.change_feed import ChangeFeed
@@ -24,10 +30,18 @@ from fpl_data_relay.application.errors import (
     DatabaseWakingError,
     SchemaUnavailableError,
 )
+from fpl_data_relay.application.jobs import (
+    WINDOW_AFTER_KICKOFF,
+    WINDOW_BEFORE_KICKOFF,
+)
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.ports.administration import SchemaManager
 from fpl_data_relay.application.ports.inbound import IngestionRunner
 from fpl_data_relay.application.reference_queries import ReferenceQueries
+from fpl_data_relay.domain.changes import (
+    IngestionSourceKey,
+    IngestionSourceStatus,
+)
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
     EventStatusResponse,
@@ -582,6 +596,51 @@ def create_app(
         return live_element
 
     @app.get(
+        "/v1/change-events/recent",
+        tags=["Change Events"],
+        summary="List recent change events",
+        description="Return the newest bounded change-event summaries.",
+        operation_id="list_recent_change_events",
+    )
+    async def recent_change_events(
+        limit: Annotated[
+            int,
+            Query(ge=1, le=200, description="Maximum events to return."),
+        ],
+    ) -> ChangeEventHistoryResponse:
+        events = await change_feed.list_recent_events(limit=limit)
+        return ChangeEventHistoryResponse(
+            items=[public_change_event(change_event=event) for event in events],
+            next_before_id=events[-1].id if len(events) == limit else None,
+        )
+
+    @app.get(
+        "/v1/change-events/history",
+        tags=["Change Events"],
+        summary="List older change events",
+        description="Return a newest-first page before a known event id.",
+        operation_id="list_change_event_history",
+    )
+    async def change_event_history(
+        before_id: Annotated[
+            int,
+            Query(ge=1, description="Return events older than this id."),
+        ],
+        limit: Annotated[
+            int,
+            Query(ge=1, le=200, description="Maximum events to return."),
+        ],
+    ) -> ChangeEventHistoryResponse:
+        events = await change_feed.list_events_before(
+            before_id=before_id,
+            limit=limit,
+        )
+        return ChangeEventHistoryResponse(
+            items=[public_change_event(change_event=event) for event in events],
+            next_before_id=events[-1].id if len(events) == limit else None,
+        )
+
+    @app.get(
         "/v1/change-events",
         tags=["Change Events"],
         summary="List change events",
@@ -613,7 +672,253 @@ def create_app(
             next_after_id=events[-1].id if len(events) == limit else None,
         )
 
+    @app.get(
+        "/v1/change-events/{change_event_id}/entity-changes",
+        tags=["Change Events"],
+        summary="List changed entities",
+        description="Return field-level entity changes under one family event.",
+        operation_id="list_entity_changes",
+    )
+    async def entity_changes(
+        change_event_id: Annotated[
+            int,
+            Path(ge=1, description="Stored change-event identifier."),
+        ],
+        after_id: Annotated[
+            int,
+            Query(ge=0, description="Return entity changes after this id."),
+        ],
+        limit: Annotated[
+            int,
+            Query(ge=1, le=100, description="Maximum changes to return."),
+        ],
+    ) -> EntityChangesResponse:
+        changes = await change_feed.list_entity_changes(
+            change_event_id=change_event_id,
+            after_id=after_id,
+            limit=limit,
+        )
+        return EntityChangesResponse(
+            items=[public_entity_change(entity_change=change) for change in changes],
+            next_after_id=changes[-1].id if len(changes) == limit else None,
+        )
+
+    @app.get(
+        "/v1/ingestion-status",
+        tags=["Change Events"],
+        summary="Inspect automatic ingestion freshness",
+        operation_id="get_ingestion_status",
+    )
+    async def ingestion_status() -> IngestionStatusResponse:
+        now = datetime.now(tz=UTC)
+        season = await reference_queries.get_current_season()
+        if season is None:
+            return empty_ingestion_status(
+                now=now,
+                reference_poll_seconds=reference_poll_seconds,
+                idle_poll_seconds=idle_poll_seconds,
+            )
+        statuses = await change_feed.list_source_statuses(season_id=season.id)
+        fixtures = await read_all_status_fixtures(
+            reference_queries=reference_queries,
+            season_id=season.id,
+        )
+        return build_ingestion_status(
+            season_id=season.id,
+            fixtures=fixtures,
+            statuses=statuses,
+            now=now,
+            reference_poll_seconds=reference_poll_seconds,
+            live_poll_seconds=live_poll_seconds,
+            idle_poll_seconds=idle_poll_seconds,
+        )
+
     return app
+
+
+async def read_all_status_fixtures(
+    *,
+    reference_queries: ReferenceQueries,
+    season_id: str,
+) -> list[Fixture]:
+    """Read all fixtures through the existing bounded query port."""
+    fixtures: list[Fixture] = []
+    after_id = 0
+    while True:
+        page = await reference_queries.list_fixtures(
+            season_id=season_id,
+            event_id=None,
+            after_id=after_id,
+            limit=200,
+        )
+        fixtures.extend(page)
+        if len(page) < 200:
+            return fixtures
+        next_id = page[-1].id
+        if next_id <= after_id:
+            raise RuntimeError("Fixture status pagination did not advance.")
+        after_id = next_id
+
+
+def build_ingestion_status(
+    *,
+    season_id: str,
+    fixtures: list[Fixture],
+    statuses: list[IngestionSourceStatus],
+    now: datetime,
+    reference_poll_seconds: int,
+    live_poll_seconds: int,
+    idle_poll_seconds: int,
+) -> IngestionStatusResponse:
+    """Derive clear reference/live freshness from stored successful checks."""
+    reference_sources = select_statuses(
+        statuses=statuses,
+        keys={IngestionSourceKey.BOOTSTRAP, IngestionSourceKey.FIXTURES},
+        event_id=None,
+    )
+    reference_last_checked = oldest_checked_at(statuses=reference_sources)
+    reference_stale_after = reference_poll_seconds * 2
+    reference_state: str = "initializing"
+    if len(reference_sources) == 2 and reference_last_checked is not None:
+        reference_state = (
+            "stale"
+            if (now - reference_last_checked).total_seconds()
+            > reference_stale_after
+            else "healthy"
+        )
+
+    active_ends: list[datetime] = []
+    next_starts: list[datetime] = []
+    active_event_ids: set[int] = set()
+    for fixture in fixtures:
+        if fixture.event is None or fixture.kickoff_time is None:
+            continue
+        start = fixture.kickoff_time - WINDOW_BEFORE_KICKOFF
+        end = fixture.kickoff_time + WINDOW_AFTER_KICKOFF
+        if start <= now < end:
+            active_ends.append(end)
+            active_event_ids.add(fixture.event)
+        elif start > now:
+            next_starts.append(start)
+    live_sources = [
+        status
+        for status in statuses
+        if status.source_key
+        in {
+            IngestionSourceKey.CURRENT_FIXTURES,
+            IngestionSourceKey.EVENT_STATUS,
+            IngestionSourceKey.EVENT_LIVE,
+        }
+        and (not active_event_ids or status.event_id in active_event_ids)
+    ]
+    live_last_checked = oldest_checked_at(statuses=live_sources)
+    live_stale_after = (
+        live_poll_seconds if active_ends else idle_poll_seconds
+    ) * 2
+    live_state: str = "idle"
+    if active_ends:
+        required_keys = {status.source_key for status in live_sources}
+        if required_keys != {
+            IngestionSourceKey.CURRENT_FIXTURES,
+            IngestionSourceKey.EVENT_STATUS,
+            IngestionSourceKey.EVENT_LIVE,
+        }:
+            live_state = "initializing"
+        elif live_last_checked is None or (
+            now - live_last_checked
+        ).total_seconds() > live_stale_after:
+            live_state = "stale"
+        else:
+            live_state = "polling"
+
+    return IngestionStatusResponse(
+        season_id=season_id,
+        checked_at=now,
+        reference=PipelineStatusResponse(
+            state=reference_state,
+            expected_interval_seconds=reference_poll_seconds,
+            stale_after_seconds=reference_stale_after,
+            last_checked_at=reference_last_checked,
+            last_changed_at=newest_changed_at(statuses=reference_sources),
+            current_window_end=None,
+            next_window_start=None,
+        ),
+        live=PipelineStatusResponse(
+            state=live_state,
+            expected_interval_seconds=(
+                live_poll_seconds if active_ends else idle_poll_seconds
+            ),
+            stale_after_seconds=live_stale_after,
+            last_checked_at=live_last_checked,
+            last_changed_at=newest_changed_at(statuses=live_sources),
+            current_window_end=max(active_ends) if active_ends else None,
+            next_window_start=min(next_starts) if next_starts else None,
+        ),
+    )
+
+
+def empty_ingestion_status(
+    *,
+    now: datetime,
+    reference_poll_seconds: int,
+    idle_poll_seconds: int,
+) -> IngestionStatusResponse:
+    """Return explicit initializing state before the first reference snapshot."""
+    return IngestionStatusResponse(
+        season_id=None,
+        checked_at=now,
+        reference=PipelineStatusResponse(
+            state="initializing",
+            expected_interval_seconds=reference_poll_seconds,
+            stale_after_seconds=reference_poll_seconds * 2,
+            last_checked_at=None,
+            last_changed_at=None,
+            current_window_end=None,
+            next_window_start=None,
+        ),
+        live=PipelineStatusResponse(
+            state="initializing",
+            expected_interval_seconds=idle_poll_seconds,
+            stale_after_seconds=idle_poll_seconds * 2,
+            last_checked_at=None,
+            last_changed_at=None,
+            current_window_end=None,
+            next_window_start=None,
+        ),
+    )
+
+
+def select_statuses(
+    *,
+    statuses: list[IngestionSourceStatus],
+    keys: set[IngestionSourceKey],
+    event_id: int | None,
+) -> list[IngestionSourceStatus]:
+    return [
+        status
+        for status in statuses
+        if status.source_key in keys and status.event_id == event_id
+    ]
+
+
+def oldest_checked_at(
+    *,
+    statuses: list[IngestionSourceStatus],
+) -> datetime | None:
+    values = [status.checked_at for status in statuses]
+    return min(values) if values else None
+
+
+def newest_changed_at(
+    *,
+    statuses: list[IngestionSourceStatus],
+) -> datetime | None:
+    values = [
+        status.last_changed_at
+        for status in statuses
+        if status.last_changed_at is not None
+    ]
+    return max(values) if values else None
 
 
 def raise_not_ingested(*, entity: str) -> NoReturn:

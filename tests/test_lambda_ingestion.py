@@ -1,5 +1,6 @@
 import importlib
 import io
+import logging
 import sys
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -16,7 +17,7 @@ from fpl_data_relay.application.bundles import (
 )
 from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import IngestionService
-from fpl_data_relay.application.jobs import LiveJob, ReferenceJob
+from fpl_data_relay.application.jobs import LiveJob, MatchWindow, ReferenceJob
 from fpl_data_relay.domain.types import JsonValue
 from tests.conftest import FakeClient, InMemoryStore, bootstrap_payload, fixture_payload
 
@@ -43,6 +44,7 @@ def lambda_module(
         "FETCH_QUEUE_ARN": "arn:aws:sqs:eu-west-2:1:fetch",
         "LIVE_SCHEDULE_GROUP_NAME": "live",
         "SCHEDULE_TARGET_ROLE_ARN": "arn:aws:iam::1:role/scheduler",
+        "SCHEDULE_DEAD_LETTER_QUEUE_ARN": "arn:aws:sqs:eu-west-2:1:schedule-dlq",
         "PAYLOAD_BUCKET": "payload-bucket",
         "PAYLOAD_PREFIX": "payloads",
     }
@@ -57,6 +59,28 @@ def lambda_module(
     sys.modules.pop("fpl_data_relay.lambda_ingestion", None)
     module = importlib.import_module("fpl_data_relay.lambda_ingestion")
     return module
+
+
+def test_live_schedule_parameters_include_retry_and_dead_letter_policy(
+    lambda_module: Any,
+) -> None:
+    start = datetime(2026, 8, 15, 12, tzinfo=UTC)
+    parameters = lambda_module.schedule_parameters(
+        window=MatchWindow(
+            season_id="2026-27",
+            event_id=1,
+            start=start,
+            end=start + timedelta(hours=3),
+        ),
+    )
+    target = cast("dict[str, object]", parameters["Target"])
+    assert target["DeadLetterConfig"] == {
+        "Arn": "arn:aws:sqs:eu-west-2:1:schedule-dlq",
+    }
+    assert target["RetryPolicy"] == {
+        "MaximumEventAgeInSeconds": 900,
+        "MaximumRetryAttempts": 3,
+    }
 
 
 def reference_bundle() -> ReferencePayloadBundle:
@@ -138,6 +162,7 @@ async def test_lambda_loads_only_expected_verified_payload(
 async def test_lambda_persists_reference_and_reconciles_schedules(
     lambda_module: Any,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = InMemoryStore()
     bundle = reference_bundle()
@@ -150,11 +175,17 @@ async def test_lambda_persists_reference_and_reconciles_schedules(
         assert season_id == "2025-26"
         return list(store.fixtures.values())
 
-    async def reconcile_schedules(*, windows: list[object]) -> None:
+    async def reconcile_schedules(*, windows: list[object]) -> object:
         reconciled.append(windows)
+        return lambda_module.ScheduleReconciliationResult(
+            created_count=0,
+            updated_count=0,
+            deleted_count=0,
+        )
 
     monkeypatch.setattr(lambda_module, "read_all_fixtures", read_all_fixtures)
     monkeypatch.setattr(lambda_module, "reconcile_schedules", reconcile_schedules)
+    caplog.set_level(logging.INFO, logger=lambda_module.__name__)
     result = await lambda_module.process_collected_payload(
         message=message,
         now=datetime(2025, 8, 1, tzinfo=UTC),
@@ -162,6 +193,13 @@ async def test_lambda_persists_reference_and_reconciles_schedules(
     assert result == {"status": "reference_ingested", "job_kind": "reference"}
     assert await store.get_current_season() is not None
     assert reconciled == [[]]
+    completed = next(
+        record for record in caplog.records if record.message == "ingestion_completed"
+    )
+    assert completed.__dict__["source"] == "reference"
+    assert completed.__dict__["sources"] == ["bootstrap-static", "fixtures"]
+    assert completed.__dict__["changed_entity_counts"] == {}
+    assert completed.__dict__["schedules_created"] == 0
 
 
 @pytest.mark.asyncio

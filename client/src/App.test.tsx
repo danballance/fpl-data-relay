@@ -10,6 +10,8 @@ import { createAppQueryClient } from "./app/queryClient";
 import {
   changeEvent,
   element,
+  entityChange,
+  ingestionStatus,
   makeFakeRelayApi,
 } from "./test/fakeRelayApi";
 
@@ -36,7 +38,7 @@ describe("relay explorer application", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Event")).toHaveValue("1"),
     );
-    expect(screen.getByText("Version 4")).toBeInTheDocument();
+    expect(screen.getByText("Version 2")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
     await userEvent.selectOptions(screen.getByLabelText("Event"), "");
@@ -73,7 +75,7 @@ describe("relay explorer application", () => {
       "Live players",
       "Ada Striker",
     ],
-    ["/activity?season=2025-26&event=1", "Activity", "elements.updated"],
+    ["/activity?season=2025-26&event=1", "Activity", "elements"],
   ])("renders the curated %s route", async (path, heading, tableText) => {
     renderApplication(path);
     expect(
@@ -345,7 +347,7 @@ describe("relay explorer application", () => {
 
   it("shows stored activity with polling status", async () => {
     const api = makeFakeRelayApi({
-      listChangeEvents: async () => ({
+      listRecentChangeEvents: async () => ({
         items: [
           {
             ...changeEvent,
@@ -354,32 +356,114 @@ describe("relay explorer application", () => {
             event_name: "fixtures.updated",
           },
         ],
-        next_after_id: null,
+        next_before_id: null,
       }),
     });
     renderApplication("/activity?season=2025-26&event=1", api);
-    expect(await screen.findByText("fixtures.updated")).toBeInTheDocument();
+    expect(
+      await within(await screen.findByRole("table")).findByText("fixtures"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Polling")).toBeInTheDocument();
   });
 
   it("shows an activity polling error and retries from the cursor", async () => {
-    const listChangeEvents = vi
-      .fn<RelayApi["listChangeEvents"]>()
+    const listRecentChangeEvents = vi
+      .fn<RelayApi["listRecentChangeEvents"]>()
       .mockRejectedValueOnce(new Error("poll failed"))
       .mockResolvedValue({
         items: [changeEvent],
-        next_after_id: null,
+        next_before_id: null,
       });
     renderApplication(
       "/activity?season=2025-26&event=1",
-      makeFakeRelayApi({ listChangeEvents }),
+      makeFakeRelayApi({ listRecentChangeEvents }),
     );
     expect((await screen.findAllByText("poll failed")).length).toBeGreaterThan(0);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Retry from 0" }),
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await within(await screen.findByRole("table")).findByText("elements"),
+    ).toBeInTheDocument();
+    expect(listRecentChangeEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads older activity, filters it, and renders entity before/after values", async () => {
+    const older = {
+      ...changeEvent,
+      id: 1,
+      entity_family: "fixtures" as const,
+      event_name: "fixtures.updated",
+      source_key: "fixtures" as const,
+    };
+    const listChangeEventHistory = vi
+      .fn<RelayApi["listChangeEventHistory"]>()
+      .mockResolvedValue({ items: [older], next_before_id: null });
+    const api = makeFakeRelayApi({
+      listRecentChangeEvents: async () => ({
+        items: [{ ...changeEvent, id: 2 }],
+        next_before_id: 2,
+      }),
+      listChangeEventHistory,
+      listEntityChanges: async () => ({
+        items: [entityChange],
+        next_after_id: null,
+      }),
+    });
+    renderApplication("/activity?season=2025-26&event=1", api);
+
+    expect(
+      await within(await screen.findByRole("table")).findByText("elements"),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Load older" }));
+    expect(
+      await within(screen.getByRole("table")).findAllByText("fixtures"),
+    ).toHaveLength(2);
+    expect(listChangeEventHistory).toHaveBeenCalledWith(
+      2,
+      100,
+      expect.any(AbortSignal),
     );
-    expect(await screen.findByText("elements.updated")).toBeInTheDocument();
-    expect(listChangeEvents).toHaveBeenCalledTimes(2);
+
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Family" }),
+      "elements",
+    );
+    expect(
+      within(screen.getByRole("table")).queryByText("fixtures"),
+    ).not.toBeInTheDocument();
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Operation" }),
+      "deleted",
+    );
+    expect(
+      screen.getByText("No change events match these filters."),
+    ).toBeInTheDocument();
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Operation" }),
+      "updated",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Inspect" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Player price")).toBeInTheDocument();
+    expect(within(dialog).getByText("£7.5m")).toBeInTheDocument();
+    expect(within(dialog).getByText("£7.6m")).toBeInTheDocument();
+    expect(within(dialog).getByText("Not present")).toBeInTheDocument();
+    expect(within(dialog).getByText("null")).toBeInTheDocument();
+    expect(within(dialog).getByText("medical update")).toBeInTheDocument();
+  });
+
+  it("surfaces stale ingestion independently from activity polling", async () => {
+    const api = makeFakeRelayApi({
+      getIngestionStatus: async () => ({
+        ...ingestionStatus,
+        reference: { ...ingestionStatus.reference, state: "stale" },
+      }),
+    });
+    renderApplication("/activity?season=2025-26&event=1", api);
+    const freshness = await screen.findByRole("region", {
+      name: "Ingestion freshness",
+    });
+    expect(within(freshness).getAllByText("stale")).toHaveLength(2);
+    expect(screen.getByText("Polling")).toBeInTheDocument();
   });
 
   it("pauses activity polling while the document is hidden", async () => {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 
 import { JsonView } from "./JsonView";
 import { StatusPanel } from "./StatusPanel";
@@ -10,12 +11,14 @@ export function RecordInspector({
   loading,
   error,
   onClose,
+  renderFields,
 }: {
   title: string;
   record: unknown;
   loading: boolean;
   error: unknown;
   onClose: () => void;
+  renderFields?: (record: unknown) => ReactNode;
 }) {
   const [mode, setMode] = useState<"fields" | "json">("fields");
 
@@ -66,7 +69,11 @@ export function RecordInspector({
           {loading ? <StatusPanel state="loading" /> : null}
           {error === null ? null : <StatusPanel state="error" error={error} />}
           {!loading && error === null && mode === "fields" ? (
-            <StructuredValue value={record} />
+            renderFields === undefined ? (
+              <StructuredValue value={record} />
+            ) : (
+              renderFields(record)
+            )
           ) : null}
           {!loading && error === null && mode === "json" ? (
             <JsonView value={record} />

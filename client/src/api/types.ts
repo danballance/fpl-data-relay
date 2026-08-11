@@ -16,11 +16,18 @@ export type EventStatus = components["schemas"]["EventStatusResponse"];
 export type EventStatusDay = components["schemas"]["EventStatusDay"];
 export type LiveElement = components["schemas"]["LiveElement"];
 export type ChangeEvent = components["schemas"]["ChangeEventResponse"];
+export type EntityChange = components["schemas"]["EntityChangeResponse"];
+export type IngestionStatus = components["schemas"]["IngestionStatusResponse"];
 export interface CursorPage<Item> {
   items: Item[];
   next_after_id: number | null;
 }
 export type ChangeEvents = CursorPage<ChangeEvent>;
+export interface ChangeEventHistory {
+  items: ChangeEvent[];
+  next_before_id: number | null;
+}
+export type EntityChanges = CursorPage<EntityChange>;
 
 export type RelayRecord =
   | Season
@@ -32,4 +39,5 @@ export type RelayRecord =
   | Fixture
   | EventStatusDay
   | LiveElement
-  | ChangeEvent;
+  | ChangeEvent
+  | EntityChange;

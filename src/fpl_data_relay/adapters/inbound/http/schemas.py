@@ -7,9 +7,14 @@ from pydantic import BaseModel, ConfigDict
 
 from fpl_data_relay.domain.changes import (
     ChangeEvent,
+    ChangeKind,
+    ChangeValue,
+    EntityChange,
     EntityFamily,
+    FieldChange,
     IngestionSourceKey,
 )
+from fpl_data_relay.domain.types import JsonValue
 
 
 class ApiResponse(BaseModel):
@@ -50,25 +55,89 @@ class ServiceErrorResponse(ErrorResponse):
 
 
 class ChangeEventResponse(ApiResponse):
-    """Public metadata describing one changed entity family."""
+    """Public summary of accurate changes within one entity family."""
 
     id: int
-    season_id: str | None
+    season_id: str
     entity_family: EntityFamily
     event_name: str
-    source_key: IngestionSourceKey | None
-    resource_key: IngestionSourceKey | None
-    event_id: int | None
+    source_key: IngestionSourceKey
+    source_event_id: int | None
     payload_hash: str
+    created_count: int
+    updated_count: int
+    deleted_count: int
     fetched_at: datetime
     created_at: datetime
 
 
 class ChangeEventsResponse(ApiResponse):
-    """Page of change events after a caller-supplied event identifier."""
+    """Forward cursor page of change-event summaries."""
 
     items: list[ChangeEventResponse]
     next_after_id: int | None
+
+
+class ChangeEventHistoryResponse(ApiResponse):
+    """Newest-first page of change-event summaries."""
+
+    items: list[ChangeEventResponse]
+    next_before_id: int | None
+
+
+class ChangeValueResponse(ApiResponse):
+    """Public field value that distinguishes absence from JSON null."""
+
+    present: bool
+    value: JsonValue
+
+
+class FieldChangeResponse(ApiResponse):
+    """Public before and after values for one top-level field."""
+
+    field: str
+    before: ChangeValueResponse
+    after: ChangeValueResponse
+
+
+class EntityChangeResponse(ApiResponse):
+    """Public field-level changes for one logical entity."""
+
+    id: int
+    change_event_id: int
+    entity_key: str
+    entity_label: str
+    kind: ChangeKind
+    fields: list[FieldChangeResponse]
+    created_at: datetime
+
+
+class EntityChangesResponse(ApiResponse):
+    """Cursor page of entity changes under one family event."""
+
+    items: list[EntityChangeResponse]
+    next_after_id: int | None
+
+
+class PipelineStatusResponse(ApiResponse):
+    """Freshness status for one automatic ingestion stream."""
+
+    state: Literal["initializing", "healthy", "stale", "idle", "polling"]
+    expected_interval_seconds: int
+    stale_after_seconds: int
+    last_checked_at: datetime | None
+    last_changed_at: datetime | None
+    current_window_end: datetime | None
+    next_window_start: datetime | None
+
+
+class IngestionStatusResponse(ApiResponse):
+    """Reference and live automatic-ingestion freshness."""
+
+    season_id: str | None
+    checked_at: datetime
+    reference: PipelineStatusResponse
+    live: PipelineStatusResponse
 
 
 class CursorPage[ItemT](ApiResponse):
@@ -80,15 +149,31 @@ class CursorPage[ItemT](ApiResponse):
 
 def public_change_event(*, change_event: ChangeEvent) -> ChangeEventResponse:
     """Convert an internal change event to its explicit public contract."""
-    return ChangeEventResponse(
-        id=change_event.id,
-        season_id=change_event.season_id,
-        entity_family=change_event.entity_family,
-        event_name=change_event.event_name,
-        source_key=change_event.source_key,
-        resource_key=change_event.resource_key,
-        event_id=change_event.event_id,
-        payload_hash=change_event.payload_hash,
-        fetched_at=change_event.fetched_at,
-        created_at=change_event.created_at,
+    return ChangeEventResponse.model_validate(change_event, from_attributes=True)
+
+
+def public_entity_change(*, entity_change: EntityChange) -> EntityChangeResponse:
+    """Convert an internal entity change to its explicit public contract."""
+    return EntityChangeResponse(
+        id=entity_change.id,
+        change_event_id=entity_change.change_event_id,
+        entity_key=entity_change.entity_key,
+        entity_label=entity_change.entity_label,
+        kind=entity_change.kind,
+        fields=[public_field_change(field=field) for field in entity_change.fields],
+        created_at=entity_change.created_at,
     )
+
+
+def public_field_change(*, field: FieldChange) -> FieldChangeResponse:
+    """Convert one internal field diff to its explicit public contract."""
+    return FieldChangeResponse(
+        field=field.field,
+        before=public_change_value(value=field.before),
+        after=public_change_value(value=field.after),
+    )
+
+
+def public_change_value(*, value: ChangeValue) -> ChangeValueResponse:
+    """Convert one presence-aware field value."""
+    return ChangeValueResponse(present=value.present, value=value.value)

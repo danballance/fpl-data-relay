@@ -7,7 +7,10 @@ from typing import Protocol, cast
 from pydantic import BaseModel, ConfigDict
 
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
-from fpl_data_relay.adapters.outbound.postgres.schema import SCHEMA_SQL
+from fpl_data_relay.adapters.outbound.postgres.schema import (
+    ACCURATE_CHANGES_SQL,
+    SCHEMA_SQL,
+)
 from fpl_data_relay.application.ports.administration import SchemaStatus
 
 MIGRATION_TABLE_SQL = """
@@ -60,6 +63,11 @@ class RowProtocol(Protocol):
 
 MIGRATIONS = (
     Migration(version=1, name="initial_schema", sql=SCHEMA_SQL.strip()),
+    Migration(
+        version=2,
+        name="accurate_entity_changes",
+        sql=ACCURATE_CHANGES_SQL.strip(),
+    ),
 )
 
 

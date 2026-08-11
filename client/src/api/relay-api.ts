@@ -4,6 +4,7 @@ import type { paths } from "./generated";
 import { RelayApiError } from "./errors";
 import type {
   ChangeEvents,
+  ChangeEventHistory,
   Element,
   ElementType,
   Event,
@@ -11,6 +12,8 @@ import type {
   Fixture,
   Health,
   LiveElement,
+  EntityChanges,
+  IngestionStatus,
   Phase,
   Readiness,
   Season,
@@ -72,6 +75,22 @@ export interface RelayApi {
     limit: number,
     signal: AbortSignal,
   ): Promise<ChangeEvents>;
+  listRecentChangeEvents(
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<ChangeEventHistory>;
+  listChangeEventHistory(
+    beforeId: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<ChangeEventHistory>;
+  listEntityChanges(
+    changeEventId: number,
+    afterId: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<EntityChanges>;
+  getIngestionStatus(signal: AbortSignal): Promise<IngestionStatus>;
 }
 
 interface ApiResult<T> {
@@ -387,6 +406,38 @@ export function createRelayApi({
       requestJson({
         baseUrl,
         path: `/v1/change-events?after_id=${afterId}&limit=${limit}`,
+        signal,
+        fetchImplementation,
+      }),
+    listRecentChangeEvents: (limit, signal) =>
+      requestJson({
+        baseUrl,
+        path: `/v1/change-events/recent?limit=${limit}`,
+        signal,
+        fetchImplementation,
+      }),
+    listChangeEventHistory: (beforeId, limit, signal) =>
+      requestJson({
+        baseUrl,
+        path:
+          `/v1/change-events/history?before_id=${beforeId}` +
+          `&limit=${limit}`,
+        signal,
+        fetchImplementation,
+      }),
+    listEntityChanges: (changeEventId, afterId, limit, signal) =>
+      requestJson({
+        baseUrl,
+        path:
+          `/v1/change-events/${changeEventId}/entity-changes` +
+          `?after_id=${afterId}&limit=${limit}`,
+        signal,
+        fetchImplementation,
+      }),
+    getIngestionStatus: (signal) =>
+      requestJson({
+        baseUrl,
+        path: "/v1/ingestion-status",
         signal,
         fetchImplementation,
       }),

@@ -8,7 +8,7 @@ from fpl_data_relay.application.ingestion.service import (
     IngestionResult,
     IngestionService,
 )
-from fpl_data_relay.domain.changes import IngestionSourceKey
+from fpl_data_relay.domain.changes import EntityFamily, IngestionSourceKey
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.reference import BootstrapStatic
 from fpl_data_relay.domain.rules import (
@@ -61,7 +61,7 @@ async def test_ingest_all_once_writes_normalised_entity_events() -> None:
     store = InMemoryStore()
     service = IngestionService(client=FakeClient(), repository=store)
     result = await service.ingest_all_once()
-    assert result.changed_count == 10
+    assert result.changed_count == 1
     assert result.unchanged_count == 0
     assert result.season_id == "2025-26"
     assert result.current_event_id == 1
@@ -77,8 +77,8 @@ async def test_reference_and_live_ingestion_can_run_separately() -> None:
     service = IngestionService(client=FakeClient(), repository=store)
     reference = await service.ingest_reference_once()
     live = await service.ingest_live_once(target_event_id=None, fixture_id=None)
-    assert reference.changed_count == 7
-    assert live.changed_count == 3
+    assert reference.changed_count == 0
+    assert live.changed_count == 1
     assert reference.season_id == "2025-26"
     assert live.season_id == "2025-26"
     assert IngestionSourceKey.EVENT_LIVE in {
@@ -95,7 +95,7 @@ async def test_reference_ingestion_succeeds_before_first_event() -> None:
 
     result = await service.ingest_reference_once()
 
-    assert result.changed_count == 7
+    assert result.changed_count == 0
     assert result.season_id == "2025-26"
     assert result.current_event_id is None
 
@@ -166,10 +166,10 @@ async def test_same_payload_hash_does_not_duplicate_change_events() -> None:
     service = IngestionService(client=FakeClient(), repository=store)
     first = await service.ingest_all_once()
     second = await service.ingest_all_once()
-    assert first.changed_count == 10
+    assert first.changed_count == 1
     assert second.changed_count == 0
     assert second.unchanged_count == 5
-    assert len(store.events) == 10
+    assert len(store.events) == 1
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,9 @@ async def test_changed_payload_creates_new_change_event() -> None:
     client.bootstrap_current_id = 2
     result = await service.ingest_all_once()
     assert result.changed_count >= 2
-    assert len(store.events) > 10
+    assert len(store.events) > 1
+    assert result.entity_change_counts[EntityFamily.EVENTS].updated == 2
+    assert result.entity_change_counts[EntityFamily.FIXTURES].created == 1
 
 
 @pytest.mark.asyncio
@@ -195,7 +197,9 @@ async def test_collected_payload_preserves_fetch_time_and_checks_season() -> Non
         fixtures=await client.fetch_fixtures(),
         fetched_at=fetched_at,
     )
-    assert {event.fetched_at for event in store.events} == {fetched_at}
+    assert {
+        status.fetched_at for status in store.source_statuses.values()
+    } == {fetched_at}
     with pytest.raises(RuntimeError, match="does not match current season"):
         await service.ingest_live_payload(
             season_id="2099-00",

@@ -15,6 +15,7 @@ def test_application_template_uses_final_collector_topology() -> None:
         "FetchDeadLetterQueue:",
         "ResultQueue:",
         "ResultDeadLetterQueue:",
+        "ScheduleDeadLetterQueue:",
         "PayloadBucket:",
         "CollectorUserPolicy:",
     ):
@@ -40,6 +41,8 @@ def test_application_template_uses_final_collector_topology() -> None:
     ].split("Policies:", maxsplit=1)[0]
     assert "FPL_API_BASE_URL" not in ingestion_environment
     assert "FPL_CLIENT_USER_AGENT" not in ingestion_environment
+    assert "LogFormat: JSON" in ingestion_environment
+    assert "ApplicationLogLevel: INFO" in ingestion_environment
 
 
 def test_collector_user_policy_is_exact_and_resource_scoped() -> None:
@@ -79,6 +82,11 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
         "FetchQueueAgeAlarm:",
         "ResultQueueAgeAlarm:",
         "IngestionErrorAlarm:",
+        "ScheduleDeadLetterAlarm:",
+        "ReferenceScheduleMissedAlarm:",
+        "ReferenceScheduleErrorAlarm:",
+        "LiveScheduleErrorAlarm:",
+        "ScheduleDroppedAlarm:",
     ):
         assert alarm in template
 
@@ -87,6 +95,7 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
         "FetchDeadLetterQueueUrl:",
         "ResultQueueUrl:",
         "ResultDeadLetterQueueUrl:",
+        "ScheduleDeadLetterQueueUrl:",
         "PayloadBucketName:",
         "PayloadPrefix:",
     ):
@@ -96,6 +105,11 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
     assert "SqsManagedSseEnabled: true" in template
     assert "BucketOwnerEnforced" in template
     assert "BlockPublicPolicy: true" in template
+    assert "ScheduleExpression: cron(0/15 * * * ? *)" in template
+    assert "MaximumEventAgeInSeconds: 900" in template
+    assert "MaximumRetryAttempts: 3" in template
+    assert "DeadLetterConfig:" in template
+    assert "MetricName: InvocationDroppedCount" in template
 
 
 def test_data_stack_has_layered_database_protection() -> None:
@@ -158,7 +172,9 @@ def test_local_compose_is_explicit_and_does_not_restart_stale_services() -> None
 
     assert "postgres:17.7-alpine" in compose
     assert "postgres-17-data:" in compose
+    assert "DATABASE_EXECUTOR: asyncpg" in compose
     assert "FPL_POSTGRES_MAINTENANCE_DATABASE_URL is required" in compose
+    assert "http://127.0.0.1:8000/readyz" in compose
     assert "restart:" not in compose
     assert 'ENV PATH="/app/.venv/bin:$PATH"' in dockerfile
     assert 'CMD ["fpl-relay", "serve"]' in dockerfile
@@ -186,17 +202,58 @@ def test_nas_compose_is_hardened_and_uses_direct_immutable_identity() -> None:
     assert "source_profile" not in aws_config
 
 
-def test_ci_validates_both_images_and_compose_files() -> None:
+def test_makefile_is_the_newcomer_and_ci_control_surface() -> None:
+    makefile = (ROOT / "Makefile").read_text()
     workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
 
-    assert "docker compose --env-file .env.example config --quiet" in workflow
-    assert "cp deploy/nas/.env.example deploy/nas/.env" in workflow
-    assert "--file deploy/nas/compose.yaml" in workflow
-    assert "--env-file deploy/nas/.env.example" in workflow
-    assert "config --quiet" in workflow
-    assert "docker build --file Dockerfile --tag fpl-relay:test ." in workflow
+    assert ".DEFAULT_GOAL := help" in makefile
+    for target in (
+        "help",
+        "doctor",
+        "install",
+        "setup",
+        "dev",
+        "up",
+        "client",
+        "logs",
+        "ps",
+        "down",
+        "db-status",
+        "db-apply",
+        "lint",
+        "test",
+        "check",
+        "infra",
+        "images",
+        "ci",
+        "deploy",
+        "deploy-status",
+    ):
+        assert re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE)
+
+    assert "test ! -e .env" in makefile
+    assert "test ! -e client/.env.local" in makefile
+    assert "cp .env.example .env" in makefile
+    assert "cp client/.env.example client/.env.local" in makefile
+    assert "mktemp -d" in makefile
+    assert "docker compose --env-file .env.example config --quiet" in makefile
+    assert "docker build --file Dockerfile --tag fpl-relay:test ." in makefile
     assert (
         "docker build --file Dockerfile.collector --tag fpl-collector:test ."
-        in workflow
+        in makefile
     )
-    assert 'find_spec("fastapi") is None' in workflow
+    assert 'find_spec("fastapi") is None' in makefile
+    assert "gh workflow run deploy-production.yaml --ref main" in makefile
+    assert "sam deploy" not in makefile
+
+    down_target = makefile.split("down: require-root-env", maxsplit=1)[1].split(
+        "db-status:",
+        maxsplit=1,
+    )[0]
+    assert "--volumes" not in down_target
+
+    assert "build-ApiFunction: build-python" in makefile
+    assert "build-IngestionFunction: build-python" in makefile
+    assert "make install" in workflow
+    assert "make ci" in workflow
+    assert "docker build" not in workflow

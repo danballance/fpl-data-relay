@@ -1,3 +1,4 @@
+import json
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime
 from typing import cast
@@ -9,6 +10,8 @@ from fpl_data_relay.domain.changes import IngestionMetadata, IngestionSourceKey
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import EventLiveResponse, EventStatusResponse
 from fpl_data_relay.domain.reference import BootstrapStatic, Season
+from fpl_data_relay.domain.rules import derive_season
+from tests.conftest import FakeClient
 
 
 class NormalisedTransaction:
@@ -43,9 +46,16 @@ class NormalisedConnection:
         self.live_explain_stats: list[dict[str, object]] = []
         self.event_status: dict[str, object] | None = None
         self.change_events: list[dict[str, object]] = []
+        self.entity_changes: list[dict[str, object]] = []
+        self.entity_snapshots: dict[
+            tuple[str, str, str],
+            dict[str, object],
+        ] = {}
         self.notifications: list[str] = []
+        self.transaction_calls = 0
 
     def transaction(self) -> AbstractAsyncContextManager[object]:
+        self.transaction_calls += 1
         return NormalisedTransaction()
 
     async def execute(self, query: str, *arguments: object) -> str:
@@ -78,7 +88,47 @@ class NormalisedConnection:
                 "payload_hash": arguments[3],
                 "fetched_at": arguments[4],
                 "checked_at": arguments[5],
+                "last_changed_at": arguments[6],
             }
+            return "INSERT 0 1"
+        if "INSERT INTO relay_entity_snapshots" in query:
+            key = (
+                cast("str", arguments[0]),
+                cast("str", arguments[1]),
+                cast("str", arguments[3]),
+            )
+            self.entity_snapshots[key] = {
+                "season_id": arguments[0],
+                "entity_family": arguments[1],
+                "source_event_id": arguments[2],
+                "entity_key": arguments[3],
+                "entity_label": arguments[4],
+                "snapshot": json.loads(cast("str", arguments[5])),
+                "row_hash": arguments[6],
+            }
+            return "INSERT 0 1"
+        if "DELETE FROM relay_entity_snapshots" in query:
+            self.entity_snapshots.pop(
+                (
+                    cast("str", arguments[0]),
+                    cast("str", arguments[1]),
+                    cast("str", arguments[2]),
+                ),
+                None,
+            )
+            return "DELETE 1"
+        if "INSERT INTO relay_entity_changes" in query:
+            self.entity_changes.append(
+                {
+                    "id": len(self.entity_changes) + 1,
+                    "change_event_id": arguments[0],
+                    "entity_key": arguments[1],
+                    "entity_label": arguments[2],
+                    "change_kind": arguments[3],
+                    "field_changes": json.loads(cast("str", arguments[4])),
+                    "created_at": datetime.now(tz=UTC),
+                },
+            )
             return "INSERT 0 1"
         if "INSERT INTO fpl_event_status (" in query:
             self.event_status = {
@@ -91,14 +141,24 @@ class NormalisedConnection:
             return "INSERT 0 1"
         if "DELETE FROM fpl_fixture_stat_entries" in query:
             season_id = arguments[0]
-            fixture_id = arguments[1]
+            target_id = arguments[1]
+            target_column = "element" if "element = $2" in query else "fixture_id"
             self.fixture_stat_entries = [
                 row
                 for row in self.fixture_stat_entries
                 if not (
-                    row["season_id"] == season_id and row["fixture_id"] == fixture_id
+                    row["season_id"] == season_id
+                    and row[target_column] == target_id
                 )
             ]
+            return "DELETE"
+        if "DELETE FROM fpl_event_status_days" in query:
+            self.tables["fpl_event_status_days"] = {
+                key: row
+                for key, row in self.tables["fpl_event_status_days"].items()
+                if row["season_id"] != arguments[0]
+                or (len(arguments) == 2 and row["event"] != arguments[1])
+            }
             return "DELETE"
         if "INSERT INTO fpl_fixture_stat_entries" in query:
             self.fixture_stat_entries.append(
@@ -116,19 +176,34 @@ class NormalisedConnection:
             return "INSERT 0 1"
         if "DELETE FROM fpl_event_live_elements" in query:
             season_id = arguments[0]
-            event_id = arguments[1]
+            target_id = arguments[1]
+            target_column = (
+                "element_id" if "element_id = $2" in query else "event_id"
+            )
             self.tables["fpl_event_live_elements"] = {
                 key: row
                 for key, row in self.tables["fpl_event_live_elements"].items()
                 if not (
-                    row["season_id"] == season_id and row["event_id"] == event_id
+                    row["season_id"] == season_id
+                    and row[target_column] == target_id
                 )
             }
             self.live_explain_stats = [
                 row
                 for row in self.live_explain_stats
                 if not (
-                    row["season_id"] == season_id and row["event_id"] == event_id
+                    row["season_id"] == season_id
+                    and row[target_column] == target_id
+                )
+            ]
+            return "DELETE"
+        if "DELETE FROM fpl_event_live_explain_stats" in query:
+            self.live_explain_stats = [
+                row
+                for row in self.live_explain_stats
+                if not (
+                    row["season_id"] == arguments[0]
+                    and row["fixture_id"] == arguments[1]
                 )
             ]
             return "DELETE"
@@ -150,6 +225,19 @@ class NormalisedConnection:
         if "INSERT INTO fpl_" in query:
             self._record_model_row(query=query, arguments=arguments)
             return "INSERT 0 1"
+        if query.strip().startswith("DELETE FROM fpl_") and "WHERE season_id" in query:
+            table = query.strip().split()[2]
+            retained: dict[object, dict[str, object]] = {}
+            for key, row in self.tables[table].items():
+                key_matches = (
+                    arguments[1] in key
+                    if isinstance(key, tuple)
+                    else key == arguments[1]
+                )
+                if row["season_id"] != arguments[0] or not key_matches:
+                    retained[key] = row
+            self.tables[table] = retained
+            return "DELETE 1"
         return "OK"
 
     async def fetchrow(
@@ -164,9 +252,12 @@ class NormalisedConnection:
                 "entity_family": arguments[1],
                 "event_name": arguments[2],
                 "source_key": arguments[3],
-                "event_id": arguments[4],
+                "source_event_id": arguments[4],
                 "payload_hash": arguments[5],
-                "fetched_at": arguments[6],
+                "created_count": arguments[6],
+                "updated_count": arguments[7],
+                "deleted_count": arguments[8],
+                "fetched_at": arguments[9],
                 "created_at": datetime.now(tz=UTC),
             }
             self.change_events.append(event)
@@ -212,6 +303,22 @@ class NormalisedConnection:
         return None
 
     async def fetch(self, query: str, *arguments: object) -> list[object]:
+        compact_query = " ".join(query.split())
+        if compact_query.startswith("SELECT id FROM fpl_"):
+            table = compact_query.split()[3]
+            return [
+                {"id": row["id"]}
+                for row in self.tables[table].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if compact_query.startswith(
+            "SELECT name FROM fpl_element_stat_definitions",
+        ):
+            return [
+                {"name": row["name"]}
+                for row in self.tables["fpl_element_stat_definitions"].values()
+                if row["season_id"] == arguments[0]
+            ]
         if "FROM fpl_seasons ORDER BY" in query:
             return list(self.tables["fpl_seasons"].values())
         if "FROM fpl_events" in query and "ORDER BY id" in query:
@@ -292,6 +399,36 @@ class NormalisedConnection:
                 if cast("int", event["id"]) > after_id
             ][:limit]
             return cast("list[object]", events)
+        if "FROM relay_entity_snapshots" in query:
+            rows = [
+                row
+                for (season_id, family, _), row in self.entity_snapshots.items()
+                if season_id == arguments[0] and family == arguments[1]
+            ]
+            if "source_event_id = $3" in query:
+                rows = [
+                    row for row in rows if row["source_event_id"] == arguments[2]
+                ]
+            return cast("list[object]", rows)
+        if "FROM relay_entity_changes" in query:
+            return cast(
+                "list[object]",
+                [
+                    change
+                    for change in self.entity_changes
+                    if change["change_event_id"] == arguments[0]
+                    and cast("int", change["id"]) > cast("int", arguments[1])
+                ][: cast("int", arguments[2])],
+            )
+        if "FROM relay_ingestion_sources" in query:
+            return cast(
+                "list[object]",
+                [
+                    source
+                    for source in self.sources.values()
+                    if source["season_id"] == arguments[0]
+                ],
+            )
         return []
 
     async def fetchval(self, query: str, *arguments: object) -> object:
@@ -368,14 +505,71 @@ def metadata(
     season_id: str = "2025-26",
     source_key: IngestionSourceKey,
     event_id: int | None,
+    hash_seed: str | None = None,
 ) -> IngestionMetadata:
+    seed = source_key.value if hash_seed is None else hash_seed
     return IngestionMetadata(
         season_id=season_id,
         source_key=source_key,
         event_id=event_id,
-        payload_hash=source_key.value.ljust(64, "a")[:64],
+        payload_hash=seed.ljust(64, "a")[:64],
         fetched_at=datetime(2026, 6, 20, tzinfo=UTC),
         checked_at=datetime(2026, 6, 20, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_postgres_store_persists_reference_and_live_bundles_atomically() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    client = FakeClient()
+    bootstrap = await client.fetch_bootstrap_static()
+    season = derive_season(bootstrap=bootstrap)
+    reference_outcomes = await store.upsert_reference_snapshot(
+        season=season,
+        bootstrap=bootstrap,
+        fixtures=await client.fetch_fixtures(),
+        bootstrap_metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+        ),
+        fixtures_metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+        ),
+    )
+
+    assert len(reference_outcomes) == 2
+    assert pool.connection.transaction_calls == 1
+    live_outcomes = await store.upsert_live_snapshot(
+        event_id=1,
+        status=await client.fetch_event_status(),
+        fixtures=await client.fetch_current_fixtures(event_id=1),
+        live=await client.fetch_event_live(event_id=1),
+        status_metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+        ),
+        fixtures_metadata=metadata(
+            source_key=IngestionSourceKey.CURRENT_FIXTURES,
+            event_id=1,
+        ),
+        live_metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_LIVE,
+            event_id=1,
+        ),
+    )
+
+    assert len(live_outcomes) == 3
+    assert pool.connection.transaction_calls == 2
+    assert await store.get_event_status(season_id=season.id) is not None
+    assert (
+        await store.get_live_element(
+            season_id=season.id,
+            event_id=1,
+            element_id=1,
+        )
+        is not None
     )
 
 
@@ -470,6 +664,7 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
         season=season,
         bootstrap=bootstrap,
         metadata=metadata(source_key=IngestionSourceKey.BOOTSTRAP, event_id=None),
+        delete_missing=True,
     )
     fixture_outcome = await store.upsert_fixtures(
         fixtures=[fixture],
@@ -562,9 +757,144 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
             limit=100,
         ),
     ) == 1
-    assert len(await store.list_change_events(after_id=0, limit=20)) == 9
+    assert await store.list_change_events(after_id=0, limit=20) == []
+    fixture_deletion = await store.upsert_fixtures(
+        fixtures=[],
+        metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+            hash_seed="fixtures-removed",
+        ),
+    )
+    assert fixture_deletion.change_events[0].deleted_count == 1
+    assert await store.get_fixture(season_id="2025-26", fixture_id=1) is None
+    assert pool.connection.live_explain_stats == []
     await store.close()
     assert pool.closed is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    season = Season(
+        id="2025-26",
+        start_year=2025,
+        end_year=2026,
+        first_deadline_time=datetime(2025, 8, 15, 17, 30, tzinfo=UTC),
+        last_deadline_time=datetime(2026, 5, 24, 13, 30, tzinfo=UTC),
+        is_current=True,
+    )
+    initial = BootstrapStatic.model_validate(
+        {
+            "events": [{"id": 1, "name": "Gameweek 1", "is_current": True}],
+            "teams": [
+                {"id": 1, "name": "Team", "short_name": "TST"},
+            ],
+            "element_types": [{"id": 1, "singular_name": "Goalkeeper"}],
+            "elements": [
+                {
+                    "id": 1,
+                    "first_name": "First",
+                    "second_name": "Second",
+                    "web_name": "Player",
+                    "team": 1,
+                    "element_type": 1,
+                    "now_cost": 50,
+                    "news": "Injured",
+                },
+            ],
+        },
+    )
+    baseline = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=initial,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+            hash_seed="baseline",
+        ),
+        delete_missing=True,
+    )
+    changed = initial.model_copy(
+        update={
+            "elements": [
+                initial.elements[0].model_copy(
+                    update={"now_cost": 51, "news": None},
+                ),
+            ],
+        },
+    )
+    update = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=changed,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+            hash_seed="changed",
+        ),
+        delete_missing=True,
+    )
+
+    assert baseline.change_events == []
+    assert len(update.change_events) == 1
+    event = update.change_events[0]
+    assert event.entity_family.value == "elements"
+    assert event.updated_count == 1
+    details = await store.list_entity_changes(
+        change_event_id=event.id,
+        after_id=0,
+        limit=100,
+    )
+    assert len(details) == 1
+    assert [field.field for field in details[0].fields] == ["news", "now_cost"]
+    assert details[0].fields[0].after.value is None
+    stored = await store.get_element(season_id=season.id, element_id=1)
+    assert stored is not None
+    assert stored.news is None
+    assert stored.now_cost == 51
+
+    pool.connection.fixture_stat_entries.append(
+        {
+            "season_id": season.id,
+            "fixture_id": 10,
+            "identifier": "goals_scored",
+            "side": "h",
+            "ordinal": 0,
+            "element": 1,
+            "value_text": "1",
+            "value_type": "int",
+        },
+    )
+    pool.connection.tables["fpl_event_live_elements"][(season.id, 1, 1)] = {
+        "season_id": season.id,
+        "event_id": 1,
+        "element_id": 1,
+    }
+    pool.connection.live_explain_stats.append(
+        {
+            "season_id": season.id,
+            "event_id": 1,
+            "element_id": 1,
+            "fixture_id": 10,
+        },
+    )
+    removed = changed.model_copy(update={"elements": []})
+    deletion = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=removed,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+            hash_seed="removed",
+        ),
+        delete_missing=True,
+    )
+    assert deletion.change_events[0].deleted_count == 1
+    assert await store.get_element(season_id=season.id, element_id=1) is None
+    assert pool.connection.fixture_stat_entries == []
+    assert pool.connection.tables["fpl_event_live_elements"] == {}
+    assert pool.connection.live_explain_stats == []
 
 
 @pytest.mark.asyncio
@@ -627,6 +957,7 @@ async def test_postgres_store_keeps_repeated_upstream_ids_per_season() -> None:
                 source_key=IngestionSourceKey.BOOTSTRAP,
                 event_id=None,
             ),
+            delete_missing=True,
         )
         assert outcome.changed is True
 

@@ -6,7 +6,7 @@ from fpl_data_relay.application.ports.administration import (
     SchemaStatus,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class DatabaseService:

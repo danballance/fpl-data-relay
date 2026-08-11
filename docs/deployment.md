@@ -31,6 +31,17 @@ image, deploys and verifies the data stack, applies database migrations,
 deploys the application stack, publishes the frontend, and smoke-tests the
 public API.
 
+From an authenticated GitHub CLI session, dispatch the guarded workflow and
+inspect its status with:
+
+```fish
+make deploy
+make deploy-status
+```
+
+These targets deploy the remote `main` commit; they do not use local AWS
+credentials or deploy uncommitted changes.
+
 The workflow passes these required application parameters:
 
 - `DataStackName=fpl-relay-data`
@@ -79,6 +90,7 @@ The collector uses:
 - `FetchDeadLetterQueueUrl`
 - `ResultQueueUrl`
 - `ResultDeadLetterQueueUrl`
+- `ScheduleDeadLetterQueueUrl`
 - `PayloadBucketName`
 - `PayloadPrefix`
 
@@ -160,7 +172,8 @@ After each application deployment:
 
 1. Confirm the SNS operational-alert subscription after a fresh stack creation.
 2. Check `/api/healthz`, `/api/readyz`, and
-   `/api/v1/change-events?after_id=0&limit=100` through `CloudFrontUrl`.
+   `/api/v1/change-events/recent?limit=100` and
+   `/api/v1/ingestion-status` through `CloudFrontUrl`.
 3. Confirm the NAS collector is healthy.
 4. Send a strict reference job:
 
@@ -174,6 +187,13 @@ uv run aws sqs send-message \
 The fetch queue should be consumed, an object should appear under
 `payloads/v1/reference/`, the result queue should drain through the ingestion
 Lambda, and the API should expose persisted reference data.
+
+The reference Scheduler sends a collection job every 15 minutes. Scheduler
+targets retry for up to 15 minutes with three attempts and route exhausted
+deliveries to the Scheduler DLQ. Operational alarms cover Scheduler target
+errors, dropped invocations, Scheduler DLQ messages, and two missed reference
+periods, in addition to queue age, queue DLQs, and repeated Lambda failures.
+Dynamic live schedules use the same target retry and DLQ contract.
 
 ## Teardown
 

@@ -92,10 +92,14 @@ Rollback uses the same commands with a previously verified SHA tag.
 The health check requires a current SQS polling heartbeat. A failed job is not
 acknowledged: it becomes visible after 240 seconds and reaches the fetch DLQ
 after three receives. AWS alarms report queue messages older than five minutes,
-DLQ contents, and repeated ingestion Lambda failures.
+queue and Scheduler DLQ contents, missed 15-minute reference invocations,
+Scheduler delivery errors or dropped invocations, and repeated ingestion
+Lambda failures. Reference jobs are scheduled every 15 minutes. Live schedules
+span ten minutes before kickoff through three hours after, polling every 15
+seconds while active and 60 seconds while idle.
 
-Use the `FetchDeadLetterQueueUrl` and `ResultDeadLetterQueueUrl` outputs when
-inspecting failures:
+Use the `FetchDeadLetterQueueUrl`, `ResultDeadLetterQueueUrl`, and
+`ScheduleDeadLetterQueueUrl` outputs when inspecting failures:
 
 ```fish
 uv run aws sqs get-queue-attributes \

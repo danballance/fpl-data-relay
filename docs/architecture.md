@@ -49,8 +49,26 @@ transactions, and bounded parent/child reads avoid N+1 queries. Transaction
 advisory locks make concurrent ingestion exit cleanly; payload hashes and
 database constraints make repeated SQS delivery idempotent.
 
+Schema version 2 stores canonical current snapshots for every normalized
+family. A pure entity diff compares stable keys and top-level values, then an
+atomic persistence operation writes normalized rows, source freshness,
+snapshots, family summaries, and child entity changes together. Bootstrap and
+full fixtures are authoritative; event-live is authoritative within one
+gameweek; current-gameweek fixture polling is partial and cannot imply a
+deletion. Explicit nulls overwrite stored values, and authoritative missing
+entities are deleted in foreign-key-safe order.
+
+The first snapshot for a source is a silent baseline. Migration 2 discards the
+incompatible coarse history and clears source hashes while preserving
+normalized FPL data, so the next refresh rebuilds snapshots without a false
+wave of created events.
+
 The executable dependency rule is:
 
 ```fish
-uv run --group dev lint-imports
+make lint
 ```
+
+This runs the dependency rule together with the other backend and client
+static checks. Use `uv run --group dev lint-imports` to diagnose that rule in
+isolation.
