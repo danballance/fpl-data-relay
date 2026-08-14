@@ -1,0 +1,20 @@
+[[strategies]]
+key = "weekly-community-momentum-v1"
+version = 1
+active = false
+name = "Weekly Community Momentum"
+description = "The leading FPL topics discussed across the configured community sources during the previous seven days."
+schedule_expression = "cron(0 6 * * ? *)"
+schedule_timezone = "Europe/London"
+lookback_days = 7
+target_story_count = 10
+minimum_story_count = 1
+maximum_candidate_stories = 30
+ranking_policy = "community_momentum_v1"
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
+extraction_prompt_version = 1
+synthesis_prompt_version = 1
+extraction_concurrency = 4
+chunk_characters = 24000
+sources = []

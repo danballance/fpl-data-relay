@@ -12,6 +12,7 @@ import { RelayApiError, errorMessage } from "./api/errors";
 import { AppShell } from "./app/AppShell";
 import { SelectionProvider } from "./app/selection";
 import { ActivityPage } from "./features/activity/ActivityPage";
+import { CommunityPage } from "./features/community/CommunityPage";
 import {
   EventStatusPage,
   LivePlayersPage,
@@ -52,6 +53,7 @@ export function App({
               <Route path="event-status" element={<EventStatusPage />} />
               <Route path="live-players" element={<LivePlayersPage />} />
               <Route path="activity" element={<ActivityPage />} />
+              <Route path="community" element={<CommunityPage />} />
               <Route path="*" element={<OverviewPage />} />
             </Route>
           </Routes>

@@ -38,6 +38,10 @@ const NAVIGATION = [
     label: "Changes",
     links: [["/activity", "Activity"]],
   },
+  {
+    label: "Community",
+    links: [["/community", "Intelligence reports"]],
+  },
 ] as const;
 
 function PersistentNavLink({

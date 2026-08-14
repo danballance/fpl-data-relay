@@ -15,3 +15,9 @@ ACCURATE_CHANGES_SQL = (
     .joinpath("migrations/0002_accurate_changes.sql")
     .read_text(encoding="utf-8")
 )
+
+COMMUNITY_REPORTS_SQL = (
+    files("fpl_data_relay.adapters.outbound.postgres")
+    .joinpath("migrations/0003_community_reports.sql")
+    .read_text(encoding="utf-8")
+)

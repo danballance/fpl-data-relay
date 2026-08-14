@@ -37,6 +37,15 @@ def test_migration_checksum_is_sha256() -> None:
     assert migration.checksum == sha256(migration.sql.encode()).hexdigest()
 
 
+def test_community_migration_enforces_aggregate_and_immutability() -> None:
+    sql = MIGRATIONS[2].sql
+    assert "relay_community_reports" in sql
+    assert "UNIQUE (strategy_key, report_date)" in sql
+    assert "jsonb_array_length(content -> 'stories') BETWEEN 1 AND 10" in sql
+    assert "relay_community_reports_immutable" in sql
+    assert "BEFORE UPDATE OR DELETE" in sql
+
+
 def test_migration_row_values_accepts_asyncpg_mapping_shape() -> None:
     values: dict[str, object] = {
         "version": 1,
@@ -100,14 +109,14 @@ async def test_apply_migrations_is_ordered_and_idempotent() -> None:
     pool = FakePostgresPool()
     assert (await migration_status(pool=pool)).model_dump() == {
         "applied_versions": [],
-        "pending_versions": [1, 2],
+        "pending_versions": [1, 2, 3],
     }
     await apply_migrations(pool=pool)
-    assert pool.schema_version == 2
-    assert len(pool.applied_migrations) == 2
+    assert pool.schema_version == 3
+    assert len(pool.applied_migrations) == 3
     await apply_migrations(pool=pool)
-    assert len(pool.applied_migrations) == 2
+    assert len(pool.applied_migrations) == 3
     assert (await migration_status(pool=pool)).model_dump() == {
-        "applied_versions": [1, 2],
+        "applied_versions": [1, 2, 3],
         "pending_versions": [],
     }

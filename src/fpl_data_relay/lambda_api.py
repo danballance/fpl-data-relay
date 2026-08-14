@@ -8,6 +8,9 @@ from fpl_data_relay.adapters.inbound.http.app import create_app
 from fpl_data_relay.adapters.outbound.postgres.changes import (
     PostgresChangeEventRepository,
 )
+from fpl_data_relay.adapters.outbound.postgres.community import (
+    PostgresCommunityReportRepository,
+)
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
 from fpl_data_relay.adapters.outbound.postgres.live import PostgresLiveRepository
@@ -19,6 +22,8 @@ from fpl_data_relay.adapters.outbound.postgres.schema_manager import (
 )
 from fpl_data_relay.adapters.outbound.rds_data import create_rds_data_pool
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.community_queries import CommunityQueries
+from fpl_data_relay.application.community_strategies import load_strategy_registry
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.config import load_rds_data_settings_from_environment
@@ -44,6 +49,10 @@ application = create_app(
     live_queries=LiveQueries(repository=PostgresLiveRepository(database=DATABASE)),
     change_feed=ChangeFeed(
         repository=PostgresChangeEventRepository(database=DATABASE),
+    ),
+    community_queries=CommunityQueries(
+        repository=PostgresCommunityReportRepository(database=DATABASE),
+        registry=load_strategy_registry(),
     ),
     schema_manager=PostgresSchemaManager(database=DATABASE),
     ingestion_service=None,

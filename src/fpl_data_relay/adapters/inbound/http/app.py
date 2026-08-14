@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fpl_data_relay.adapters.inbound.http.schemas import (
     ChangeEventHistoryResponse,
     ChangeEventsResponse,
+    CommunityReportHistoryResponse,
     CursorPage,
     EntityChangesResponse,
     ErrorResponse,
@@ -25,6 +26,7 @@ from fpl_data_relay.adapters.inbound.http.schemas import (
 )
 from fpl_data_relay.adapters.inbound.scheduler import RelayScheduler
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.community_queries import CommunityQueries
 from fpl_data_relay.application.database import SCHEMA_VERSION
 from fpl_data_relay.application.errors import (
     DatabaseUnavailableError,
@@ -43,6 +45,7 @@ from fpl_data_relay.domain.changes import (
     IngestionSourceKey,
     IngestionSourceStatus,
 )
+from fpl_data_relay.domain.community import CommunityReport, CommunityStrategySummary
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
     EventStatusResponse,
@@ -74,6 +77,10 @@ OPENAPI_TAGS = [
         "name": "Change Events",
         "description": "Cursor-based change-event replay.",
     },
+    {
+        "name": "Community Intelligence",
+        "description": "Scheduled summaries of public FPL community discussion.",
+    },
 ]
 OPENAPI_SERVERS = [
     {
@@ -99,6 +106,7 @@ def create_app(
     reference_queries: ReferenceQueries,
     live_queries: LiveQueries,
     change_feed: ChangeFeed,
+    community_queries: CommunityQueries,
     schema_manager: SchemaManager,
     ingestion_service: IngestionRunner | None,
     reference_poll_seconds: int,
@@ -237,6 +245,112 @@ def create_app(
         """Verify that the database is awake and has the expected schema."""
         await schema_manager.check_schema_version(expected_version=SCHEMA_VERSION)
         return ReadyResponse(status="ready", schema_version=SCHEMA_VERSION)
+
+    def require_community_strategy(*, strategy_key: str) -> None:
+        if not community_queries.has_strategy(strategy_key=strategy_key):
+            raise HTTPException(status_code=404, detail="Community strategy not found.")
+
+    @app.get(
+        "/v1/community-strategies",
+        tags=["Community Intelligence"],
+        summary="List community strategies",
+        operation_id="list_community_strategies",
+    )
+    async def list_community_strategies() -> list[CommunityStrategySummary]:
+        return community_queries.list_strategies()
+
+    @app.get(
+        "/v1/community-reports/latest",
+        tags=["Community Intelligence"],
+        summary="Get the latest community report",
+        responses={**NOT_FOUND_RESPONSE, **NOT_INGESTED_RESPONSE},
+        operation_id="get_latest_community_report",
+    )
+    async def get_latest_community_report(
+        strategy_key: Annotated[
+            str,
+            Query(min_length=1, description="Configured strategy key."),
+        ],
+    ) -> CommunityReport:
+        require_community_strategy(strategy_key=strategy_key)
+        report = await community_queries.latest(strategy_key=strategy_key)
+        if report is None:
+            raise HTTPException(
+                status_code=503,
+                detail="The community strategy has not produced a report yet.",
+            )
+        return report
+
+    @app.get(
+        "/v1/community-reports/recent",
+        tags=["Community Intelligence"],
+        summary="List recent community reports",
+        responses={**NOT_FOUND_RESPONSE, **NOT_INGESTED_RESPONSE},
+        operation_id="list_recent_community_reports",
+    )
+    async def list_recent_community_reports(
+        strategy_key: Annotated[str, Query(min_length=1)],
+        limit: Annotated[int, Query(ge=1, le=100)],
+    ) -> CommunityReportHistoryResponse:
+        require_community_strategy(strategy_key=strategy_key)
+        items = await community_queries.recent(
+            strategy_key=strategy_key,
+            limit=limit,
+        )
+        if not items:
+            raise HTTPException(
+                status_code=503,
+                detail="The community strategy has not produced a report yet.",
+            )
+        return CommunityReportHistoryResponse(
+            items=items,
+            next_before_id=items[-1].id if len(items) == limit else None,
+        )
+
+    @app.get(
+        "/v1/community-reports/history",
+        tags=["Community Intelligence"],
+        summary="List older community reports",
+        responses={**NOT_FOUND_RESPONSE, **NOT_INGESTED_RESPONSE},
+        operation_id="list_community_report_history",
+    )
+    async def list_community_report_history(
+        strategy_key: Annotated[str, Query(min_length=1)],
+        before_id: Annotated[int, Query(ge=1)],
+        limit: Annotated[int, Query(ge=1, le=100)],
+    ) -> CommunityReportHistoryResponse:
+        require_community_strategy(strategy_key=strategy_key)
+        items = await community_queries.history(
+            strategy_key=strategy_key,
+            before_id=before_id,
+            limit=limit,
+        )
+        if not items and await community_queries.latest(
+            strategy_key=strategy_key,
+        ) is None:
+            raise HTTPException(
+                status_code=503,
+                detail="The community strategy has not produced a report yet.",
+            )
+        return CommunityReportHistoryResponse(
+            items=items,
+            next_before_id=items[-1].id if len(items) == limit else None,
+        )
+
+    @app.get(
+        "/v1/community-reports/{report_id}",
+        tags=["Community Intelligence"],
+        summary="Get a historical community report",
+        responses=NOT_FOUND_RESPONSE,
+        operation_id="get_community_report",
+    )
+    async def get_community_report(
+        report_id: Annotated[int, Path(ge=1)],
+    ) -> CommunityReport:
+        report = await community_queries.get(report_id=report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="Community report not found.")
+        return report
 
     async def require_season(*, season_id: str) -> Season:
         """Return a season or raise the standard not-found response."""

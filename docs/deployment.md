@@ -24,6 +24,7 @@ Run **Deploy production** manually from `main` in GitHub Actions. Configure the
 
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
+- `COMMUNITY_CREDENTIAL_SECRET_ARN`
 
 All non-secret production values are explicit in the workflow environment.
 The workflow verifies the target AWS account and the commit-specific collector
@@ -48,6 +49,8 @@ The workflow passes these required application parameters:
 - `AlertEmail=nixprivacy@pm.me`
 - `CollectorUserName=fpl-relay-nas-source`
 - `PayloadPrefix=payloads`
+- `CommunityCredentialSecretArn` from the protected environment secret
+- `CommunityScheduleState=DISABLED`
 
 The payload builder adds its own schema-version segment, so objects are stored
 under `payloads/v1/...`.
@@ -93,6 +96,9 @@ The collector uses:
 - `ScheduleDeadLetterQueueUrl`
 - `PayloadBucketName`
 - `PayloadPrefix`
+
+Community operations additionally expose `CommunityQueueUrl` and
+`CommunityDeadLetterQueueUrl`; these are not collector credentials.
 
 Frontend deployment uses `FrontendBucketName`, `CloudFrontDistributionId`, and
 `CloudFrontUrl`. `ApiEndpoint` is available for direct diagnostics.
@@ -155,7 +161,9 @@ uv run sam deploy \
     DataStackName=fpl-relay-data \
     AlertEmail=nixprivacy@pm.me \
     CollectorUserName=fpl-relay-nas-source \
-    PayloadPrefix=payloads
+    PayloadPrefix=payloads \
+    CommunityCredentialSecretArn=$COMMUNITY_CREDENTIAL_SECRET_ARN \
+    CommunityScheduleState=DISABLED
 ```
 
 If initial application creation rolls back, delete the resulting
@@ -194,6 +202,15 @@ deliveries to the Scheduler DLQ. Operational alarms cover Scheduler target
 errors, dropped invocations, Scheduler DLQ messages, and two missed reference
 periods, in addition to queue age, queue DLQs, and repeated Lambda failures.
 Dynamic live schedules use the same target retry and DLQ contract.
+
+The separate community queue has its own encrypted DLQ and invokes the generic
+community Lambda with batch size one, an 840-second timeout, reserved concurrency
+one, and 14-day logs. A daily 06:00 `Europe/London` schedule submits only the
+dispatch job. It must remain `DISABLED` until the source catalog, provider
+terms/privacy review, credentials, and manual report review in
+[community.md](community.md) are complete. Community alarms cover worker errors,
+queue age and DLQ depth, Scheduler errors/drops, and no daily attempt within 26
+hours.
 
 ## Teardown
 

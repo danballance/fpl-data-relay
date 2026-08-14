@@ -39,6 +39,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/community-strategies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List community strategies */
+        get: operations["list_community_strategies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/community-reports/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the latest community report */
+        get: operations["get_latest_community_report"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/community-reports/recent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List recent community reports */
+        get: operations["list_recent_community_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/community-reports/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List older community reports */
+        get: operations["list_community_report_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/community-reports/{report_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a historical community report */
+        get: operations["get_community_report"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/seasons": {
         parameters: {
             query?: never;
@@ -481,6 +566,17 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * BlogEngagement
+         * @description Explicit marker for sources without comparable engagement metrics.
+         */
+        BlogEngagement: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "blog";
+        };
+        /**
          * ChangeEventHistoryResponse
          * @description Newest-first page of change-event summaries.
          */
@@ -548,6 +644,179 @@ export interface components {
             /** Present */
             present: boolean;
             value: components["schemas"]["JsonValue"];
+        };
+        /**
+         * CollectionCoverage
+         * @description Collection completeness recorded with a report.
+         */
+        CollectionCoverage: {
+            /** Configured Source Count */
+            configured_source_count: number;
+            /** Successful Source Count */
+            successful_source_count: number;
+            /** Failed Sources */
+            failed_sources: components["schemas"]["SourceFailure"][];
+            /** Excluded Document Count */
+            excluded_document_count: number;
+            /** Exclusions */
+            exclusions: components["schemas"]["SourceExclusion"][];
+            /** X Document Count */
+            x_document_count: number;
+            /** Youtube Document Count */
+            youtube_document_count: number;
+            /** Blog Document Count */
+            blog_document_count: number;
+        };
+        /**
+         * CommunityReport
+         * @description One immutable stored community report.
+         */
+        CommunityReport: {
+            /** Id */
+            id: number;
+            /** Strategy Key */
+            strategy_key: string;
+            /** Strategy Version */
+            strategy_version: number;
+            /**
+             * Report Date
+             * Format: date
+             */
+            report_date: string;
+            /** Season Id */
+            season_id: string;
+            /** As Of Event Id */
+            as_of_event_id: number | null;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            content: components["schemas"]["CommunityReportContent"];
+        };
+        /**
+         * CommunityReportContent
+         * @description Single JSON document persisted for one report resource.
+         */
+        CommunityReportContent: {
+            /** Strategy Name */
+            strategy_name: string;
+            /** Strategy Description */
+            strategy_description: string;
+            /** Ranking Policy */
+            ranking_policy: string;
+            /** Extraction Prompt Version */
+            extraction_prompt_version: number;
+            /** Synthesis Prompt Version */
+            synthesis_prompt_version: number;
+            /** Target Story Count */
+            target_story_count: number;
+            coverage: components["schemas"]["CollectionCoverage"];
+            model_usage: components["schemas"]["ModelUsage"];
+            /** Stories */
+            stories: components["schemas"]["CommunityStory"][];
+        };
+        /**
+         * CommunityReportHistoryResponse
+         * @description Newest-first page of immutable community report summaries.
+         */
+        CommunityReportHistoryResponse: {
+            /** Items */
+            items: components["schemas"]["CommunityReportSummary"][];
+            /** Next Before Id */
+            next_before_id: number | null;
+        };
+        /**
+         * CommunityReportSummary
+         * @description Bounded history item without the complete report JSON.
+         */
+        CommunityReportSummary: {
+            /** Id */
+            id: number;
+            /** Strategy Key */
+            strategy_key: string;
+            /** Strategy Version */
+            strategy_version: number;
+            /**
+             * Report Date
+             * Format: date
+             */
+            report_date: string;
+            /** Season Id */
+            season_id: string;
+            /** As Of Event Id */
+            as_of_event_id: number | null;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Story Count */
+            story_count: number;
+            /** Successful Source Count */
+            successful_source_count: number;
+            /** Failed Source Count */
+            failed_source_count: number;
+        };
+        /**
+         * CommunityStory
+         * @description One ranked, validated community story.
+         */
+        CommunityStory: {
+            /** Rank */
+            rank: number;
+            /** Headline */
+            headline: string;
+            /** Summary */
+            summary: string;
+            category: components["schemas"]["TopicCategory"];
+            /** Momentum Score */
+            momentum_score: number;
+            momentum_components: components["schemas"]["MomentumComponents"];
+            /** Evidence */
+            evidence: components["schemas"]["EvidenceReference"][];
+            /** Entities */
+            entities: (components["schemas"]["PlayerReference"] | components["schemas"]["TeamReference"] | components["schemas"]["EventReference"] | components["schemas"]["FixtureReference"])[];
+        };
+        /**
+         * CommunityStrategySummary
+         * @description Public strategy metadata without private source configuration.
+         */
+        CommunityStrategySummary: {
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Cadence */
+            cadence: string;
+            /** Timezone */
+            timezone: string;
+            /** Lookback Days */
+            lookback_days: number;
+            /** Target Story Count */
+            target_story_count: number;
         };
         /** CursorPage[Element] */
         CursorPage_Element_: {
@@ -769,6 +1038,47 @@ export interface components {
              */
             is_next: boolean;
         };
+        /** EventReference */
+        EventReference: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            entity_type: "event";
+            /** Season Id */
+            season_id: string;
+            /** Entity Id */
+            entity_id: number;
+            /** Display Name */
+            display_name: string;
+            snapshot: components["schemas"]["EventSnapshot"];
+        };
+        /**
+         * EventSnapshot
+         * @description Gameweek values as they existed when a report was generated.
+         */
+        EventSnapshot: {
+            /** Name */
+            name: string;
+            /** Deadline Time */
+            deadline_time: string | null;
+            /** Average Entry Score */
+            average_entry_score: number | null;
+            /** Highest Score */
+            highest_score: number | null;
+            /** Highest Scoring Entry */
+            highest_scoring_entry: number | null;
+            /** Finished */
+            finished: boolean | null;
+            /** Data Checked */
+            data_checked: boolean | null;
+            /** Is Previous */
+            is_previous: boolean;
+            /** Is Current */
+            is_current: boolean;
+            /** Is Next */
+            is_next: boolean;
+        };
         /**
          * EventStatusDay
          * @description Per-event/day status row from event-status.
@@ -795,6 +1105,33 @@ export interface components {
             status?: components["schemas"]["EventStatusDay"][];
             /** Leagues */
             leagues?: string | null;
+        };
+        /**
+         * EvidenceReference
+         * @description Auditable source metadata retained without source body text.
+         */
+        EvidenceReference: {
+            /** Document Id */
+            document_id: string;
+            /** Source Key */
+            source_key: string;
+            source_type: components["schemas"]["SourceType"];
+            /** Publisher */
+            publisher: string;
+            /** Title */
+            title: string;
+            /**
+             * Url
+             * Format: uri
+             */
+            url: string;
+            /**
+             * Published At
+             * Format: date-time
+             */
+            published_at: string;
+            /** Engagement */
+            engagement: components["schemas"]["XEngagement"] | components["schemas"]["YouTubeEngagement"] | components["schemas"]["BlogEngagement"];
         };
         /**
          * FieldChangeResponse
@@ -841,6 +1178,47 @@ export interface components {
             stats?: components["schemas"]["FixtureStat"][];
             /** Pulse Id */
             pulse_id?: number | null;
+        };
+        /** FixtureReference */
+        FixtureReference: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            entity_type: "fixture";
+            /** Season Id */
+            season_id: string;
+            /** Entity Id */
+            entity_id: number;
+            /** Display Name */
+            display_name: string;
+            snapshot: components["schemas"]["FixtureSnapshot"];
+        };
+        /**
+         * FixtureSnapshot
+         * @description Fixture values as they existed when a report was generated.
+         */
+        FixtureSnapshot: {
+            /** Event Id */
+            event_id: number | null;
+            /** Kickoff Time */
+            kickoff_time: string | null;
+            /** Home Team Id */
+            home_team_id: number;
+            /** Home Team Name */
+            home_team_name: string;
+            /** Away Team Id */
+            away_team_id: number;
+            /** Away Team Name */
+            away_team_name: string;
+            /** Home Score */
+            home_score: number | null;
+            /** Away Score */
+            away_score: number | null;
+            /** Started */
+            started: boolean;
+            /** Finished */
+            finished: boolean;
         };
         /**
          * FixtureStat
@@ -992,6 +1370,43 @@ export interface components {
             in_dreamteam?: boolean | null;
         };
         /**
+         * ModelUsage
+         * @description Aggregate OpenAI usage retained for operations and cost review.
+         */
+        ModelUsage: {
+            /**
+             * Provider
+             * @constant
+             */
+            provider: "openai";
+            /** Model */
+            model: string;
+            /** Reasoning Effort */
+            reasoning_effort: string;
+            /** Response Ids */
+            response_ids: string[];
+            /** Input Tokens */
+            input_tokens: number;
+            /** Output Tokens */
+            output_tokens: number;
+        };
+        /**
+         * MomentumComponents
+         * @description Explainable component scores that add to the story score.
+         */
+        MomentumComponents: {
+            /** Source Breadth */
+            source_breadth: number;
+            /** Evidence Volume */
+            evidence_volume: number;
+            /** Engagement */
+            engagement: number;
+            /** Recency */
+            recency: number;
+            /** Actionability */
+            actionability: number;
+        };
+        /**
          * Phase
          * @description FPL phase metadata from bootstrap-static.
          */
@@ -1027,6 +1442,65 @@ export interface components {
             current_window_end: string | null;
             /** Next Window Start */
             next_window_start: string | null;
+        };
+        /** PlayerReference */
+        PlayerReference: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            entity_type: "player";
+            /** Season Id */
+            season_id: string;
+            /** Entity Id */
+            entity_id: number;
+            /** Display Name */
+            display_name: string;
+            snapshot: components["schemas"]["PlayerSnapshot"];
+        };
+        /**
+         * PlayerSnapshot
+         * @description Player values as they existed when a report was generated.
+         */
+        PlayerSnapshot: {
+            /** Web Name */
+            web_name: string;
+            /** First Name */
+            first_name: string;
+            /** Second Name */
+            second_name: string;
+            /** Team Id */
+            team_id: number;
+            /** Team Name */
+            team_name: string;
+            /** Element Type Id */
+            element_type_id: number;
+            /** Element Type Name */
+            element_type_name: string;
+            /** Now Cost */
+            now_cost: number | null;
+            /** Selected By Percent */
+            selected_by_percent: string | null;
+            /** Total Points */
+            total_points: number | null;
+            /** Form */
+            form: string | null;
+            /** Minutes */
+            minutes: number | null;
+            /** Goals Scored */
+            goals_scored: number | null;
+            /** Assists */
+            assists: number | null;
+            /** Clean Sheets */
+            clean_sheets: number | null;
+            /** Status */
+            status: string | null;
+            /** News */
+            news: string | null;
+            /** Chance Of Playing Next Round */
+            chance_of_playing_next_round: number | null;
+            /** Chance Of Playing This Round */
+            chance_of_playing_this_round: number | null;
         };
         /**
          * ReadyResponse
@@ -1082,6 +1556,36 @@ export interface components {
             retry_after_seconds: number | null;
         };
         /**
+         * SourceExclusion
+         * @description Stable reason and count for documents intentionally not analyzed.
+         */
+        SourceExclusion: {
+            /** Source Key */
+            source_key: string;
+            source_type: components["schemas"]["SourceType"];
+            /** Code */
+            code: string;
+            /** Count */
+            count: number;
+        };
+        /**
+         * SourceFailure
+         * @description Stable, safe record of a source-level collection failure.
+         */
+        SourceFailure: {
+            /** Source Key */
+            source_key: string;
+            source_type: components["schemas"]["SourceType"];
+            /** Code */
+            code: string;
+        };
+        /**
+         * SourceType
+         * @description Supported public community media sources.
+         * @enum {string}
+         */
+        SourceType: "x" | "youtube" | "blog";
+        /**
          * Team
          * @description Premier League team metadata from bootstrap-static.
          */
@@ -1111,6 +1615,51 @@ export interface components {
             /** Pulse Id */
             pulse_id?: number | null;
         };
+        /** TeamReference */
+        TeamReference: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            entity_type: "team";
+            /** Season Id */
+            season_id: string;
+            /** Entity Id */
+            entity_id: number;
+            /** Display Name */
+            display_name: string;
+            snapshot: components["schemas"]["TeamSnapshot"];
+        };
+        /**
+         * TeamSnapshot
+         * @description Team values as they existed when a report was generated.
+         */
+        TeamSnapshot: {
+            /** Name */
+            name: string;
+            /** Short Name */
+            short_name: string;
+            /** Strength */
+            strength: number | null;
+            /** Strength Overall Home */
+            strength_overall_home: number | null;
+            /** Strength Overall Away */
+            strength_overall_away: number | null;
+            /** Strength Attack Home */
+            strength_attack_home: number | null;
+            /** Strength Attack Away */
+            strength_attack_away: number | null;
+            /** Strength Defence Home */
+            strength_defence_home: number | null;
+            /** Strength Defence Away */
+            strength_defence_away: number | null;
+        };
+        /**
+         * TopicCategory
+         * @description FPL decision categories used by analysis and presentation.
+         * @enum {string}
+         */
+        TopicCategory: "transfer_in" | "transfer_out" | "hold" | "sell" | "captaincy" | "injury" | "fixture" | "chip" | "team" | "other";
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1123,6 +1672,42 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * XEngagement
+         * @description Public X engagement captured with one post.
+         */
+        XEngagement: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "x";
+            /** Likes */
+            likes: number;
+            /** Replies */
+            replies: number;
+            /** Reposts */
+            reposts: number;
+            /** Quotes */
+            quotes: number;
+        };
+        /**
+         * YouTubeEngagement
+         * @description Public YouTube engagement captured with one video.
+         */
+        YouTubeEngagement: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "youtube";
+            /** Views */
+            views: number;
+            /** Likes */
+            likes: number;
+            /** Comments */
+            comments: number;
         };
     };
     responses: never;
@@ -1178,6 +1763,217 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ServiceErrorResponse"];
+                };
+            };
+        };
+    };
+    list_community_strategies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommunityStrategySummary"][];
+                };
+            };
+        };
+    };
+    get_latest_community_report: {
+        parameters: {
+            query: {
+                /** @description Configured strategy key. */
+                strategy_key: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommunityReport"];
+                };
+            };
+            /** @description The requested entity does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The requested data has not been ingested yet. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_recent_community_reports: {
+        parameters: {
+            query: {
+                strategy_key: string;
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommunityReportHistoryResponse"];
+                };
+            };
+            /** @description The requested entity does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The requested data has not been ingested yet. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_community_report_history: {
+        parameters: {
+            query: {
+                strategy_key: string;
+                before_id: number;
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommunityReportHistoryResponse"];
+                };
+            };
+            /** @description The requested entity does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The requested data has not been ingested yet. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_community_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommunityReport"];
+                };
+            };
+            /** @description The requested entity does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

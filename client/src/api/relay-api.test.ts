@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   changeEvent,
+  communityReport,
+  communityReportSummary,
+  communityStrategy,
   element,
   entityChange,
   elementType,
@@ -67,6 +70,27 @@ describe("relay API adapter", () => {
       if (url.endsWith("/v1/ingestion-status")) {
         return jsonResponse(ingestionStatus);
       }
+      if (url.endsWith("/v1/community-strategies")) {
+        return jsonResponse([communityStrategy]);
+      }
+      if (url.startsWith("http://relay/v1/community-reports/latest")) {
+        return jsonResponse(communityReport);
+      }
+      if (url.startsWith("http://relay/v1/community-reports/recent")) {
+        return jsonResponse({
+          items: [communityReportSummary],
+          next_before_id: null,
+        });
+      }
+      if (url.startsWith("http://relay/v1/community-reports/history")) {
+        return jsonResponse({
+          items: [communityReportSummary],
+          next_before_id: null,
+        });
+      }
+      if (url.endsWith("/v1/community-reports/7")) {
+        return jsonResponse(communityReport);
+      }
       if (url.startsWith("http://relay/v1/change-events?")) {
         return jsonResponse({ items: [changeEvent], next_after_id: null });
       }
@@ -126,6 +150,24 @@ describe("relay API adapter", () => {
       next_after_id: null,
     });
     expect(await api.getIngestionStatus(signal)).toEqual(ingestionStatus);
+    expect(await api.listCommunityStrategies(signal)).toEqual([
+      communityStrategy,
+    ]);
+    expect(
+      await api.getLatestCommunityReport(communityStrategy.key, signal),
+    ).toEqual(communityReport);
+    expect(await api.getCommunityReport(7, signal)).toEqual(communityReport);
+    expect(
+      await api.listRecentCommunityReports(communityStrategy.key, 100, signal),
+    ).toEqual({ items: [communityReportSummary], next_before_id: null });
+    expect(
+      await api.listCommunityReportHistory(
+        communityStrategy.key,
+        7,
+        100,
+        signal,
+      ),
+    ).toEqual({ items: [communityReportSummary], next_before_id: null });
     expect(requested).toContain(
       "http://relay/v1/change-events?after_id=0&limit=100",
     );
@@ -139,6 +181,14 @@ describe("relay API adapter", () => {
       "http://relay/v1/change-events/1/entity-changes?after_id=0&limit=100",
     );
     expect(requested).toContain("http://relay/v1/ingestion-status");
+    expect(requested).toContain(
+      "http://relay/v1/community-reports/latest?strategy_key=" +
+        communityStrategy.key,
+    );
+    expect(requested).toContain(
+      "http://relay/v1/community-reports/history?strategy_key=" +
+        `${communityStrategy.key}&before_id=7&limit=100`,
+    );
   });
 
   it("rejects an empty base URL", () => {

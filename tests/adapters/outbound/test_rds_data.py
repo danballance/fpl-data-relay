@@ -195,7 +195,7 @@ async def test_data_api_migration_status_casts_regclass_to_text() -> None:
     status = await migration_status(pool=pool)
 
     assert status.applied_versions == []
-    assert status.pending_versions == [1, 2]
+    assert status.pending_versions == [1, 2, 3]
     operation, parameters = client.calls[0]
     assert operation == "execute"
     assert parameters["sql"] == (

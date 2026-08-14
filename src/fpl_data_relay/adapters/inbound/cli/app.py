@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Annotated, Protocol
 
 import typer
@@ -10,6 +11,7 @@ from fpl_data_relay.application.database import SCHEMA_VERSION
 from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import IngestionResult
 from fpl_data_relay.application.ports.administration import SchemaStatus
+from fpl_data_relay.domain.community import CommunityReport
 
 
 class CliOperations(Protocol):
@@ -32,6 +34,15 @@ class CliOperations(Protocol):
         fixture_id: int | None,
     ) -> IngestionResult: ...
 
+    def validate_community_config(self) -> int: ...
+
+    async def run_community(
+        self,
+        *,
+        strategy_key: str,
+        scheduled_at: datetime,
+    ) -> CommunityReport: ...
+
     async def serve(self) -> None: ...
 
 
@@ -40,8 +51,10 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
     app = typer.Typer(no_args_is_help=True)
     db_app = typer.Typer(no_args_is_help=True)
     ingest_app = typer.Typer(no_args_is_help=True)
+    community_app = typer.Typer(no_args_is_help=True)
     app.add_typer(db_app, name="db")
     app.add_typer(ingest_app, name="ingest")
+    app.add_typer(community_app, name="community")
 
     @app.command("config-check")
     def config_check() -> None:
@@ -163,6 +176,50 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
     def serve() -> None:
         """Start the production FastAPI server."""
         asyncio.run(operations.serve())
+
+    @community_app.command("validate-config")
+    def validate_community_config() -> None:
+        """Validate the packaged strategy and source manifest without network calls."""
+        count = operations.validate_community_config()
+        typer.echo(f"community configuration ok strategies={count}")
+
+    @community_app.command("run")
+    def run_community(
+        *,
+        strategy_key: Annotated[
+            str,
+            typer.Option("--strategy-key", help="Packaged community strategy key."),
+        ],
+        scheduled_at: Annotated[
+            str,
+            typer.Option(
+                "--scheduled-at",
+                help="Timezone-aware ISO-8601 scheduled invocation timestamp.",
+            ),
+        ],
+    ) -> None:
+        """Run one idempotent manual community report."""
+        try:
+            parsed_scheduled_at = datetime.fromisoformat(scheduled_at)
+        except ValueError as error:
+            raise typer.BadParameter(
+                "--scheduled-at must be an ISO-8601 timestamp.",
+            ) from error
+        if (
+            parsed_scheduled_at.tzinfo is None
+            or parsed_scheduled_at.utcoffset() is None
+        ):
+            raise typer.BadParameter("--scheduled-at must include a UTC offset.")
+        report = asyncio.run(
+            operations.run_community(
+                strategy_key=strategy_key,
+                scheduled_at=parsed_scheduled_at,
+            ),
+        )
+        typer.echo(
+            f"community report id={report.id} strategy={report.strategy_key} "
+            f"date={report.report_date} stories={len(report.content.stories)}",
+        )
 
     return app
 

@@ -18,6 +18,13 @@ export type LiveElement = components["schemas"]["LiveElement"];
 export type ChangeEvent = components["schemas"]["ChangeEventResponse"];
 export type EntityChange = components["schemas"]["EntityChangeResponse"];
 export type IngestionStatus = components["schemas"]["IngestionStatusResponse"];
+export type CommunityStrategy =
+  components["schemas"]["CommunityStrategySummary"];
+export type CommunityReport = components["schemas"]["CommunityReport"];
+export type CommunityReportSummary =
+  components["schemas"]["CommunityReportSummary"];
+export type CommunityReportHistory =
+  components["schemas"]["CommunityReportHistoryResponse"];
 export interface CursorPage<Item> {
   items: Item[];
   next_after_id: number | null;

@@ -6,7 +6,7 @@ The relay remains a hexagonal modular monolith with dependency direction:
 composition roots → adapters → application → domain
 ```
 
-It has four explicit runtime compositions:
+It has five explicit runtime compositions:
 
 1. Local API: Uvicorn/FastAPI, `asyncpg`, local PostgreSQL 17.7, the in-process
    ingestion scheduler, and Typer administration commands.
@@ -17,6 +17,11 @@ It has four explicit runtime compositions:
 4. Production ingestion: one collected bundle per Lambda invocation, strict
    validation, RDS Data API persistence, advisory locking, and EventBridge
    schedule reconciliation; it has no upstream HTTP client.
+5. Production community intelligence: a daily Scheduler delivery fans out
+   versioned strategy jobs through a dedicated queue to one generic Lambda. The
+   worker collects official/feed-backed public sources, performs asynchronous
+   structured analysis and canonical entity linking, then inserts one immutable
+   aggregate report row.
 
 Production infrastructure has two independent top-level CloudFormation stacks:
 
@@ -49,7 +54,7 @@ transactions, and bounded parent/child reads avoid N+1 queries. Transaction
 advisory locks make concurrent ingestion exit cleanly; payload hashes and
 database constraints make repeated SQS delivery idempotent.
 
-Schema version 2 stores canonical current snapshots for every normalized
+Schema version 3 stores canonical current snapshots for every normalized
 family. A pure entity diff compares stable keys and top-level values, then an
 atomic persistence operation writes normalized rows, source freshness,
 snapshots, family summaries, and child entity changes together. Bootstrap and
@@ -57,6 +62,12 @@ full fixtures are authoritative; event-live is authoritative within one
 gameweek; current-gameweek fixture polling is partial and cannot imply a
 deletion. Explicit nulls overwrite stored values, and authoritative missing
 entities are deleted in foreign-key-safe order.
+
+Migration 3 adds insert-only `relay_community_reports`. Entity references and
+their generation-time snapshots remain embedded in the report JSONB so each
+report is one resource and remains historically meaningful when current FPL
+records change. See [community.md](community.md) for the source, analysis,
+ranking, and rollout contracts.
 
 The first snapshot for a source is a silent baseline. Migration 2 discards the
 incompatible coarse history and clears source hashes while preserving

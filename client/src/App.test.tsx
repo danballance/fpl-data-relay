@@ -6,9 +6,13 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { RelayApiError } from "./api/errors";
 import type { RelayApi } from "./api/relay-api";
+import type { CommunityReport } from "./api/types";
 import { createAppQueryClient } from "./app/queryClient";
 import {
   changeEvent,
+  communityReport,
+  communityReportSummary,
+  communityStrategy,
   element,
   entityChange,
   ingestionStatus,
@@ -25,6 +29,322 @@ function renderApplication(path: string, api: RelayApi = makeFakeRelayApi()) {
 }
 
 describe("relay explorer application", () => {
+  it("renders community coverage, evidence, entities, and history", async () => {
+    const history = vi
+      .fn<RelayApi["listCommunityReportHistory"]>()
+      .mockResolvedValue({
+        items: [
+          {
+            ...communityReportSummary,
+            id: 6,
+            report_date: "2026-08-12",
+          },
+        ],
+        next_before_id: null,
+      });
+    const api = makeFakeRelayApi({
+      listCommunityStrategies: async () => [communityStrategy],
+      getLatestCommunityReport: async () => communityReport,
+      getCommunityReport: async () => communityReport,
+      listRecentCommunityReports: async () => ({
+        items: [communityReportSummary],
+        next_before_id: 7,
+      }),
+      listCommunityReportHistory: history,
+    });
+    renderApplication("/community", api);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "What the FPL community is discussing.",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", {
+        name: communityReport.content.stories[0].headline,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 configured source/)).toBeInTheDocument();
+    expect(screen.getByText(/1 of 10 target stories/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /FPL Analyst/ }),
+    ).toHaveAttribute("href", "https://x.com/analyst/status/1");
+    expect(screen.getByRole("link", { name: /Ada/ })).toHaveAttribute(
+      "href",
+      "/players?season=2025-26&record=10",
+    );
+    expect(screen.getByLabelText("Community strategy")).toHaveValue(
+      communityStrategy.key,
+    );
+    expect(screen.getByLabelText("Historical report")).toHaveTextContent(
+      "2026-08-13 · 1 stories",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Load older reports" }),
+    );
+    expect(
+      await screen.findByRole("option", { name: "2026-08-12 · 1 stories" }),
+    ).toBeInTheDocument();
+    expect(history).toHaveBeenCalledWith(
+      communityStrategy.key,
+      7,
+      100,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("renders every entity shape and navigates report query state", async () => {
+    const completeReport: CommunityReport = structuredClone(communityReport);
+    const baseStory = completeReport.content.stories[0];
+    const playerEntity = baseStory.entities[0];
+    if (playerEntity.entity_type !== "player") {
+      throw new Error("Community fixture must start with a player entity.");
+    }
+    completeReport.content.coverage = {
+      ...completeReport.content.coverage,
+      configured_source_count: 1,
+      successful_source_count: 1,
+      failed_sources: [],
+    };
+    completeReport.content.stories = Array.from(
+      { length: 10 },
+      (_, index) => ({
+        ...baseStory,
+        rank: index + 1,
+        headline: `${baseStory.headline} ${index + 1}`,
+        entities:
+          index === 0
+            ? [
+                {
+                  ...playerEntity,
+                  snapshot: {
+                    ...playerEntity.snapshot,
+                    now_cost: null,
+                    total_points: null,
+                  },
+                },
+                {
+                  entity_type: "team",
+                  season_id: "2025-26",
+                  entity_id: 2,
+                  display_name: "Southbank FC",
+                  snapshot: {
+                    name: "Southbank FC",
+                    short_name: "SOU",
+                    strength: null,
+                    strength_overall_home: null,
+                    strength_overall_away: null,
+                    strength_attack_home: null,
+                    strength_attack_away: null,
+                    strength_defence_home: null,
+                    strength_defence_away: null,
+                  },
+                },
+                {
+                  entity_type: "event",
+                  season_id: "2025-26",
+                  entity_id: 2,
+                  display_name: "Gameweek 2",
+                  snapshot: {
+                    name: "Gameweek 2",
+                    deadline_time: null,
+                    average_entry_score: null,
+                    highest_score: null,
+                    highest_scoring_entry: null,
+                    finished: false,
+                    data_checked: false,
+                    is_previous: false,
+                    is_current: false,
+                    is_next: true,
+                  },
+                },
+                {
+                  entity_type: "fixture",
+                  season_id: "2025-26",
+                  entity_id: 30,
+                  display_name: "NOR v SOU",
+                  snapshot: {
+                    event_id: 1,
+                    kickoff_time: "2026-08-15T14:00:00Z",
+                    home_team_id: 1,
+                    home_team_name: "Northbridge FC",
+                    away_team_id: 2,
+                    away_team_name: "Southbank FC",
+                    home_score: 2,
+                    away_score: 1,
+                    started: true,
+                    finished: true,
+                  },
+                },
+                {
+                  entity_type: "fixture",
+                  season_id: "2025-26",
+                  entity_id: 31,
+                  display_name: "SOU v NOR",
+                  snapshot: {
+                    event_id: null,
+                    kickoff_time: null,
+                    home_team_id: 2,
+                    home_team_name: "Southbank FC",
+                    away_team_id: 1,
+                    away_team_name: "Northbridge FC",
+                    home_score: null,
+                    away_score: null,
+                    started: false,
+                    finished: false,
+                  },
+                },
+              ]
+            : baseStory.entities,
+      }),
+    );
+    const secondStrategy = {
+      ...communityStrategy,
+      key: "second-community-strategy",
+      name: "Second strategy",
+    };
+    const latest = vi
+      .fn<RelayApi["getLatestCommunityReport"]>()
+      .mockResolvedValue(completeReport);
+    const historical = vi
+      .fn<RelayApi["getCommunityReport"]>()
+      .mockResolvedValue(completeReport);
+    renderApplication(
+      `/community?strategy=${communityStrategy.key}&report=7`,
+      makeFakeRelayApi({
+        listCommunityStrategies: async () => [
+          communityStrategy,
+          secondStrategy,
+        ],
+        getLatestCommunityReport: latest,
+        getCommunityReport: historical,
+        listRecentCommunityReports: async () => ({
+          items: [communityReportSummary],
+          next_before_id: null,
+        }),
+      }),
+    );
+
+    expect(
+      await screen.findByText(/price unavailable/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/strength —/)).toBeInTheDocument();
+    expect(screen.getByText(/Open · average score —/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Northbridge FC v Southbank FC · 2–1/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Southbank FC v Northbridge FC · not started/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/target stories/)).not.toBeInTheDocument();
+    expect(historical).toHaveBeenCalledWith(7, expect.any(AbortSignal));
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Historical report"),
+      "",
+    );
+    await waitFor(() => expect(latest).toHaveBeenCalled());
+    await userEvent.selectOptions(
+      screen.getByLabelText("Historical report"),
+      "7",
+    );
+    expect(screen.getByLabelText("Historical report")).toHaveValue("7");
+    await userEvent.selectOptions(
+      screen.getByLabelText("Community strategy"),
+      secondStrategy.key,
+    );
+    await waitFor(() =>
+      expect(latest).toHaveBeenCalledWith(
+        secondStrategy.key,
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("recovers requests and ignores invalid report IDs", async () => {
+    const strategyRequest = vi
+      .fn<RelayApi["listCommunityStrategies"]>()
+      .mockRejectedValueOnce(new Error("Strategy catalog unavailable."))
+      .mockResolvedValue([communityStrategy]);
+    const reportRequest = vi
+      .fn<RelayApi["getLatestCommunityReport"]>()
+      .mockRejectedValueOnce(
+        new RelayApiError({
+          status: 500,
+          detail: "Report failed.",
+          path: "/v1/community-reports/latest",
+        }),
+      )
+      .mockResolvedValue(communityReport);
+    renderApplication(
+      `/community?strategy=${communityStrategy.key}&report=invalid`,
+      makeFakeRelayApi({
+        listCommunityStrategies: strategyRequest,
+        getLatestCommunityReport: reportRequest,
+      }),
+    );
+
+    expect(await screen.findByText("Request failed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByText("Community report unavailable"),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: communityReport.content.stories[0].headline,
+      }),
+    ).toBeInTheDocument();
+    expect(reportRequest).toHaveBeenCalledWith(
+      communityStrategy.key,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it.each([
+    [
+      "unknown strategy",
+      "/community?strategy=unknown",
+      makeFakeRelayApi({
+        listCommunityStrategies: async () => [communityStrategy],
+      }),
+      "Unknown strategy",
+    ],
+    [
+      "known strategy without a report",
+      `/community?strategy=${communityStrategy.key}`,
+      makeFakeRelayApi({
+        listCommunityStrategies: async () => [communityStrategy],
+        getLatestCommunityReport: async () => {
+          throw new RelayApiError({
+            status: 503,
+            detail: "No report has been generated.",
+            path: "/v1/community-reports/latest",
+          });
+        },
+      }),
+      "No report generated",
+    ],
+    [
+      "fatal report API failure",
+      `/community?strategy=${communityStrategy.key}`,
+      makeFakeRelayApi({
+        listCommunityStrategies: async () => [communityStrategy],
+        getLatestCommunityReport: async () => {
+          throw new RelayApiError({
+            status: 500,
+            detail: "Database unavailable.",
+            path: "/v1/community-reports/latest",
+          });
+        },
+      }),
+      "Community report unavailable",
+    ],
+  ])("shows a dedicated %s state", async (_label, path, api, expected) => {
+    renderApplication(path, api);
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+  });
+
   it("selects only the explicitly current season and event", async () => {
     renderApplication("/");
     expect(
@@ -38,7 +358,7 @@ describe("relay explorer application", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Event")).toHaveValue("1"),
     );
-    expect(screen.getByText("Version 2")).toBeInTheDocument();
+    expect(screen.getByText("Version 3")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThan(0);
     const apiReference = screen.getByRole("link", { name: /API reference/ });
     expect(apiReference).toHaveAttribute("href", "/api/docs");

@@ -14,6 +14,7 @@ from fpl_data_relay.domain.changes import (
     FieldChange,
     IngestionSourceKey,
 )
+from fpl_data_relay.domain.community import CommunityReportSummary
 from fpl_data_relay.domain.types import JsonValue
 
 
@@ -117,6 +118,13 @@ class EntityChangesResponse(ApiResponse):
 
     items: list[EntityChangeResponse]
     next_after_id: int | None
+
+
+class CommunityReportHistoryResponse(ApiResponse):
+    """Newest-first page of immutable community report summaries."""
+
+    items: list[CommunityReportSummary]
+    next_before_id: int | None
 
 
 class PipelineStatusResponse(ApiResponse):

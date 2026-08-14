@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import cast
 
 import pytest
@@ -11,6 +12,7 @@ from fpl_data_relay.adapters.outbound.postgres.schema_manager import (
     PostgresSchemaManager,
 )
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.community_queries import CommunityQueries
 from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import (
     IngestionResult,
@@ -21,12 +23,14 @@ from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.bootstrap import RelayRuntime, build_postgres_database
 from fpl_data_relay.config import Settings
+from fpl_data_relay.domain.community import CommunityReport
+from tests.adapters.outbound.test_community_postgres import draft
 from tests.conftest import FakeClient, FakePostgresPool, InMemoryStore
 
 
 class FakeCliOperations:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int | None, int | None]] = []
+        self.calls: list[tuple[str, object | None, object | None]] = []
         self.waking_attempts_remaining = 0
         self.schema_status_error: RuntimeError | None = None
 
@@ -60,6 +64,19 @@ class FakeCliOperations:
     ) -> IngestionResult:
         self.calls.append(("live", target_event_id, fixture_id))
         return ingestion_result()
+
+    def validate_community_config(self) -> int:
+        self.calls.append(("community-config", None, None))
+        return 1
+
+    async def run_community(
+        self,
+        *,
+        strategy_key: str,
+        scheduled_at: datetime,
+    ) -> CommunityReport:
+        self.calls.append(("community-run", strategy_key, scheduled_at))
+        return CommunityReport(id=7, **draft().model_dump())
 
     async def serve(self) -> None:
         self.calls.append(("serve", None, None))
@@ -96,7 +113,7 @@ def test_cli_preserves_config_schema_and_serve_commands() -> None:
     runner = CliRunner()
     app = create_cli_app(operations=operations)
     assert runner.invoke(app, ["config-check"]).output == "configuration ok\n"
-    assert "schema version 2 applied" in runner.invoke(app, ["db", "apply"]).output
+    assert "schema version 3 applied" in runner.invoke(app, ["db", "apply"]).output
     assert (
         runner.invoke(app, ["db", "status"]).output
         == "applied=[1] pending=[]\n"
@@ -108,6 +125,29 @@ def test_cli_preserves_config_schema_and_serve_commands() -> None:
         ("status", None, None),
         ("serve", None, None),
     ]
+
+
+def test_cli_validates_and_runs_explicit_community_strategy() -> None:
+    operations = FakeCliOperations()
+    runner = CliRunner()
+    app = create_cli_app(operations=operations)
+    validated = runner.invoke(app, ["community", "validate-config"])
+    executed = runner.invoke(
+        app,
+        [
+            "community",
+            "run",
+            "--strategy-key",
+            "weekly-community-momentum-v1",
+            "--scheduled-at",
+            "2026-08-13T06:00:00+00:00",
+        ],
+    )
+    assert validated.output == "community configuration ok strategies=1\n"
+    assert executed.exit_code == 0
+    assert "community report id=7" in executed.output
+    assert operations.calls[0][0] == "community-config"
+    assert operations.calls[1][0] == "community-run"
 
 
 def test_cli_drop_and_create_requires_confirmation() -> None:
@@ -294,6 +334,7 @@ async def test_relay_runtime_closes_shared_resources_exactly_once() -> None:
         reference_queries=ReferenceQueries(repository=store),
         live_queries=LiveQueries(repository=store),
         change_feed=ChangeFeed(repository=store),
+        community_queries=cast("CommunityQueries", object()),
         schema_manager=cast("PostgresSchemaManager", store),
     )
     await runtime.close()

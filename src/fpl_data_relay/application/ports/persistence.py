@@ -1,6 +1,7 @@
 """Narrow persistence ports owned by the application layer."""
 
 from contextlib import AbstractAsyncContextManager
+from datetime import date
 from typing import Protocol
 
 from fpl_data_relay.domain.changes import (
@@ -9,6 +10,11 @@ from fpl_data_relay.domain.changes import (
     IngestionMetadata,
     IngestionSourceStatus,
     UpsertOutcome,
+)
+from fpl_data_relay.domain.community import (
+    CommunityReport,
+    CommunityReportDraft,
+    CommunityReportSummary,
 )
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
@@ -234,3 +240,43 @@ class ChangeEventRepository(Protocol):
         *,
         season_id: str,
     ) -> list[IngestionSourceStatus]: ...
+
+
+class CommunityReportRepository(Protocol):
+    """Insert-only reports and bounded report history reads."""
+
+    async def insert_report(
+        self,
+        *,
+        report: CommunityReportDraft,
+    ) -> CommunityReport: ...
+
+    async def get_report(self, *, report_id: int) -> CommunityReport | None: ...
+
+    async def get_latest_report(
+        self,
+        *,
+        strategy_key: str,
+    ) -> CommunityReport | None: ...
+
+    async def get_report_for_date(
+        self,
+        *,
+        strategy_key: str,
+        report_date: date,
+    ) -> CommunityReport | None: ...
+
+    async def list_recent_reports(
+        self,
+        *,
+        strategy_key: str,
+        limit: int,
+    ) -> list[CommunityReportSummary]: ...
+
+    async def list_reports_before(
+        self,
+        *,
+        strategy_key: str,
+        before_id: int,
+        limit: int,
+    ) -> list[CommunityReportSummary]: ...

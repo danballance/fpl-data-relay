@@ -16,7 +16,7 @@ Swagger's **Try it out** requests work through either access path.
 - `GET /healthz` checks only that the application is running. It never accesses
   the database.
 - `GET /readyz` checks database access and migration version and returns
-  `{"status":"ready","schema_version":2}`.
+  `{"status":"ready","schema_version":3}`.
 
 An Aurora resume returns HTTP 503, `Retry-After: 5`, and:
 
@@ -101,3 +101,24 @@ freshness without creating a change event.
 Entity collections return 503 when their source data has not yet been ingested.
 Unknown individual entities return 404. Invalid pagination arguments return
 FastAPI validation errors.
+
+## Community intelligence
+
+The Community Intelligence tag exposes only derived, read-only resources:
+
+- `GET /v1/community-strategies`
+- `GET /v1/community-reports/latest?strategy_key=...`
+- `GET /v1/community-reports/recent?strategy_key=...&limit=...`
+- `GET /v1/community-reports/history?strategy_key=...&before_id=...&limit=...`
+- `GET /v1/community-reports/{report_id}`
+
+Both history limits are required integers from 1 through 100. Recent and history
+responses contain newest-first summaries and `next_before_id`; pass that cursor
+to the history route. Latest and by-ID return the complete immutable report,
+including coverage, model usage, ranked story evidence, momentum components, and
+typed canonical entity snapshots.
+
+An unknown strategy or report ID returns 404. A configured strategy that has
+never published returns 503. Database availability uses the existing stable
+service errors. There are no public trigger or write routes, and report creation
+does not emit an FPL ingestion change event.

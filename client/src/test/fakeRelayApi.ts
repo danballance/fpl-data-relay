@@ -1,6 +1,9 @@
 import type { RelayApi } from "../api/relay-api";
 import type {
   ChangeEvent,
+  CommunityReport,
+  CommunityReportSummary,
+  CommunityStrategy,
   Element,
   ElementType,
   Event,
@@ -14,7 +17,7 @@ import type {
   Team,
 } from "../api/types";
 
-export const health: Health = { status: "ok", schema_version: 2 };
+export const health: Health = { status: "ok", schema_version: 3 };
 export const season: Season = {
   id: "2025-26",
   start_year: 2025,
@@ -165,12 +168,152 @@ export const ingestionStatus: IngestionStatus = {
   },
 };
 
+export const communityStrategy: CommunityStrategy = {
+  key: "weekly-community-momentum-v1",
+  name: "Weekly Community Momentum",
+  description: "The leading FPL topics from the previous seven days.",
+  cadence: "cron(0 6 * * ? *)",
+  timezone: "Europe/London",
+  lookback_days: 7,
+  target_story_count: 10,
+};
+
+export const communityReport: CommunityReport = {
+  id: 7,
+  strategy_key: communityStrategy.key,
+  strategy_version: 1,
+  report_date: "2026-08-13",
+  season_id: season.id,
+  as_of_event_id: event.id,
+  window_start: "2026-08-06T06:00:00Z",
+  window_end: "2026-08-13T06:00:00Z",
+  generated_at: "2026-08-13T06:05:00Z",
+  content: {
+    strategy_name: communityStrategy.name,
+    strategy_description: communityStrategy.description,
+    ranking_policy: "community_momentum_v1",
+    extraction_prompt_version: 1,
+    synthesis_prompt_version: 1,
+    target_story_count: 10,
+    coverage: {
+      configured_source_count: 2,
+      successful_source_count: 1,
+      failed_sources: [
+        {
+          source_key: "youtube-one",
+          source_type: "youtube",
+          code: "youtube_fetch",
+        },
+      ],
+      excluded_document_count: 1,
+      exclusions: [
+        {
+          source_key: "youtube-one",
+          source_type: "youtube",
+          code: "youtube_native_caption_unavailable",
+          count: 1,
+        },
+      ],
+      x_document_count: 1,
+      youtube_document_count: 0,
+      blog_document_count: 0,
+    },
+    model_usage: {
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      reasoning_effort: "medium",
+      response_ids: ["resp_1"],
+      input_tokens: 100,
+      output_tokens: 50,
+    },
+    stories: [
+      {
+        rank: 1,
+        headline: "Ada is attracting transfer interest",
+        summary: "Several managers discussed bringing Ada into their teams.",
+        category: "transfer_in",
+        momentum_score: 76,
+        momentum_components: {
+          source_breadth: 21,
+          evidence_volume: 12,
+          engagement: 18,
+          recency: 15,
+          actionability: 10,
+        },
+        evidence: [
+          {
+            document_id: "x:1",
+            source_key: "x-one",
+            source_type: "x",
+            publisher: "FPL Analyst",
+            title: "Post by @analyst",
+            url: "https://x.com/analyst/status/1",
+            published_at: "2026-08-13T05:00:00Z",
+            engagement: {
+              type: "x",
+              likes: 20,
+              replies: 3,
+              reposts: 5,
+              quotes: 1,
+            },
+          },
+        ],
+        entities: [
+          {
+            entity_type: "player",
+            season_id: season.id,
+            entity_id: element.id,
+            display_name: element.web_name,
+            snapshot: {
+              web_name: element.web_name,
+              first_name: element.first_name,
+              second_name: element.second_name,
+              team_id: team.id,
+              team_name: team.name,
+              element_type_id: elementType.id,
+              element_type_name: elementType.singular_name,
+              now_cost: element.now_cost ?? null,
+              selected_by_percent: element.selected_by_percent ?? null,
+              total_points: element.total_points ?? null,
+              form: element.form ?? null,
+              minutes: 180,
+              goals_scored: 2,
+              assists: 1,
+              clean_sheets: 0,
+              status: element.status ?? null,
+              news: null,
+              chance_of_playing_next_round: 100,
+              chance_of_playing_this_round: 100,
+            },
+          },
+        ],
+      },
+    ],
+  },
+};
+
+export const communityReportSummary: CommunityReportSummary = {
+  id: communityReport.id,
+  strategy_key: communityReport.strategy_key,
+  strategy_version: communityReport.strategy_version,
+  report_date: communityReport.report_date,
+  season_id: communityReport.season_id,
+  as_of_event_id: communityReport.as_of_event_id,
+  window_start: communityReport.window_start,
+  window_end: communityReport.window_end,
+  generated_at: communityReport.generated_at,
+  story_count: communityReport.content.stories.length,
+  successful_source_count:
+    communityReport.content.coverage.successful_source_count,
+  failed_source_count: communityReport.content.coverage.failed_sources.length,
+};
+
 export function makeFakeRelayApi(
   overrides: Partial<RelayApi> = {},
 ): RelayApi {
   const api: RelayApi = {
     getHealth: async () => health,
-    getReadiness: async () => ({ status: "ready", schema_version: 2 }),
+    getReadiness: async () => ({ status: "ready", schema_version: 3 }),
     listSeasons: async () => [season],
     getCurrentSeason: async () => season,
     getSeason: async () => season,
@@ -210,6 +353,21 @@ export function makeFakeRelayApi(
       next_after_id: null,
     }),
     getIngestionStatus: async () => ingestionStatus,
+    listCommunityStrategies: async () => [],
+    getLatestCommunityReport: async () => {
+      throw new Error("No fake community report configured.");
+    },
+    getCommunityReport: async () => {
+      throw new Error("No fake community report configured.");
+    },
+    listRecentCommunityReports: async () => ({
+      items: [],
+      next_before_id: null,
+    }),
+    listCommunityReportHistory: async () => ({
+      items: [],
+      next_before_id: null,
+    }),
   };
   return { ...api, ...overrides };
 }

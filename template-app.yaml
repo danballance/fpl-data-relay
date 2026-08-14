@@ -18,6 +18,17 @@ Parameters:
     Type: String
     AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
     Description: S3 key prefix reserved for collected FPL payloads.
+  CommunityCredentialSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+    Description: Pre-existing four-key credential secret for community providers.
+  CommunityScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Explicit community schedule rollout state.
+
+Conditions:
+  CommunityScheduleEnabled: !Equals [!Ref CommunityScheduleState, ENABLED]
 
 Globals:
   Function:
@@ -122,6 +133,23 @@ Resources:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
 
+  CommunityDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  CommunityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CommunityDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
   PayloadBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
@@ -181,6 +209,11 @@ Resources:
     Properties:
       Name: !Sub "${AWS::StackName}-reference"
 
+  CommunityScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-community"
+
   ScheduleTargetRole:
     Type: AWS::IAM::Role
     Properties:
@@ -200,6 +233,7 @@ Resources:
                 Action: sqs:SendMessage
                 Resource:
                   - !GetAtt FetchQueue.Arn
+                  - !GetAtt CommunityQueue.Arn
                   - !GetAtt ScheduleDeadLetterQueue.Arn
 
   ReferenceSchedule:
@@ -221,6 +255,27 @@ Resources:
           Arn: !GetAtt ScheduleDeadLetterQueue.Arn
         RetryPolicy:
           MaximumEventAgeInSeconds: 900
+          MaximumRetryAttempts: 3
+
+  CommunitySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${AWS::StackName}-community-daily"
+      GroupName: !Ref CommunityScheduleGroup
+      Description: Dispatch active community intelligence strategies each morning.
+      ScheduleExpression: cron(0 6 * * ? *)
+      ScheduleExpressionTimezone: Europe/London
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: !Ref CommunityScheduleState
+      Target:
+        Arn: !GetAtt CommunityQueue.Arn
+        RoleArn: !GetAtt ScheduleTargetRole.Arn
+        Input: '{"version":1,"kind":"community_dispatch","scheduled_at":"<aws.scheduler.scheduled-time>"}'
+        DeadLetterConfig:
+          Arn: !GetAtt ScheduleDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
           MaximumRetryAttempts: 3
 
   IngestionFunction:
@@ -298,6 +353,53 @@ Resources:
             BatchSize: 1
             Enabled: true
 
+  CommunityFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Handler: fpl_data_relay.lambda_community.handler
+      MemorySize: 1536
+      Timeout: 840
+      ReservedConcurrentExecutions: 1
+      LoggingConfig:
+        ApplicationLogLevel: INFO
+        LogFormat: JSON
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          COMMUNITY_QUEUE_URL: !Ref CommunityQueue
+          COMMUNITY_CREDENTIAL_SECRET_ARN: !Ref CommunityCredentialSecretArn
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt CommunityQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CommunityQueue.QueueName
+        - Statement:
+            - Sid: UseDataApi
+              Effect: Allow
+              Action:
+                - rds-data:ExecuteStatement
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseClusterArn"
+            - Sid: ReadDatabaseSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                Fn::ImportValue: !Sub "${DataStackName}-DatabaseSecretArn"
+            - Sid: ReadCommunityCredentialSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref CommunityCredentialSecretArn
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CommunityQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
   ApiLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Delete
@@ -312,6 +414,14 @@ Resources:
     UpdateReplacePolicy: Delete
     Properties:
       LogGroupName: !Sub "/aws/lambda/${IngestionFunction}"
+      RetentionInDays: 14
+
+  CommunityLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CommunityFunction}"
       RetentionInDays: 14
 
   AlertTopic:
@@ -349,6 +459,24 @@ Resources:
       Dimensions:
         - Name: QueueName
           Value: !GetAtt ResultDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CommunityDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Community jobs reached the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CommunityDeadLetterQueue.QueueName
       Statistic: Maximum
       Period: 300
       EvaluationPeriods: 1
@@ -410,6 +538,61 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CommunityScheduleErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Community scheduler could not deliver to its target.
+      Namespace: AWS/Scheduler
+      MetricName: TargetErrorCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref CommunityScheduleGroup
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CommunityScheduleDroppedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Community scheduler exhausted delivery retries.
+      Namespace: AWS/Scheduler
+      MetricName: InvocationDroppedCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref CommunityScheduleGroup
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CommunityScheduleMissedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CommunityScheduleEnabled
+    Properties:
+      AlarmDescription: Community scheduler made no daily attempt within 26 hours.
+      Namespace: AWS/Scheduler
+      MetricName: InvocationAttemptCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref CommunityScheduleGroup
+      Statistic: Sum
+      Period: 93600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
       AlarmActions:
         - !Ref AlertTopic
 
@@ -482,6 +665,24 @@ Resources:
       AlarmActions:
         - !Ref AlertTopic
 
+  CommunityQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Community jobs have waited more than fifteen minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CommunityQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 900
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
   IngestionErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -495,6 +696,24 @@ Resources:
       Period: 300
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  CommunityErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Community worker executions failed.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CommunityFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
@@ -649,6 +868,10 @@ Outputs:
     Value: !Ref ResultDeadLetterQueue
   ScheduleDeadLetterQueueUrl:
     Value: !Ref ScheduleDeadLetterQueue
+  CommunityQueueUrl:
+    Value: !Ref CommunityQueue
+  CommunityDeadLetterQueueUrl:
+    Value: !Ref CommunityDeadLetterQueue
   PayloadBucketName:
     Value: !Ref PayloadBucket
   PayloadPrefix:

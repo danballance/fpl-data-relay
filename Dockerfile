@@ -9,7 +9,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --group local --group aws
+RUN uv sync --frozen --no-dev --group local --group aws --group community
 
 EXPOSE 8000
 

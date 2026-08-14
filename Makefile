@@ -21,7 +21,7 @@ endef
 	lint lint-python lint-client test test-python test-client \
 	check check-python check-client infra images ci deploy deploy-status \
 	require-root-env require-client-env prepare-local-database \
-	build-ApiFunction build-IngestionFunction build-python
+	build-ApiFunction build-IngestionFunction build-CommunityFunction build-python
 
 help: ## Show this help and the required developer tools.
 	@printf 'FPL Data Relay\n\n'
@@ -150,6 +150,14 @@ prepare-local-database: require-root-env
 build-ApiFunction: build-python
 
 build-IngestionFunction: build-python
+
+build-CommunityFunction:
+	test -n "$(ARTIFACTS_DIR)"
+	uv export --frozen --no-dev --group aws --group community --no-emit-project \
+		--format requirements-txt | \
+		uv pip install --python-version 3.14 --python-platform x86_64-manylinux_2_28 \
+		--target "$(PYTHON_ARTIFACTS)" --no-deps --requirements -
+	cp -R src/fpl_data_relay "$(PYTHON_ARTIFACTS)/fpl_data_relay"
 
 build-python:
 	test -n "$(ARTIFACTS_DIR)"

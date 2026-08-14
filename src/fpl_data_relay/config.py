@@ -42,6 +42,13 @@ COLLECTOR_REQUIRED_ENV_VARS = [
     "COLLECTOR_HEARTBEAT_PATH",
 ]
 
+COMMUNITY_CREDENTIAL_ENV_VARS = [
+    "OPENAI_API_KEY",
+    "X_BEARER_TOKEN",
+    "YOUTUBE_API_KEY",
+    "SUPADATA_API_KEY",
+]
+
 
 class Settings(BaseSettings):
     """Validated application settings loaded from explicit environment names."""
@@ -99,6 +106,17 @@ class CollectorSettings(BaseModel):
     payload_prefix: str = Field(min_length=1)
     heartbeat_path: str = Field(min_length=1)
     fpl: FplSettings
+
+
+class CommunityCredentials(BaseModel):
+    """Exactly the four credentials consumed by the community worker."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    openai_api_key: str = Field(min_length=1)
+    x_bearer_token: str = Field(min_length=1)
+    youtube_api_key: str = Field(min_length=1)
+    supadata_api_key: str = Field(min_length=1)
 
 
 def load_settings_from_environment() -> Settings:
@@ -182,3 +200,21 @@ def load_postgres_maintenance_database_url_from_environment() -> str:
             f"{POSTGRES_MAINTENANCE_DATABASE_URL}",
         )
     return value
+
+
+def load_community_credentials_from_environment() -> CommunityCredentials:
+    """Load the explicit local equivalents of the production secret keys."""
+    missing_names = [
+        name for name in COMMUNITY_CREDENTIAL_ENV_VARS if name not in os.environ
+    ]
+    if missing_names:
+        joined_names = ", ".join(missing_names)
+        raise RuntimeError(f"Missing required environment variables: {joined_names}")
+    return CommunityCredentials.model_validate(
+        {
+            "openai_api_key": os.environ["OPENAI_API_KEY"],
+            "x_bearer_token": os.environ["X_BEARER_TOKEN"],
+            "youtube_api_key": os.environ["YOUTUBE_API_KEY"],
+            "supadata_api_key": os.environ["SUPADATA_API_KEY"],
+        },
+    )

@@ -11,3 +11,24 @@ class DatabaseUnavailableError(RuntimeError):
 
 class SchemaUnavailableError(RuntimeError):
     """The database schema is missing or incompatible."""
+
+
+class CommunityConfigurationError(RuntimeError):
+    """Community strategy or credential configuration is invalid."""
+
+
+class CommunitySourceError(RuntimeError):
+    """Stable source failure with an explicit abort policy."""
+
+    def __init__(self, *, code: str, fatal: bool, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.fatal = fatal
+
+
+class CommunityModelError(RuntimeError):
+    """The agent response failed provider or integrity validation."""
+
+
+class CommunityPublicationError(RuntimeError):
+    """A completed analysis did not meet publication invariants."""

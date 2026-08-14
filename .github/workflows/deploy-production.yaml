@@ -27,6 +27,8 @@ jobs:
       ALERT_EMAIL: nixprivacy@pm.me
       COLLECTOR_USER_NAME: fpl-relay-nas-source
       PAYLOAD_PREFIX: payloads
+      COMMUNITY_CREDENTIAL_SECRET_ARN: ${{ secrets.COMMUNITY_CREDENTIAL_SECRET_ARN }}
+      COMMUNITY_SCHEDULE_STATE: DISABLED
       COLLECTOR_IMAGE: ghcr.io/danballance/fpl-data-relay-collector
       GH_TOKEN: ${{ github.token }}
 
@@ -188,7 +190,9 @@ jobs:
               "DataStackName=${DATA_STACK_NAME}" \
               "AlertEmail=${ALERT_EMAIL}" \
               "CollectorUserName=${COLLECTOR_USER_NAME}" \
-              "PayloadPrefix=${PAYLOAD_PREFIX}"
+              "PayloadPrefix=${PAYLOAD_PREFIX}" \
+              "CommunityCredentialSecretArn=${COMMUNITY_CREDENTIAL_SECRET_ARN}" \
+              "CommunityScheduleState=${COMMUNITY_SCHEDULE_STATE}"
 
       - name: Build frontend
         run: |

@@ -1,7 +1,9 @@
 """Composition root for production relay runtimes."""
 
 import os
+from datetime import UTC, datetime, timedelta
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import uvicorn
@@ -15,6 +17,9 @@ from fpl_data_relay.adapters.outbound.postgres.administration import (
 )
 from fpl_data_relay.adapters.outbound.postgres.changes import (
     PostgresChangeEventRepository,
+)
+from fpl_data_relay.adapters.outbound.postgres.community import (
+    PostgresCommunityReportRepository,
 )
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
@@ -30,6 +35,9 @@ from fpl_data_relay.adapters.outbound.postgres.schema_manager import (
 )
 from fpl_data_relay.adapters.outbound.rds_data import create_rds_data_pool
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.community_jobs import CommunityStrategyJob
+from fpl_data_relay.application.community_queries import CommunityQueries
+from fpl_data_relay.application.community_strategies import load_strategy_registry
 from fpl_data_relay.application.database import SCHEMA_VERSION, DatabaseService
 from fpl_data_relay.application.ingestion.service import (
     IngestionResult,
@@ -40,10 +48,12 @@ from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.config import (
     Settings,
+    load_community_credentials_from_environment,
     load_postgres_maintenance_database_url_from_environment,
     load_rds_data_settings_from_environment,
     load_settings_from_environment,
 )
+from fpl_data_relay.domain.community import CommunityReport
 
 
 class RelayRuntime:
@@ -58,6 +68,7 @@ class RelayRuntime:
         reference_queries: ReferenceQueries,
         live_queries: LiveQueries,
         change_feed: ChangeFeed,
+        community_queries: CommunityQueries,
         schema_manager: PostgresSchemaManager,
     ) -> None:
         self.database = database
@@ -66,6 +77,7 @@ class RelayRuntime:
         self.reference_queries = reference_queries
         self.live_queries = live_queries
         self.change_feed = change_feed
+        self.community_queries = community_queries
         self.schema_manager = schema_manager
         self._closed = False
 
@@ -147,6 +159,10 @@ async def build_relay_runtime(*, settings: Settings) -> RelayRuntime:
         reference_queries=ReferenceQueries(repository=reference_repository),
         live_queries=LiveQueries(repository=live_repository),
         change_feed=ChangeFeed(repository=change_repository),
+        community_queries=CommunityQueries(
+            repository=PostgresCommunityReportRepository(database=database),
+            registry=load_strategy_registry(),
+        ),
         schema_manager=PostgresSchemaManager(database=database),
     )
 
@@ -183,6 +199,7 @@ async def create_local_app() -> FastAPI:
         reference_queries=runtime.reference_queries,
         live_queries=runtime.live_queries,
         change_feed=runtime.change_feed,
+        community_queries=runtime.community_queries,
         schema_manager=runtime.schema_manager,
         ingestion_service=runtime.ingestion_service,
         reference_poll_seconds=settings.reference_poll_seconds,
@@ -281,6 +298,74 @@ class ProductionCliOperations:
             )
         finally:
             await runtime.close()
+
+    def validate_community_config(self) -> int:
+        return len(load_strategy_registry().list_definitions())
+
+    async def run_community(
+        self,
+        *,
+        strategy_key: str,
+        scheduled_at: datetime,
+    ) -> CommunityReport:
+        import httpx
+        from openai import AsyncOpenAI
+
+        from fpl_data_relay.adapters.outbound.community_sources import (
+            CommunityHttpSourceGateway,
+        )
+        from fpl_data_relay.adapters.outbound.openai_community import (
+            OpenAICommunityAnalyzer,
+        )
+        from fpl_data_relay.application.community_ranking import (
+            CommunityMomentumRankingPolicy,
+        )
+        from fpl_data_relay.application.community_service import CommunityService
+
+        registry = load_strategy_registry()
+        definition = registry.require(strategy_key=strategy_key).definition
+        credentials = load_community_credentials_from_environment()
+        database = await build_database_from_environment()
+        gateway = CommunityHttpSourceGateway(
+            credentials=credentials,
+            client=httpx.AsyncClient(),
+        )
+        analyzer = OpenAICommunityAnalyzer(
+            client=AsyncOpenAI(api_key=credentials.openai_api_key),
+        )
+        window_end = scheduled_at.astimezone(UTC)
+        job = CommunityStrategyJob(
+            version=1,
+            kind="community_strategy",
+            strategy_key=definition.key,
+            strategy_version=definition.version,
+            report_date=scheduled_at.astimezone(
+                ZoneInfo(definition.schedule_timezone),
+            ).date(),
+            window_start=window_end - timedelta(days=definition.lookback_days),
+            window_end=window_end,
+        )
+        try:
+            await PostgresSchemaManager(database=database).check_schema_version(
+                expected_version=SCHEMA_VERSION,
+            )
+            return await CommunityService(
+                registry=registry,
+                source_gateway=gateway,
+                analyzer=analyzer,
+                ranking_policy=CommunityMomentumRankingPolicy(),
+                reports=PostgresCommunityReportRepository(database=database),
+                references=PostgresReferenceRepository(database=database),
+                clock=lambda: datetime.now(tz=UTC),
+            ).run(job=job)
+        finally:
+            try:
+                await analyzer.close()
+            finally:
+                try:
+                    await gateway.close()
+                finally:
+                    await database.close()
 
     async def serve(self) -> None:
         api_app = await create_local_app()

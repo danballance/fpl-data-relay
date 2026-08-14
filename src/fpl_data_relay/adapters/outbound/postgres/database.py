@@ -367,6 +367,11 @@ class PostgresDatabase(_PostgresOperations):
         """Create a store around an asyncpg-compatible pool."""
         self._pool = pool
 
+    @property
+    def pool(self) -> PoolProtocol:
+        """Expose the shared pool to narrow repository adapters."""
+        return self._pool
+
     async def upsert_reference_snapshot(
         self,
         *,

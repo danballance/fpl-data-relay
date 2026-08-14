@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from fpl_data_relay.adapters.inbound.http.app import create_app
 from fpl_data_relay.application.change_feed import ChangeFeed
+from fpl_data_relay.application.community_queries import CommunityQueries
 from fpl_data_relay.application.errors import (
     DatabaseUnavailableError,
     DatabaseWakingError,
@@ -25,7 +26,85 @@ from fpl_data_relay.domain.changes import (
     FieldChange,
     IngestionSourceKey,
 )
+from fpl_data_relay.domain.community import (
+    CommunityReport,
+    CommunityReportSummary,
+    CommunityStrategySummary,
+)
+from tests.adapters.outbound.test_community_postgres import draft
 from tests.conftest import FakeClient, InMemoryStore
+
+
+class FakeCommunityQueries(CommunityQueries):
+    def __init__(self, *, report: CommunityReport | None) -> None:
+        self.report = report
+
+    def list_strategies(self) -> list[CommunityStrategySummary]:
+        return [
+            CommunityStrategySummary(
+                key="weekly-community-momentum-v1",
+                name="Weekly momentum",
+                description="Community topics",
+                cadence="cron(0 6 * * ? *)",
+                timezone="Europe/London",
+                lookback_days=7,
+                target_story_count=10,
+            ),
+        ]
+
+    def has_strategy(self, *, strategy_key: str) -> bool:
+        return strategy_key == "weekly-community-momentum-v1"
+
+    async def latest(self, *, strategy_key: str) -> CommunityReport | None:
+        del strategy_key
+        return self.report
+
+    async def get(self, *, report_id: int) -> CommunityReport | None:
+        return (
+            self.report
+            if self.report is not None and report_id == self.report.id
+            else None
+        )
+
+    async def recent(
+        self,
+        *,
+        strategy_key: str,
+        limit: int,
+    ) -> list[CommunityReportSummary]:
+        del strategy_key, limit
+        return [] if self.report is None else [summary(report=self.report)]
+
+    async def history(
+        self,
+        *,
+        strategy_key: str,
+        before_id: int,
+        limit: int,
+    ) -> list[CommunityReportSummary]:
+        del strategy_key, before_id, limit
+        return []
+
+
+def community_report() -> CommunityReport:
+    return CommunityReport(id=7, **draft().model_dump())
+
+
+def summary(*, report: CommunityReport) -> CommunityReportSummary:
+    return CommunityReportSummary(
+        id=report.id,
+        strategy_key=report.strategy_key,
+        strategy_version=report.strategy_version,
+        report_date=report.report_date,
+        season_id=report.season_id,
+        as_of_event_id=report.as_of_event_id,
+        window_start=report.window_start,
+        window_end=report.window_end,
+        generated_at=report.generated_at,
+        story_count=len(report.content.stories),
+        successful_source_count=report.content.coverage.successful_source_count,
+        failed_source_count=len(report.content.coverage.failed_sources),
+    )
 
 
 def settings() -> Settings:
@@ -70,6 +149,7 @@ def create_test_app(
         reference_queries=ReferenceQueries(repository=store),
         live_queries=LiveQueries(repository=store),
         change_feed=ChangeFeed(repository=store),
+        community_queries=FakeCommunityQueries(report=community_report()),
         schema_manager=store,
         ingestion_service=ingestion_service,
         reference_poll_seconds=runtime_settings.reference_poll_seconds,
@@ -106,7 +186,86 @@ def test_healthz_returns_schema_version() -> None:
     with TestClient(app) as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json()["schema_version"] == 2
+    assert response.json()["schema_version"] == 3
+
+
+def test_community_endpoints_enforce_status_and_pagination_contracts() -> None:
+    app = build_test_app()
+    with TestClient(app) as client:
+        strategies = client.get("/v1/community-strategies")
+        latest = client.get(
+            "/v1/community-reports/latest",
+            params={"strategy_key": "weekly-community-momentum-v1"},
+        )
+        recent = client.get(
+            "/v1/community-reports/recent",
+            params={"strategy_key": "weekly-community-momentum-v1", "limit": 1},
+        )
+        history = client.get(
+            "/v1/community-reports/history",
+            params={
+                "strategy_key": "weekly-community-momentum-v1",
+                "before_id": 7,
+                "limit": 10,
+            },
+        )
+        historical = client.get("/v1/community-reports/7")
+        missing_report = client.get("/v1/community-reports/99")
+        unknown_strategy = client.get(
+            "/v1/community-reports/latest",
+            params={"strategy_key": "unknown"},
+        )
+    assert strategies.json()[0]["key"] == "weekly-community-momentum-v1"
+    assert latest.json()["id"] == 7
+    assert recent.json()["next_before_id"] == 7
+    assert history.json() == {"items": [], "next_before_id": None}
+    assert historical.status_code == 200
+    assert missing_report.status_code == 404
+    assert unknown_strategy.status_code == 404
+
+
+def test_known_strategy_without_reports_returns_503() -> None:
+    store = InMemoryStore()
+    service = IngestionService(client=FakeClient(), repository=store)
+
+    async def shutdown() -> None:
+        await store.close()
+
+    runtime_settings = settings()
+    app = create_app(
+        reference_queries=ReferenceQueries(repository=store),
+        live_queries=LiveQueries(repository=store),
+        change_feed=ChangeFeed(repository=store),
+        community_queries=FakeCommunityQueries(report=None),
+        schema_manager=store,
+        ingestion_service=service,
+        reference_poll_seconds=runtime_settings.reference_poll_seconds,
+        live_poll_seconds=runtime_settings.live_poll_seconds,
+        idle_poll_seconds=runtime_settings.idle_poll_seconds,
+        start_scheduler=False,
+        check_schema_on_startup=True,
+        shutdown=shutdown,
+    )
+    with TestClient(app) as client:
+        latest = client.get(
+            "/v1/community-reports/latest",
+            params={"strategy_key": "weekly-community-momentum-v1"},
+        )
+        recent = client.get(
+            "/v1/community-reports/recent",
+            params={"strategy_key": "weekly-community-momentum-v1", "limit": 10},
+        )
+        history = client.get(
+            "/v1/community-reports/history",
+            params={
+                "strategy_key": "weekly-community-momentum-v1",
+                "before_id": 7,
+                "limit": 10,
+            },
+        )
+    assert latest.status_code == 503
+    assert recent.status_code == 503
+    assert history.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -214,6 +373,11 @@ def test_openapi_documents_concrete_api_contracts() -> None:
             "list_entity_changes"
         ),
         "/v1/ingestion-status": "get_ingestion_status",
+        "/v1/community-strategies": "list_community_strategies",
+        "/v1/community-reports/latest": "get_latest_community_report",
+        "/v1/community-reports/recent": "list_recent_community_reports",
+        "/v1/community-reports/history": "list_community_report_history",
+        "/v1/community-reports/{report_id}": "get_community_report",
     }
     actual_operation_ids = {
         path: operation["get"]["operationId"] for path, operation in paths.items()
@@ -246,6 +410,11 @@ def test_openapi_documents_concrete_api_contracts() -> None:
         "/v1/change-events/history": ["Change Events"],
         "/v1/change-events/{change_event_id}/entity-changes": ["Change Events"],
         "/v1/ingestion-status": ["Change Events"],
+        "/v1/community-strategies": ["Community Intelligence"],
+        "/v1/community-reports/latest": ["Community Intelligence"],
+        "/v1/community-reports/recent": ["Community Intelligence"],
+        "/v1/community-reports/history": ["Community Intelligence"],
+        "/v1/community-reports/{report_id}": ["Community Intelligence"],
     }
     actual_tags = {
         path: operation["get"]["tags"] for path, operation in paths.items()
@@ -256,6 +425,7 @@ def test_openapi_documents_concrete_api_contracts() -> None:
         "Reference Data",
         "Live Data",
         "Change Events",
+        "Community Intelligence",
     ]
     assert "JsonValue" in components
 

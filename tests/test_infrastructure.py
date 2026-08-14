@@ -112,6 +112,50 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
     assert "MetricName: InvocationDroppedCount" in template
 
 
+def test_application_template_has_disabled_isolated_community_runtime() -> None:
+    template = (ROOT / "template-app.yaml").read_text()
+    workflow = (ROOT / ".github/workflows/deploy-production.yaml").read_text()
+    makefile = (ROOT / "Makefile").read_text()
+
+    for logical_id in (
+        "CommunityQueue:",
+        "CommunityDeadLetterQueue:",
+        "CommunityFunction:",
+        "CommunitySchedule:",
+        "CommunityLogGroup:",
+        "CommunityErrorAlarm:",
+        "CommunityQueueAgeAlarm:",
+        "CommunityDeadLetterAlarm:",
+        "CommunityScheduleErrorAlarm:",
+        "CommunityScheduleDroppedAlarm:",
+        "CommunityScheduleMissedAlarm:",
+    ):
+        assert logical_id in template
+
+    community_function = template.split("CommunityFunction:", maxsplit=1)[1].split(
+        "ApiLogGroup:",
+        maxsplit=1,
+    )[0]
+    assert "Timeout: 840" in community_function
+    assert "ReservedConcurrentExecutions: 1" in community_function
+    assert "BatchSize: 1" in community_function
+    assert "ReadCommunityCredentialSecret" in community_function
+    assert "rds-data:ExecuteStatement" in community_function
+    assert "rds-data:BeginTransaction" not in community_function
+    assert "rds-data:BatchExecuteStatement" not in community_function
+    assert 'Resource: "*"' not in community_function
+    assert "ScheduleExpression: cron(0 6 * * ? *)" in template
+    assert "ScheduleExpressionTimezone: Europe/London" in template
+    assert "State: !Ref CommunityScheduleState" in template
+    assert "CommunityScheduleEnabled: !Equals" in template
+    assert "Condition: CommunityScheduleEnabled" in template
+    assert "VisibilityTimeout: 900" in template
+    assert "RetentionInDays: 14" in template
+    assert "COMMUNITY_SCHEDULE_STATE: DISABLED" in workflow
+    assert '"CommunityScheduleState=${COMMUNITY_SCHEDULE_STATE}"' in workflow
+    assert "--group community" in makefile
+
+
 def test_data_stack_has_layered_database_protection() -> None:
     template = (ROOT / "template-data.yaml").read_text()
     assert "DeletionPolicy: Snapshot" in template

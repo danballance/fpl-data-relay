@@ -5,6 +5,9 @@ import { RelayApiError } from "./errors";
 import type {
   ChangeEvents,
   ChangeEventHistory,
+  CommunityReport,
+  CommunityReportHistory,
+  CommunityStrategy,
   Element,
   ElementType,
   Event,
@@ -91,6 +94,26 @@ export interface RelayApi {
     signal: AbortSignal,
   ): Promise<EntityChanges>;
   getIngestionStatus(signal: AbortSignal): Promise<IngestionStatus>;
+  listCommunityStrategies(signal: AbortSignal): Promise<CommunityStrategy[]>;
+  getLatestCommunityReport(
+    strategyKey: string,
+    signal: AbortSignal,
+  ): Promise<CommunityReport>;
+  getCommunityReport(
+    reportId: number,
+    signal: AbortSignal,
+  ): Promise<CommunityReport>;
+  listRecentCommunityReports(
+    strategyKey: string,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<CommunityReportHistory>;
+  listCommunityReportHistory(
+    strategyKey: string,
+    beforeId: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<CommunityReportHistory>;
 }
 
 interface ApiResult<T> {
@@ -438,6 +461,53 @@ export function createRelayApi({
       requestJson({
         baseUrl,
         path: "/v1/ingestion-status",
+        signal,
+        fetchImplementation,
+      }),
+    listCommunityStrategies: (signal) =>
+      requestJson({
+        baseUrl,
+        path: "/v1/community-strategies",
+        signal,
+        fetchImplementation,
+      }),
+    getLatestCommunityReport: (strategyKey, signal) =>
+      requestJson({
+        baseUrl,
+        path:
+          "/v1/community-reports/latest?strategy_key=" +
+          encodeURIComponent(strategyKey),
+        signal,
+        fetchImplementation,
+      }),
+    getCommunityReport: (reportId, signal) =>
+      requestJson({
+        baseUrl,
+        path: `/v1/community-reports/${reportId}`,
+        signal,
+        fetchImplementation,
+      }),
+    listRecentCommunityReports: (strategyKey, limit, signal) =>
+      requestJson({
+        baseUrl,
+        path:
+          "/v1/community-reports/recent?strategy_key=" +
+          `${encodeURIComponent(strategyKey)}&limit=${limit}`,
+        signal,
+        fetchImplementation,
+      }),
+    listCommunityReportHistory: (
+      strategyKey,
+      beforeId,
+      limit,
+      signal,
+    ) =>
+      requestJson({
+        baseUrl,
+        path:
+          "/v1/community-reports/history?strategy_key=" +
+          `${encodeURIComponent(strategyKey)}&before_id=${beforeId}` +
+          `&limit=${limit}`,
         signal,
         fetchImplementation,
       }),
