@@ -22,6 +22,9 @@ class CommunityModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
 
+ProviderOption = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
+
+
 class SourceType(StrEnum):
     """Supported public community media sources."""
 
@@ -145,8 +148,8 @@ class CommunityStrategyDefinition(CommunityModel):
     minimum_story_count: int = Field(ge=1, le=10)
     maximum_candidate_stories: int = Field(ge=1)
     ranking_policy: Literal["community_momentum_v1"]
-    model: Literal["gpt-5.6-sol"]
-    reasoning_effort: Literal["medium"]
+    model: ProviderOption
+    reasoning_effort: ProviderOption
     extraction_prompt_version: Literal[1]
     synthesis_prompt_version: Literal[1]
     extraction_concurrency: int = Field(ge=1)
@@ -457,8 +460,8 @@ class AgentExtractionRequest(CommunityModel):
 
     documents: list[SourceDocument] = Field(min_length=1)
     extraction_instructions: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    reasoning_effort: Literal["medium"]
+    model: ProviderOption
+    reasoning_effort: ProviderOption
     extraction_concurrency: int = Field(ge=1)
     chunk_characters: int = Field(ge=1)
 
@@ -510,8 +513,8 @@ class AgentSynthesisRequest(CommunityModel):
     topics: list[TopicMention] = Field(min_length=1)
     entity_catalog: list[EntityCatalogItem] = Field(min_length=1)
     synthesis_instructions: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    reasoning_effort: Literal["medium"]
+    model: ProviderOption
+    reasoning_effort: ProviderOption
     maximum_candidate_stories: int = Field(ge=1)
 
 

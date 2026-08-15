@@ -120,6 +120,13 @@ Run offline validation after every manifest edit:
 uv run fpl-relay community validate-config
 ```
 
+The strategy `model` and `reasoning_effort` are explicit OpenAI provider options
+rather than hard-coded allow-lists. Either may be changed in the manifest without
+a code release, provided it is a non-empty value containing no whitespace.
+Configuration validation does not contact OpenAI or confirm that the selected
+model supports the selected effort; an invalid or inaccessible combination fails
+the run on its first model request.
+
 ## Persistent extraction cache
 
 Migration 4 creates `relay_community_extraction_cache`. Rows are scoped by
@@ -127,7 +134,9 @@ strategy key and version and uniquely identify the source, document, content
 revision, and extraction contract. The extraction-contract hash is SHA-256 over
 canonical JSON containing the exact extraction prompt, model, reasoning effort,
 and chunk size. A prompt or model configuration change therefore cannot silently
-reuse an incompatible result.
+reuse an incompatible result. Changing the model or reasoning effort causes
+extraction cache misses for the current seven-day corpus; daily synthesis always
+uses the newly configured provider options.
 
 Revision hashes are metadata-driven:
 

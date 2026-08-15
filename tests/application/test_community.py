@@ -524,7 +524,7 @@ def test_strategy_manifest_is_versioned_disabled_and_fail_fast() -> None:
         strategy_key="weekly-community-momentum-v1",
     ).definition
     assert definition.active is False
-    assert definition.model == "gpt-5.6-sol"
+    assert definition.model == "gpt-5.6-terra"
     assert registry.list_active() == []
     assert registry.get(strategy_key="missing") is None
     with pytest.raises(ValueError, match="Unknown"):
@@ -566,6 +566,29 @@ def test_strategy_and_job_contracts_reject_ambiguous_values() -> None:
                 "schedule_timezone": "Not/A_Timezone",
             },
         )
+
+
+def test_strategy_provider_options_are_configurable_tokens() -> None:
+    definition = strategy(sources=[source()]).definition
+    configured = CommunityStrategyDefinition.model_validate(
+        {
+            **definition.model_dump(),
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "high",
+        },
+    )
+    assert configured.model == "gpt-5.6-terra"
+    assert configured.reasoning_effort == "high"
+    for field, value in (
+        ("model", ""),
+        ("model", "gpt-5.6 terra"),
+        ("reasoning_effort", ""),
+        ("reasoning_effort", "very high"),
+    ):
+        with pytest.raises(ValidationError, match=field):
+            CommunityStrategyDefinition.model_validate(
+                {**definition.model_dump(), field: value},
+            )
 
 
 def test_dispatch_builds_london_date_and_exact_seven_day_window() -> None:

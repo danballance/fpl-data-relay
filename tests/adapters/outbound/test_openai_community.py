@@ -220,6 +220,27 @@ async def test_analyzer_chunks_without_truncation_and_uses_safe_settings() -> No
     assert "untrusted" in str(client.responses.calls[0]["input"])
 
 
+@pytest.mark.asyncio
+async def test_analyzer_passes_configured_provider_options_through() -> None:
+    client = FakeClient()
+    analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
+    request = AgentExtractionRequest.model_validate(
+        {
+            **extraction_request().model_dump(),
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "high",
+        },
+    )
+    result = await analyzer.extract(request=request)
+    assert result.usage.model == "gpt-5.6-terra"
+    assert result.usage.reasoning_effort == "high"
+    assert all(
+        call["model"] == "gpt-5.6-terra"
+        and call["reasoning"] == {"effort": "high"}
+        for call in client.responses.calls
+    )
+
+
 def test_complete_chunking_and_packet_grouping() -> None:
     text = "alpha beta\n\ngamma delta"
     parts = _split_complete_text(text=text, limit=8)

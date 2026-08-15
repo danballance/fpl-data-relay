@@ -4,9 +4,10 @@ import asyncio
 import json
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Literal
+from typing import cast
 
 from openai import AsyncOpenAI, OpenAIError
+from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel
 
 from fpl_data_relay.application.errors import CommunityModelError
@@ -188,7 +189,7 @@ class OpenAICommunityAnalyzer:
         self,
         *,
         model: str,
-        reasoning_effort: Literal["medium"],
+        reasoning_effort: str,
         instructions: str,
         input_text: str,
         output_type: type[OutputT],
@@ -196,7 +197,9 @@ class OpenAICommunityAnalyzer:
         try:
             response = await self._client.responses.parse(
                 model=model,
-                reasoning={"effort": reasoning_effort},
+                reasoning={
+                    "effort": cast("ReasoningEffort", reasoning_effort),
+                },
                 instructions=instructions,
                 input=input_text,
                 text_format=output_type,
