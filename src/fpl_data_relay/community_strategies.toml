@@ -1,7 +1,7 @@
 [[strategies]]
 key = "weekly-community-momentum-v1"
 version = 1
-active = false
+active = true
 name = "Weekly Community Momentum"
 description = "The leading FPL topics discussed across the configured community sources during the previous seven days."
 schedule_expression = "cron(0 6 * * ? *)"
