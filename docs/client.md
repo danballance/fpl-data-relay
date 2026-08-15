@@ -51,7 +51,7 @@ freshness.
 
 The Community page preserves its strategy and historical-report selectors in
 the URL query string. It shows the report window and generation time, story and
-source coverage, partial-collection and short-report warnings, explainable
+source coverage, reused-document cache metrics, partial-collection and short-report warnings, explainable
 momentum components, evidence links, and generation-time entity snapshots.
 Entity cards deep-link to the existing player, team, event, or fixture Explorer
 page. The page always labels its contents as automated summaries of community

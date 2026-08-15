@@ -15,19 +15,22 @@ from fpl_data_relay.adapters.outbound.openai_community import (
 from fpl_data_relay.application.errors import CommunityModelError
 from fpl_data_relay.domain.community import (
     Actionability,
-    AgentAnalysisRequest,
+    AgentExtractionRequest,
+    AgentSynthesisRequest,
     BlogEngagement,
     CandidateStory,
     CandidateStoryBatch,
+    DocumentTopicExtraction,
+    DocumentTopicExtractionBatch,
     EntityCatalogItem,
     EntityConfidence,
     EntityLinkCandidate,
     EntityType,
+    ExtractedTopic,
     SourceDocument,
     SourceType,
     TopicCategory,
     TopicMention,
-    TopicMentionBatch,
     XEngagement,
 )
 
@@ -65,42 +68,50 @@ def document(
     )
 
 
-def request(*, maximum: int = 10) -> AgentAnalysisRequest:
-    return AgentAnalysisRequest(
+def extraction_request() -> AgentExtractionRequest:
+    return AgentExtractionRequest(
         documents=[
             document(document_id="x:1", source_type=SourceType.X, text="Player " * 20),
             document(document_id="blog:1", source_type=SourceType.BLOG, text="Player"),
         ],
+        extraction_instructions="Extract untrusted topics.",
+        model="gpt-5.6-sol",
+        reasoning_effort="medium",
+        extraction_concurrency=2,
+        chunk_characters=180,
+    )
+
+
+def synthesis_request(
+    *,
+    topics: list[TopicMention],
+    maximum: int = 10,
+    matching_entity: bool = True,
+) -> AgentSynthesisRequest:
+    return AgentSynthesisRequest(
+        topics=topics,
         entity_catalog=[
             EntityCatalogItem(
                 entity_type=EntityType.PLAYER,
                 entity_id=1,
                 display_name="Player",
-                aliases=["Player"],
+                aliases=["Player" if matching_entity else "Nobody"],
                 context="Team; Goalkeeper",
             ),
         ],
-        extraction_instructions="Extract untrusted topics.",
         synthesis_instructions="Synthesize grounded stories.",
         model="gpt-5.6-sol",
         reasoning_effort="medium",
-        extraction_concurrency=2,
-        chunk_characters=180,
         maximum_candidate_stories=maximum,
     )
 
 
-def topic(*, document_id: str) -> TopicMentionBatch:
-    return TopicMentionBatch(
-        topics=[
-            TopicMention(
-                claim="Player is being discussed",
-                category=TopicCategory.TRANSFER_IN,
-                actionability=Actionability.HIGH,
-                mentioned_entities=["Player"],
-                document_ids=[document_id],
-            ),
-        ],
+def topic() -> ExtractedTopic:
+    return ExtractedTopic(
+        claim="Player is being discussed",
+        category=TopicCategory.TRANSFER_IN,
+        actionability=Actionability.HIGH,
+        mentioned_entities=["Player"],
     )
 
 
@@ -142,22 +153,29 @@ class FakeResponses:
         if self.error is not None:
             raise self.error
         output_type = parameters["text_format"]
-        if output_type is TopicMentionBatch:
-            input_text = str(parameters["input"])
-            if self.empty_topics:
-                parsed = TopicMentionBatch(topics=[])
-            else:
-                parsed = topic(
-                    document_id=(
-                        "invented"
-                        if self.bad_citation
-                        else "blog:1"
-                        if "blog:1" in input_text
-                        else "x:1"
-                    ),
-                )
+        if output_type is DocumentTopicExtractionBatch:
+            payload = json.loads(str(parameters["input"]))
+            document_ids = list(
+                dict.fromkeys(item["document_id"] for item in payload["documents"]),
+            )
+            if self.bad_citation:
+                document_ids[0] = "invented"
+            parsed = DocumentTopicExtractionBatch(
+                documents=[
+                    DocumentTopicExtraction(
+                        document_id=document_id,
+                        topics=[] if self.empty_topics else [topic()],
+                    )
+                    for document_id in document_ids
+                ],
+            )
         else:
-            parsed = candidates(count=self.candidate_count)
+            payload = json.loads(str(parameters["input"]))
+            parsed = (
+                candidates(count=self.candidate_count)
+                if payload["canonical_entity_candidates"]
+                else CandidateStoryBatch(stories=[])
+            )
         return SimpleNamespace(
             status=self.status,
             output_parsed=None if self.parsed_none else parsed,
@@ -179,9 +197,19 @@ class FakeClient:
 async def test_analyzer_chunks_without_truncation_and_uses_safe_settings() -> None:
     client = FakeClient()
     analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
-    result = await analyzer.analyze(request=request())
+    extraction = await analyzer.extract(request=extraction_request())
+    topics = [
+        topic
+        for document in extraction.documents
+        for topic in document.topics.topics
+    ]
+    result = await analyzer.synthesize(
+        request=synthesis_request(topics=topics),
+    )
     assert len(result.candidates.stories) == 1
-    assert result.usage.input_tokens == 10 * len(client.responses.calls)
+    assert extraction.usage.input_tokens + result.usage.input_tokens == (
+        10 * len(client.responses.calls)
+    )
     assert len(client.responses.calls) >= 3
     assert all(call["store"] is False for call in client.responses.calls)
     assert all(
@@ -197,7 +225,7 @@ def test_complete_chunking_and_packet_grouping() -> None:
     parts = _split_complete_text(text=text, limit=8)
     assert "".join(parts) == text
     packets = _extraction_packets(
-        documents=request().documents,
+        documents=extraction_request().documents,
         maximum_characters=180,
     )
     assert all(
@@ -210,7 +238,7 @@ def test_complete_chunking_and_packet_grouping() -> None:
     }
     with pytest.raises(CommunityModelError, match="too small"):
         _extraction_packets(
-            documents=request().documents,
+            documents=extraction_request().documents,
             maximum_characters=1,
         )
 
@@ -220,18 +248,23 @@ async def test_analyzer_returns_no_candidates_without_topics_or_entities() -> No
     client = FakeClient()
     client.responses.empty_topics = True
     analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
-    assert (await analyzer.analyze(request=request())).candidates.stories == []
+    extraction = await analyzer.extract(request=extraction_request())
+    assert all(not item.topics.topics for item in extraction.documents)
 
     client = FakeClient()
-    no_match = request().model_copy(
-        update={
-            "entity_catalog": [
-                request().entity_catalog[0].model_copy(update={"aliases": ["Nobody"]}),
-            ],
-        },
-    )
     analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
-    assert (await analyzer.analyze(request=no_match)).candidates.stories == []
+    extraction = await analyzer.extract(request=extraction_request())
+    topics = [
+        topic
+        for document in extraction.documents
+        for topic in document.topics.topics
+    ]
+    extraction_call_count = len(client.responses.calls)
+    result = await analyzer.synthesize(
+        request=synthesis_request(topics=topics, matching_entity=False),
+    )
+    assert result.candidates.stories == []
+    assert len(client.responses.calls) == extraction_call_count + 1
 
 
 @pytest.mark.asyncio
@@ -250,7 +283,7 @@ async def test_analyzer_fails_on_provider_and_integrity_errors(failure: str) -> 
         client.responses.error = OpenAIError("provider failed")
     analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
     with pytest.raises(CommunityModelError):
-        await analyzer.analyze(request=request())
+        await analyzer.extract(request=extraction_request())
 
 
 @pytest.mark.asyncio
@@ -258,5 +291,13 @@ async def test_analyzer_rejects_excess_candidates() -> None:
     client = FakeClient()
     client.responses.candidate_count = 2
     analyzer = OpenAICommunityAnalyzer(client=cast("AsyncOpenAI", client))
+    extraction = await analyzer.extract(request=extraction_request())
+    topics = [
+        topic
+        for document in extraction.documents
+        for topic in document.topics.topics
+    ]
     with pytest.raises(CommunityModelError, match="more candidate"):
-        await analyzer.analyze(request=request(maximum=1))
+        await analyzer.synthesize(
+            request=synthesis_request(topics=topics, maximum=1),
+        )

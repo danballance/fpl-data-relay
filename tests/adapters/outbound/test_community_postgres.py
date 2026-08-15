@@ -25,6 +25,7 @@ from fpl_data_relay.domain.community import (
     CommunityStory,
     EntityType,
     EvidenceReference,
+    ExtractionCacheUsage,
     ModelUsage,
     MomentumComponents,
     SourceType,
@@ -53,6 +54,13 @@ def content() -> CommunityReportContent:
             x_document_count=0,
             youtube_document_count=0,
             blog_document_count=1,
+        ),
+        extraction_cache=ExtractionCacheUsage(
+            eligible_document_count=1,
+            hit_count=0,
+            miss_count=1,
+            write_count=1,
+            expired_entry_count=0,
         ),
         model_usage=ModelUsage(
             provider="openai",

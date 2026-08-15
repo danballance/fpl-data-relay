@@ -45,6 +45,12 @@ def test_community_migration_enforces_aggregate_and_immutability() -> None:
     assert "relay_community_reports_immutable" in sql
     assert "BEFORE UPDATE OR DELETE" in sql
 
+    cache_sql = MIGRATIONS[3].sql
+    assert "relay_community_extraction_cache" in cache_sql
+    assert "NOT (document ? 'text')" in cache_sql
+    assert "relay_community_extraction_cache_insert_only" in cache_sql
+    assert "BEFORE UPDATE" in cache_sql
+
 
 def test_migration_row_values_accepts_asyncpg_mapping_shape() -> None:
     values: dict[str, object] = {
@@ -109,14 +115,14 @@ async def test_apply_migrations_is_ordered_and_idempotent() -> None:
     pool = FakePostgresPool()
     assert (await migration_status(pool=pool)).model_dump() == {
         "applied_versions": [],
-        "pending_versions": [1, 2, 3],
+        "pending_versions": [1, 2, 3, 4],
     }
     await apply_migrations(pool=pool)
-    assert pool.schema_version == 3
-    assert len(pool.applied_migrations) == 3
+    assert pool.schema_version == 4
+    assert len(pool.applied_migrations) == 4
     await apply_migrations(pool=pool)
-    assert len(pool.applied_migrations) == 3
+    assert len(pool.applied_migrations) == 4
     assert (await migration_status(pool=pool)).model_dump() == {
-        "applied_versions": [1, 2, 3],
+        "applied_versions": [1, 2, 3, 4],
         "pending_versions": [],
     }

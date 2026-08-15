@@ -210,7 +210,8 @@ dispatch job. It must remain `DISABLED` until the source catalog, provider
 terms/privacy review, credentials, and manual report review in
 [community.md](community.md) are complete. Community alarms cover worker errors,
 queue age and DLQ depth, Scheduler errors/drops, and no daily attempt within 26
-hours.
+hours. The worker reuses structured extraction results through the existing
+Aurora database; the cache adds no AWS resource or new secret.
 
 ## Teardown
 

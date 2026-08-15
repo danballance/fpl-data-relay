@@ -11,9 +11,14 @@ from pydantic import BaseModel
 
 from fpl_data_relay.application.errors import CommunityModelError
 from fpl_data_relay.domain.community import (
-    AgentAnalysisRequest,
-    AgentAnalysisResult,
+    AgentExtractionRequest,
+    AgentExtractionResult,
+    AgentSynthesisRequest,
+    AgentSynthesisResult,
     CandidateStoryBatch,
+    DocumentExtraction,
+    DocumentTopicExtraction,
+    DocumentTopicExtractionBatch,
     EntityCatalogItem,
     ModelUsage,
     SourceDocument,
@@ -33,58 +38,50 @@ class OpenAICommunityAnalyzer:
         """Close the underlying asynchronous HTTP client."""
         await self._client.close()
 
-    async def analyze(
+    async def extract(
         self,
         *,
-        request: AgentAnalysisRequest,
-    ) -> AgentAnalysisResult:
+        request: AgentExtractionRequest,
+    ) -> AgentExtractionResult:
         packets = _extraction_packets(
             documents=request.documents,
             maximum_characters=request.chunk_characters,
         )
         semaphore = asyncio.Semaphore(request.extraction_concurrency)
 
-        async def extract(packet: ExtractionPacket) -> ParsedTopics:
+        async def extract_packet(packet: ExtractionPacket) -> ParsedDocumentTopics:
             async with semaphore:
                 return await self._extract(request=request, packet=packet)
 
-        extracted = await asyncio.gather(*(extract(packet) for packet in packets))
-        topics = [topic for result in extracted for topic in result.topics]
+        extracted = await asyncio.gather(
+            *(extract_packet(packet) for packet in packets),
+        )
+        topics_by_document = {
+            document.document_id: [] for document in request.documents
+        }
+        for result in extracted:
+            for document in result.documents:
+                topics_by_document[document.document_id].extend(
+                    TopicMention(
+                        claim=topic.claim,
+                        category=topic.category,
+                        actionability=topic.actionability,
+                        mentioned_entities=topic.mentioned_entities,
+                        document_ids=[document.document_id],
+                    )
+                    for topic in document.topics
+                )
         usage_items = [result.usage for result in extracted]
-        if not topics:
-            return AgentAnalysisResult(
-                candidates=CandidateStoryBatch(stories=[]),
-                usage=_usage(
-                    model=request.model,
-                    reasoning_effort=request.reasoning_effort,
-                    usages=usage_items,
-                ),
-            )
-        plausible = _plausible_entities(
-            topics=topics,
-            catalog=request.entity_catalog,
-        )
-        if not plausible:
-            return AgentAnalysisResult(
-                candidates=CandidateStoryBatch(stories=[]),
-                usage=_usage(
-                    model=request.model,
-                    reasoning_effort=request.reasoning_effort,
-                    usages=usage_items,
-                ),
-            )
-        synthesis = await self._synthesize(
-            request=request,
-            topics=topics,
-            entities=plausible,
-        )
-        if len(synthesis.candidates.stories) > request.maximum_candidate_stories:
-            raise CommunityModelError(
-                "Model returned more candidate stories than configured.",
-            )
-        usage_items.append(synthesis.usage)
-        return AgentAnalysisResult(
-            candidates=synthesis.candidates,
+        return AgentExtractionResult(
+            documents=[
+                DocumentExtraction(
+                    document_id=document.document_id,
+                    topics=TopicMentionBatch(
+                        topics=topics_by_document[document.document_id],
+                    ),
+                )
+                for document in request.documents
+            ],
             usage=_usage(
                 model=request.model,
                 reasoning_effort=request.reasoning_effort,
@@ -92,12 +89,67 @@ class OpenAICommunityAnalyzer:
             ),
         )
 
+    async def synthesize(
+        self,
+        *,
+        request: AgentSynthesisRequest,
+    ) -> AgentSynthesisResult:
+        plausible = _plausible_entities(
+            topics=request.topics,
+            catalog=request.entity_catalog,
+        )
+        prompt = json.dumps(
+            {
+                "maximum_candidate_stories": request.maximum_candidate_stories,
+                "topics": [
+                    topic.model_dump(mode="json") for topic in request.topics
+                ],
+                "canonical_entity_candidates": [
+                    entity.model_dump(mode="json") for entity in plausible
+                ],
+            },
+            ensure_ascii=False,
+        )
+        response = await self._parse(
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            instructions=request.synthesis_instructions,
+            input_text=prompt,
+            output_type=CandidateStoryBatch,
+        )
+        parsed = response.output_parsed
+        if parsed is None:
+            raise CommunityModelError("OpenAI synthesis returned no parsed output.")
+        if len(parsed.stories) > request.maximum_candidate_stories:
+            raise CommunityModelError(
+                "Model returned more candidate stories than configured.",
+            )
+        allowable_entities = {
+            (item.entity_type, item.entity_id) for item in plausible
+        }
+        if any(
+            (link.entity_type, link.entity_id) not in allowable_entities
+            for story in parsed.stories
+            for link in story.entity_links
+        ):
+            raise CommunityModelError(
+                "Model selected an unsupplied canonical entity candidate.",
+            )
+        return AgentSynthesisResult(
+            candidates=parsed,
+            usage=_usage(
+                model=request.model,
+                reasoning_effort=request.reasoning_effort,
+                usages=[_response_usage(response=response)],
+            ),
+        )
+
     async def _extract(
         self,
         *,
-        request: AgentAnalysisRequest,
+        request: AgentExtractionRequest,
         packet: ExtractionPacket,
-    ) -> ParsedTopics:
+    ) -> ParsedDocumentTopics:
         prompt = json.dumps(
             {
                 "security": (
@@ -113,52 +165,22 @@ class OpenAICommunityAnalyzer:
             reasoning_effort=request.reasoning_effort,
             instructions=request.extraction_instructions,
             input_text=prompt,
-            output_type=TopicMentionBatch,
+            output_type=DocumentTopicExtractionBatch,
         )
         parsed = response.output_parsed
         if parsed is None:
             raise CommunityModelError("OpenAI extraction returned no parsed output.")
-        for topic in parsed.topics:
-            unknown = set(topic.document_ids) - packet.document_ids
-            if unknown:
-                raise CommunityModelError(
-                    "Extraction cited document IDs outside its packet: "
-                    f"{sorted(unknown)}",
-                )
-        return ParsedTopics(
-            topics=parsed.topics,
-            usage=_response_usage(response=response),
-        )
-
-    async def _synthesize(
-        self,
-        *,
-        request: AgentAnalysisRequest,
-        topics: list[TopicMention],
-        entities: list[EntityCatalogItem],
-    ) -> ParsedCandidates:
-        prompt = json.dumps(
-            {
-                "maximum_candidate_stories": request.maximum_candidate_stories,
-                "topics": [topic.model_dump(mode="json") for topic in topics],
-                "canonical_entity_candidates": [
-                    entity.model_dump(mode="json") for entity in entities
-                ],
-            },
-            ensure_ascii=False,
-        )
-        response = await self._parse(
-            model=request.model,
-            reasoning_effort=request.reasoning_effort,
-            instructions=request.synthesis_instructions,
-            input_text=prompt,
-            output_type=CandidateStoryBatch,
-        )
-        parsed = response.output_parsed
-        if parsed is None:
-            raise CommunityModelError("OpenAI synthesis returned no parsed output.")
-        return ParsedCandidates(
-            candidates=parsed,
+        returned_ids = [document.document_id for document in parsed.documents]
+        if len(returned_ids) != len(set(returned_ids)):
+            raise CommunityModelError(
+                "Extraction returned duplicate document IDs.",
+            )
+        if set(returned_ids) != packet.document_ids:
+            raise CommunityModelError(
+                "Extraction document IDs did not match its packet.",
+            )
+        return ParsedDocumentTopics(
+            documents=parsed.documents,
             usage=_response_usage(response=response),
         )
 
@@ -212,20 +234,14 @@ class UsageItem:
         self.output_tokens = output_tokens
 
 
-class ParsedTopics:
-    def __init__(self, *, topics: list[TopicMention], usage: UsageItem) -> None:
-        self.topics = topics
-        self.usage = usage
-
-
-class ParsedCandidates:
+class ParsedDocumentTopics:
     def __init__(
         self,
         *,
-        candidates: CandidateStoryBatch,
+        documents: list[DocumentTopicExtraction],
         usage: UsageItem,
     ) -> None:
-        self.candidates = candidates
+        self.documents = documents
         self.usage = usage
 
 

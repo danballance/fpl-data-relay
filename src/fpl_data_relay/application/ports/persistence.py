@@ -1,7 +1,7 @@
 """Narrow persistence ports owned by the application layer."""
 
 from contextlib import AbstractAsyncContextManager
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 from fpl_data_relay.domain.changes import (
@@ -15,6 +15,9 @@ from fpl_data_relay.domain.community import (
     CommunityReport,
     CommunityReportDraft,
     CommunityReportSummary,
+    ExtractionCacheEntry,
+    ExtractionCacheEntryDraft,
+    ExtractionCacheLookup,
 )
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.live import (
@@ -280,3 +283,25 @@ class CommunityReportRepository(Protocol):
         before_id: int,
         limit: int,
     ) -> list[CommunityReportSummary]: ...
+
+
+class CommunityExtractionCacheRepository(Protocol):
+    """Exact structured extraction lookups and bounded operational retention."""
+
+    async def prune_expired(self, *, as_of: datetime) -> int: ...
+
+    async def get_entries(
+        self,
+        *,
+        strategy_key: str,
+        strategy_version: int,
+        extraction_contract_hash: str,
+        lookups: list[ExtractionCacheLookup],
+        as_of: datetime,
+    ) -> list[ExtractionCacheEntry]: ...
+
+    async def insert_entries(
+        self,
+        *,
+        entries: list[ExtractionCacheEntryDraft],
+    ) -> int: ...

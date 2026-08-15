@@ -24,6 +24,9 @@ from fpl_data_relay.adapters.outbound.openai_community import (
 from fpl_data_relay.adapters.outbound.postgres.community import (
     PostgresCommunityReportRepository,
 )
+from fpl_data_relay.adapters.outbound.postgres.community_cache import (
+    PostgresCommunityExtractionCacheRepository,
+)
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
 from fpl_data_relay.adapters.outbound.postgres.reference import (
@@ -83,6 +86,7 @@ POOL = create_rds_data_pool(
 )
 DATABASE = PostgresDatabase(pool=cast("PoolProtocol", POOL))
 REPORTS = PostgresCommunityReportRepository(database=DATABASE)
+CACHE = PostgresCommunityExtractionCacheRepository(database=DATABASE)
 REFERENCES = PostgresReferenceRepository(database=DATABASE)
 REGISTRY = load_strategy_registry()
 SQS = cast("SqsClient", boto3.client("sqs"))
@@ -148,6 +152,7 @@ async def process_job(
             analyzer=analyzer,
             ranking_policy=CommunityMomentumRankingPolicy(),
             reports=REPORTS,
+            extraction_cache=CACHE,
             references=REFERENCES,
             clock=lambda: datetime.now(tz=UTC),
         ).run(job=job)
@@ -164,6 +169,15 @@ async def process_job(
             "report_id": report.id,
             "story_count": len(report.content.stories),
             "failed_source_count": len(report.content.coverage.failed_sources),
+            "cache_eligible_document_count": (
+                report.content.extraction_cache.eligible_document_count
+            ),
+            "cache_hit_count": report.content.extraction_cache.hit_count,
+            "cache_miss_count": report.content.extraction_cache.miss_count,
+            "cache_write_count": report.content.extraction_cache.write_count,
+            "cache_expired_entry_count": (
+                report.content.extraction_cache.expired_entry_count
+            ),
             "input_tokens": report.content.model_usage.input_tokens,
             "output_tokens": report.content.model_usage.output_tokens,
         },

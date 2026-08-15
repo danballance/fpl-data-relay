@@ -226,6 +226,7 @@ export function CommunityPage() {
           <div><span>Generated</span><strong>{displayDate(item.generated_at)}</strong></div>
           <div><span>Stories</span><strong>{item.content.stories.length}</strong></div>
           <div><span>Coverage</span><strong>{item.content.coverage.successful_source_count} / {item.content.coverage.configured_source_count} sources</strong></div>
+          <div><span>Documents reused</span><strong>{item.content.extraction_cache.hit_count} / {item.content.extraction_cache.eligible_document_count}</strong></div>
         </section>
         <div className="community-stories">
           {item.content.stories.map((story) => <StoryCard key={story.rank} story={story} />)}

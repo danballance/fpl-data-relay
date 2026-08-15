@@ -186,7 +186,7 @@ def test_healthz_returns_schema_version() -> None:
     with TestClient(app) as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json()["schema_version"] == 3
+    assert response.json()["schema_version"] == 4
 
 
 def test_community_endpoints_enforce_status_and_pagination_contracts() -> None:

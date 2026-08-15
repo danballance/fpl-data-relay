@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.schema import (
     ACCURATE_CHANGES_SQL,
+    COMMUNITY_EXTRACTION_CACHE_SQL,
     COMMUNITY_REPORTS_SQL,
     SCHEMA_SQL,
 )
@@ -73,6 +74,11 @@ MIGRATIONS = (
         version=3,
         name="community_reports",
         sql=COMMUNITY_REPORTS_SQL.strip(),
+    ),
+    Migration(
+        version=4,
+        name="community_extraction_cache",
+        sql=COMMUNITY_EXTRACTION_CACHE_SQL.strip(),
     ),
 )
 

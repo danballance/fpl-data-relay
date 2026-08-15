@@ -1,18 +1,30 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from pydantic import HttpUrl, ValidationError
 
 from fpl_data_relay.domain.community import (
+    Actionability,
+    AgentExtractionResult,
     BlogSource,
     CollectionCoverage,
     CommunityReport,
     CommunityReportContent,
     CommunityReportDraft,
     CommunityStory,
+    DocumentExtraction,
     EvidenceReference,
-    SourceCollectionResult,
+    ExtractionCacheEntry,
+    ExtractionCacheEntryDraft,
+    ExtractionCacheUsage,
+    ModelUsage,
+    SourceDiscoveryResult,
+    SourceDocumentMetadata,
+    SourceMaterializationResult,
     SourceType,
+    TopicCategory,
+    TopicMention,
+    TopicMentionBatch,
     XEngagement,
     YouTubeEngagement,
 )
@@ -56,6 +68,10 @@ def test_blog_hosts_are_normalized_unique_and_required() -> None:
                 "allowed_article_hosts": ["blog.example", "blog.example"],
             },
         )
+    with pytest.raises(ValidationError, match="hostnames"):
+        BlogSource.model_validate(
+            {**blog.model_dump(), "allowed_article_hosts": ["blog.example/path"]},
+        )
 
 
 def test_coverage_and_story_rank_invariants_fail_fast() -> None:
@@ -87,7 +103,14 @@ def test_coverage_and_story_rank_invariants_fail_fast() -> None:
             },
         )
     with pytest.raises(ValidationError, match="exclusion counts"):
-        SourceCollectionResult(
+        SourceMaterializationResult(
+            source_key="blog",
+            documents=[],
+            excluded_document_count=1,
+            exclusions=[],
+        )
+    with pytest.raises(ValidationError, match="discovery exclusion"):
+        SourceDiscoveryResult(
             source_key="blog",
             documents=[],
             excluded_document_count=1,
@@ -151,4 +174,103 @@ def test_report_and_draft_reject_naive_or_reversed_windows() -> None:
                 **original.model_dump(),
                 "window_start": original.window_end,
             },
+        )
+
+
+def test_extraction_cache_contracts_retain_only_structured_derivatives() -> None:
+    evidence = content().stories[0].evidence[0]
+    document = SourceDocumentMetadata(
+        document_id=evidence.document_id,
+        source_key=evidence.source_key,
+        source_type=evidence.source_type,
+        external_id="article-1",
+        publisher=evidence.publisher,
+        title=evidence.title,
+        url=evidence.url,
+        published_at=evidence.published_at,
+        engagement=evidence.engagement,
+    )
+    entry = ExtractionCacheEntryDraft(
+        strategy_key="weekly-community-momentum-v1",
+        strategy_version=1,
+        source_key=document.source_key,
+        source_type=document.source_type,
+        document_id=document.document_id,
+        external_id=document.external_id,
+        content_revision="a" * 64,
+        extraction_contract_hash="b" * 64,
+        document=document,
+        topics=TopicMentionBatch(topics=[]),
+        published_at=document.published_at,
+        expires_at=document.published_at + timedelta(days=8),
+    )
+    assert "text" not in entry.model_dump(mode="json")["document"]
+    assert ExtractionCacheUsage(
+        eligible_document_count=2,
+        hit_count=1,
+        miss_count=1,
+        write_count=1,
+        expired_entry_count=0,
+    ).hit_count == 1
+    with pytest.raises(ValidationError, match="follow"):
+        ExtractionCacheEntryDraft.model_validate(
+            {**entry.model_dump(), "expires_at": document.published_at},
+        )
+    with pytest.raises(ValidationError, match="hits and misses"):
+        ExtractionCacheUsage(
+            eligible_document_count=2,
+            hit_count=2,
+            miss_count=1,
+            write_count=1,
+            expired_entry_count=0,
+        )
+    for changed in (
+        {"published_at": datetime(2026, 8, 1)},
+        {"expires_at": datetime(2026, 8, 10)},
+        {"external_id": "wrong"},
+    ):
+        with pytest.raises(ValidationError):
+            ExtractionCacheEntryDraft.model_validate(
+                {**entry.model_dump(), **changed},
+            )
+    wrong_topic = TopicMention(
+        claim="Claim",
+        category=TopicCategory.OTHER,
+        actionability=Actionability.LOW,
+        mentioned_entities=[],
+        document_ids=["other"],
+    )
+    with pytest.raises(ValidationError, match="own document"):
+        ExtractionCacheEntryDraft.model_validate(
+            {
+                **entry.model_dump(),
+                "topics": TopicMentionBatch(topics=[wrong_topic]),
+            },
+        )
+    with pytest.raises(ValidationError, match="created_at"):
+        ExtractionCacheEntry(
+            id=1,
+            created_at=datetime(2026, 8, 1),
+            **entry.model_dump(),
+        )
+    with pytest.raises(ValidationError, match="own document"):
+        DocumentExtraction(
+            document_id=document.document_id,
+            topics=TopicMentionBatch(topics=[wrong_topic]),
+        )
+    valid_extraction = DocumentExtraction(
+        document_id=document.document_id,
+        topics=TopicMentionBatch(topics=[]),
+    )
+    with pytest.raises(ValidationError, match="unique"):
+        AgentExtractionResult(
+            documents=[valid_extraction, valid_extraction],
+            usage=ModelUsage(
+                provider="openai",
+                model="gpt-5.6-sol",
+                reasoning_effort="medium",
+                response_ids=[],
+                input_tokens=0,
+                output_tokens=0,
+            ),
         )

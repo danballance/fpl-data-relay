@@ -66,6 +66,8 @@ describe("relay explorer application", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/1 configured source/)).toBeInTheDocument();
     expect(screen.getByText(/1 of 10 target stories/)).toBeInTheDocument();
+    expect(screen.getByText("Documents reused")).toBeInTheDocument();
+    expect(screen.getByText("1 / 1")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /FPL Analyst/ }),
     ).toHaveAttribute("href", "https://x.com/analyst/status/1");
@@ -358,7 +360,7 @@ describe("relay explorer application", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Event")).toHaveValue("1"),
     );
-    expect(screen.getByText("Version 3")).toBeInTheDocument();
+    expect(screen.getByText("Version 4")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThan(0);
     const apiReference = screen.getByRole("link", { name: /API reference/ });
     expect(apiReference).toHaveAttribute("href", "/api/docs");

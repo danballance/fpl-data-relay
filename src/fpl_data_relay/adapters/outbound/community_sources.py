@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from time import struct_time
 from typing import Annotated, Literal
@@ -22,14 +23,19 @@ from pydantic import (
 from fpl_data_relay.application.errors import CommunitySourceError
 from fpl_data_relay.config import CommunityCredentials
 from fpl_data_relay.domain.community import (
+    BlogDiscoveredDocument,
     BlogEngagement,
     BlogSource,
     CommunitySource,
-    SourceCollectionResult,
+    DiscoveredDocument,
+    SourceDiscoveryResult,
     SourceDocument,
     SourceExclusion,
+    SourceMaterializationResult,
+    XDiscoveredDocument,
     XEngagement,
     XSource,
+    YouTubeDiscoveredDocument,
     YouTubeEngagement,
     YouTubeSource,
 )
@@ -144,27 +150,27 @@ class CommunityHttpSourceGateway:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def collect(
+    async def discover(
         self,
         *,
         source: CommunitySource,
         window_start: datetime,
         window_end: datetime,
-    ) -> SourceCollectionResult:
+    ) -> SourceDiscoveryResult:
         try:
             if isinstance(source, XSource):
-                return await self._collect_x(
+                return await self._discover_x(
                     source=source,
                     window_start=window_start,
                     window_end=window_end,
                 )
             if isinstance(source, YouTubeSource):
-                return await self._collect_youtube(
+                return await self._discover_youtube(
                     source=source,
                     window_start=window_start,
                     window_end=window_end,
                 )
-            return await self._collect_blog(
+            return await self._discover_blog(
                 source=source,
                 window_start=window_start,
                 window_end=window_end,
@@ -178,14 +184,41 @@ class CommunityHttpSourceGateway:
                 detail=f"{source.type.value} returned malformed content.",
             ) from exception
 
-    async def _collect_x(
+    async def materialize(
+        self,
+        *,
+        source: CommunitySource,
+        documents: list[DiscoveredDocument],
+    ) -> SourceMaterializationResult:
+        try:
+            if isinstance(source, XSource):
+                return self._materialize_x(source=source, documents=documents)
+            if isinstance(source, YouTubeSource):
+                return await self._materialize_youtube(
+                    source=source,
+                    documents=documents,
+                )
+            return await self._materialize_blog(
+                source=source,
+                documents=documents,
+            )
+        except CommunitySourceError:
+            raise
+        except (ValidationError, ValueError, TypeError) as exception:
+            raise CommunitySourceError(
+                code=f"{source.type.value}_parse",
+                fatal=False,
+                detail=f"{source.type.value} returned malformed content.",
+            ) from exception
+
+    async def _discover_x(
         self,
         *,
         source: XSource,
         window_start: datetime,
         window_end: datetime,
-    ) -> SourceCollectionResult:
-        documents: list[SourceDocument] = []
+    ) -> SourceDiscoveryResult:
+        documents: list[DiscoveredDocument] = []
         pagination_token: str | None = None
         while len(documents) < source.max_documents:
             exclusions: list[str] = []
@@ -219,7 +252,7 @@ class CommunityHttpSourceGateway:
             page = XTimelinePage.model_validate(response.json())
             remaining = source.max_documents - len(documents)
             documents.extend(
-                SourceDocument(
+                XDiscoveredDocument(
                     document_id=f"x:{post.id}",
                     source_key=source.key,
                     source_type=source.type,
@@ -230,7 +263,6 @@ class CommunityHttpSourceGateway:
                         f"https://x.com/{source.username}/status/{post.id}",
                     ),
                     published_at=post.created_at,
-                    text=post.text,
                     engagement=XEngagement(
                         type=source.type,
                         likes=post.public_metrics.like_count,
@@ -238,26 +270,55 @@ class CommunityHttpSourceGateway:
                         reposts=post.public_metrics.retweet_count,
                         quotes=post.public_metrics.quote_count,
                     ),
+                    content_revision=hashlib.sha256(
+                        post.text.encode("utf-8"),
+                    ).hexdigest(),
+                    transient_text=post.text,
                 )
                 for post in page.data[:remaining]
             )
             pagination_token = page.meta.next_token
             if pagination_token is None:
                 break
-        return SourceCollectionResult(
+        return SourceDiscoveryResult(
             source_key=source.key,
             documents=documents[: source.max_documents],
             excluded_document_count=0,
             exclusions=[],
         )
 
-    async def _collect_youtube(
+    def _materialize_x(
+        self,
+        *,
+        source: XSource,
+        documents: list[DiscoveredDocument],
+    ) -> SourceMaterializationResult:
+        materialized: list[SourceDocument] = []
+        for document in documents:
+            if not isinstance(document, XDiscoveredDocument):
+                raise ValueError("X materialization received a non-X document.")
+            _ensure_source(document=document, source_key=source.key)
+            materialized.append(
+                _source_document(
+                    document=document,
+                    text=document.transient_text,
+                    url=document.url,
+                ),
+            )
+        return SourceMaterializationResult(
+            source_key=source.key,
+            documents=materialized,
+            excluded_document_count=0,
+            exclusions=[],
+        )
+
+    async def _discover_youtube(
         self,
         *,
         source: YouTubeSource,
         window_start: datetime,
         window_end: datetime,
-    ) -> SourceCollectionResult:
+    ) -> SourceDiscoveryResult:
         video_ids: list[str] = []
         page_token: str | None = None
         while len(video_ids) < source.max_videos:
@@ -290,7 +351,7 @@ class CommunityHttpSourceGateway:
             if page_token is None:
                 break
         if not video_ids:
-            return SourceCollectionResult(
+            return SourceDiscoveryResult(
                 source_key=source.key,
                 documents=[],
                 excluded_document_count=0,
@@ -316,11 +377,68 @@ class CommunityHttpSourceGateway:
             if window_start <= item.snippet.publishedAt < window_end
         ]
         outside_window = len(metadata.items) - len(videos)
+        documents: list[DiscoveredDocument] = [
+            YouTubeDiscoveredDocument(
+                document_id=f"youtube:{video.id}",
+                source_key=source.key,
+                source_type=source.type,
+                external_id=video.id,
+                publisher=video.snippet.channelTitle,
+                title=video.snippet.title,
+                url=HttpUrl(f"https://www.youtube.com/watch?v={video.id}"),
+                published_at=video.snippet.publishedAt,
+                engagement=YouTubeEngagement(
+                    type=source.type,
+                    views=int(video.statistics.viewCount),
+                    likes=int(video.statistics.likeCount or "0"),
+                    comments=int(video.statistics.commentCount or "0"),
+                ),
+                content_revision=_revision(
+                    values={
+                        "video_id": video.id,
+                        "title": video.snippet.title,
+                        "transcript_language": source.transcript_language,
+                        "transcript_mode": source.transcript_mode,
+                    },
+                ),
+            )
+            for video in videos
+        ]
+        return SourceDiscoveryResult(
+            source_key=source.key,
+            documents=documents,
+            excluded_document_count=outside_window,
+            exclusions=[
+                SourceExclusion(
+                    source_key=source.key,
+                    source_type=source.type,
+                    code="youtube_outside_window",
+                    count=outside_window,
+                )
+            ]
+            if outside_window > 0
+            else [],
+        )
+
+    async def _materialize_youtube(
+        self,
+        *,
+        source: YouTubeSource,
+        documents: list[DiscoveredDocument],
+    ) -> SourceMaterializationResult:
+        youtube_documents: list[YouTubeDiscoveredDocument] = []
+        for document in documents:
+            if not isinstance(document, YouTubeDiscoveredDocument):
+                raise ValueError(
+                    "YouTube materialization received a non-YouTube document.",
+                )
+            _ensure_source(document=document, source_key=source.key)
+            youtube_documents.append(document)
         transcript_tasks = [
             asyncio.create_task(
-                self._transcript(source=source, video_id=item.id),
+                self._transcript(source=source, video_id=document.external_id),
             )
-            for item in videos
+            for document in youtube_documents
         ]
         try:
             transcript_results = await asyncio.gather(*transcript_tasks)
@@ -329,53 +447,37 @@ class CommunityHttpSourceGateway:
                 task.cancel()
             await asyncio.gather(*transcript_tasks, return_exceptions=True)
             raise
-        documents: list[SourceDocument] = []
+        materialized: list[SourceDocument] = []
         unavailable_captions = 0
-        for video, transcript in zip(videos, transcript_results, strict=True):
+        for document, transcript in zip(
+            youtube_documents,
+            transcript_results,
+            strict=True,
+        ):
             if transcript is None:
                 unavailable_captions += 1
                 continue
-            documents.append(
-                SourceDocument(
-                    document_id=f"youtube:{video.id}",
-                    source_key=source.key,
-                    source_type=source.type,
-                    external_id=video.id,
-                    publisher=video.snippet.channelTitle,
-                    title=video.snippet.title,
-                    url=HttpUrl(
-                        f"https://www.youtube.com/watch?v={video.id}",
-                    ),
-                    published_at=video.snippet.publishedAt,
+            materialized.append(
+                _source_document(
+                    document=document,
                     text=transcript,
-                    engagement=YouTubeEngagement(
-                        type=source.type,
-                        views=int(video.statistics.viewCount),
-                        likes=int(video.statistics.likeCount or "0"),
-                        comments=int(video.statistics.commentCount or "0"),
-                    ),
+                    url=document.url,
                 ),
             )
-        return SourceCollectionResult(
+        return SourceMaterializationResult(
             source_key=source.key,
-            documents=documents,
-            excluded_document_count=outside_window + unavailable_captions,
+            documents=materialized,
+            excluded_document_count=unavailable_captions,
             exclusions=[
                 SourceExclusion(
                     source_key=source.key,
                     source_type=source.type,
-                    code=code,
-                    count=count,
+                    code="youtube_native_caption_unavailable",
+                    count=unavailable_captions,
                 )
-                for code, count in (
-                    ("youtube_outside_window", outside_window),
-                    (
-                        "youtube_native_caption_unavailable",
-                        unavailable_captions,
-                    ),
-                )
-                if count > 0
-            ],
+            ]
+            if unavailable_captions > 0
+            else [],
         )
 
     async def _transcript(
@@ -426,13 +528,13 @@ class CommunityHttpSourceGateway:
             detail="Supadata transcript job exceeded its configured timeout.",
         )
 
-    async def _collect_blog(
+    async def _discover_blog(
         self,
         *,
         source: BlogSource,
         window_start: datetime,
         window_end: datetime,
-    ) -> SourceCollectionResult:
+    ) -> SourceDiscoveryResult:
         response = await self._request(
             method="GET",
             url=str(source.feed_url),
@@ -450,7 +552,7 @@ class CommunityHttpSourceGateway:
                 fatal=False,
                 detail="The configured feed could not be parsed.",
             )
-        documents: list[SourceDocument] = []
+        documents: list[DiscoveredDocument] = []
         exclusion_counts: dict[str, int] = {}
 
         def exclude(*, code: str) -> None:
@@ -470,8 +572,75 @@ class CommunityHttpSourceGateway:
                 exclude(code="blog_entry_incomplete")
                 continue
             try:
+                url = HttpUrl(link)
+            except ValidationError:
+                exclude(code="blog_entry_incomplete")
+                continue
+            host = (urlparse(str(url)).hostname or "").lower()
+            if host not in set(source.allowed_article_hosts):
+                exclude(code="blog_host_not_allowed")
+                continue
+            external_id = str(entry.get("id") or link)
+            digest = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:24]
+            updated = _entry_updated(entry=entry)
+            documents.append(
+                BlogDiscoveredDocument(
+                    document_id=f"blog:{digest}",
+                    source_key=source.key,
+                    source_type=source.type,
+                    external_id=external_id,
+                    publisher=source.label,
+                    title=title,
+                    url=url,
+                    published_at=published,
+                    engagement=BlogEngagement(type=source.type),
+                    content_revision=_revision(
+                        values={
+                            "external_id": external_id,
+                            "url": link,
+                            "title": title,
+                            "published_at": published.isoformat(),
+                            "updated_at": (
+                                "" if updated is None else updated.isoformat()
+                            ),
+                        },
+                    ),
+                ),
+            )
+        return SourceDiscoveryResult(
+            source_key=source.key,
+            documents=documents,
+            excluded_document_count=sum(exclusion_counts.values()),
+            exclusions=[
+                SourceExclusion(
+                    source_key=source.key,
+                    source_type=source.type,
+                    code=code,
+                    count=count,
+                )
+                for code, count in sorted(exclusion_counts.items())
+            ],
+        )
+
+    async def _materialize_blog(
+        self,
+        *,
+        source: BlogSource,
+        documents: list[DiscoveredDocument],
+    ) -> SourceMaterializationResult:
+        materialized: list[SourceDocument] = []
+        exclusion_counts: dict[str, int] = {}
+
+        def exclude(*, code: str) -> None:
+            exclusion_counts[code] = exclusion_counts.get(code, 0) + 1
+
+        for document in documents:
+            if not isinstance(document, BlogDiscoveredDocument):
+                raise ValueError("Blog materialization received a non-blog document.")
+            _ensure_source(document=document, source_key=source.key)
+            try:
                 article_response = await self._get_allowed_article(
-                    url=link,
+                    url=str(document.url),
                     allowed_hosts=set(source.allowed_article_hosts),
                     timeout_seconds=source.timeout_seconds,
                     maximum_bytes=source.max_response_bytes,
@@ -494,25 +663,16 @@ class CommunityHttpSourceGateway:
             if extracted is None or not extracted.strip():
                 exclude(code="blog_content_empty")
                 continue
-            external_id = str(entry.get("id") or link)
-            digest = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:24]
-            documents.append(
-                SourceDocument(
-                    document_id=f"blog:{digest}",
-                    source_key=source.key,
-                    source_type=source.type,
-                    external_id=external_id,
-                    publisher=source.label,
-                    title=title,
-                    url=HttpUrl(str(article_response.url)),
-                    published_at=published,
+            materialized.append(
+                _source_document(
+                    document=document,
                     text=extracted.strip(),
-                    engagement=BlogEngagement(type=source.type),
+                    url=HttpUrl(str(article_response.url)),
                 ),
             )
-        return SourceCollectionResult(
+        return SourceMaterializationResult(
             source_key=source.key,
-            documents=documents,
+            documents=materialized,
             excluded_document_count=sum(exclusion_counts.values()),
             exclusions=[
                 SourceExclusion(
@@ -657,6 +817,42 @@ def _entry_published(*, entry: feedparser.FeedParserDict) -> datetime | None:
     if not isinstance(value, struct_time):
         return None
     return datetime(*value[:6], tzinfo=UTC)
+
+
+def _entry_updated(*, entry: feedparser.FeedParserDict) -> datetime | None:
+    value = entry.get("updated_parsed")
+    if not isinstance(value, struct_time):
+        return None
+    return datetime(*value[:6], tzinfo=UTC)
+
+
+def _revision(*, values: dict[str, str]) -> str:
+    payload = json.dumps(
+        values,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ensure_source(*, document: DiscoveredDocument, source_key: str) -> None:
+    if document.source_key != source_key:
+        raise ValueError("Materialization received a document for another source.")
+
+
+def _source_document(
+    *,
+    document: DiscoveredDocument,
+    text: str,
+    url: HttpUrl,
+) -> SourceDocument:
+    values = document.model_dump(
+        exclude={"content_revision", "transient_text"},
+    )
+    values["text"] = text
+    values["url"] = url
+    return SourceDocument.model_validate(values)
 
 
 def _utc_timestamp(value: datetime) -> str:

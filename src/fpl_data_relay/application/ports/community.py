@@ -4,23 +4,34 @@ from datetime import datetime
 from typing import Protocol
 
 from fpl_data_relay.domain.community import (
-    AgentAnalysisRequest,
-    AgentAnalysisResult,
+    AgentExtractionRequest,
+    AgentExtractionResult,
+    AgentSynthesisRequest,
+    AgentSynthesisResult,
     CommunitySource,
-    SourceCollectionResult,
+    DiscoveredDocument,
+    SourceDiscoveryResult,
+    SourceMaterializationResult,
 )
 
 
 class CommunitySourceGateway(Protocol):
-    """Collect one configured source into normalized documents."""
+    """Discover source metadata and materialize bodies only when required."""
 
-    async def collect(
+    async def discover(
         self,
         *,
         source: CommunitySource,
         window_start: datetime,
         window_end: datetime,
-    ) -> SourceCollectionResult: ...
+    ) -> SourceDiscoveryResult: ...
+
+    async def materialize(
+        self,
+        *,
+        source: CommunitySource,
+        documents: list[DiscoveredDocument],
+    ) -> SourceMaterializationResult: ...
 
     async def close(self) -> None: ...
 
@@ -28,11 +39,17 @@ class CommunitySourceGateway(Protocol):
 class AgentAnalyzer(Protocol):
     """Extract and synthesize community topics using structured model output."""
 
-    async def analyze(
+    async def extract(
         self,
         *,
-        request: AgentAnalysisRequest,
-    ) -> AgentAnalysisResult: ...
+        request: AgentExtractionRequest,
+    ) -> AgentExtractionResult: ...
+
+    async def synthesize(
+        self,
+        *,
+        request: AgentSynthesisRequest,
+    ) -> AgentSynthesisResult: ...
 
 
 class CommunityJobQueue(Protocol):

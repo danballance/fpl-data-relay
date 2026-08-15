@@ -11,10 +11,303 @@ target_story_count = 10
 minimum_story_count = 1
 maximum_candidate_stories = 30
 ranking_policy = "community_momentum_v1"
-model = "gpt-5.6-sol"
+model = "gpt-5.6-terra"
 reasoning_effort = "medium"
 extraction_prompt_version = 1
 synthesis_prompt_version = 1
 extraction_concurrency = 4
 chunk_characters = 24000
-sources = []
+extraction_cache_retention_days = 8
+
+[[strategies.sources]]
+type = "youtube"
+key = "fpl-harry-youtube"
+label = "FPL Harry"
+channel_id = "UCcPWnCj5AKC19HaySZjb25g"
+max_videos = 10
+timeout_seconds = 20.0
+transcript_language = "en"
+transcript_mode = "native"
+transcript_poll_seconds = 2.0
+transcript_timeout_seconds = 60.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-harry-x"
+label = "FPL Harry"
+user_id = "843597504939790336"
+username = "FPL_Harry"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "lets-talk-fpl-x"
+label = "Let's Talk FPL"
+user_id = "27507215"
+username = "LetsTalk_FPL"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-general-x"
+label = "FPL General"
+user_id = "735520502987554816"
+username = "FPLGeneral"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-status-x"
+label = "FPL Status"
+user_id = "377309336"
+username = "FPLStatus"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-focal-x"
+label = "FPL Focal"
+user_id = "1321876701085925376"
+username = "FPLFocal"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-raptor-x"
+label = "FPL Raptor"
+user_id = "1032220175117025280"
+username = "FPL__Raptor"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-betting-x"
+label = "FPL Betting"
+user_id = "454430831"
+username = "footballacca"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-mate-x"
+label = "FPL Mate"
+user_id = "1202643735147880448"
+username = "FPLMate"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-salah-x"
+label = "Abdul Rehman"
+user_id = "68422441"
+username = "FPL_Salah"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-goat-x"
+label = "FPL GOAT"
+user_id = "1034117277061267458"
+username = "FPLGOAT7"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-price-changes-x"
+label = "FPL Price Changes"
+user_id = "1417537213869473794"
+username = "FPLPriceChanges"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-heisenberg-x"
+label = "FPL Heisenberg"
+user_id = "3368301160"
+username = "FPL_Heisenberg"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "lazy-fpl-x"
+label = "The FPL Newsletter"
+user_id = "1493931041546981380"
+username = "LazyFPL"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-rockstar-x"
+label = "FPL Rockstar"
+user_id = "986640674169806848"
+username = "FPL_Rockstar"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-tactician-x"
+label = "Andy Martin"
+user_id = "912663553026482178"
+username = "fpl_tactician"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-tips-x"
+label = "FPLtips"
+user_id = "763692690"
+username = "_FPLtips"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-hints-x"
+label = "FPLHINTS"
+user_id = "536308803"
+username = "FPLHints"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "regret-fpl-x"
+label = "Sam FPL"
+user_id = "1416778936118296577"
+username = "RegretFpl"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-updates-x"
+label = "FPL Updates"
+user_id = "2396697645"
+username = "Fpl_Updates"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "x"
+key = "fpl-olympian-x"
+label = "FPL Olympian"
+user_id = "1417690955533062149"
+username = "FPLOlympian"
+include_replies = false
+include_reposts = false
+max_documents = 5
+timeout_seconds = 15.0
+
+[[strategies.sources]]
+type = "youtube"
+key = "lets-talk-fpl-youtube"
+label = "Let's Talk FPL"
+channel_id = "UCxeOc7eFxq37yW_Nc-69deA"
+max_videos = 10
+timeout_seconds = 20.0
+transcript_language = "en"
+transcript_mode = "native"
+transcript_poll_seconds = 2.0
+transcript_timeout_seconds = 60.0
+
+[[strategies.sources]]
+type = "youtube"
+key = "fpl-raptor-youtube"
+label = "FPL Raptor"
+channel_id = "UC54QLWzsMifTRjNQ02z5pCw"
+max_videos = 10
+timeout_seconds = 20.0
+transcript_language = "en"
+transcript_mode = "native"
+transcript_poll_seconds = 2.0
+transcript_timeout_seconds = 60.0
+
+[[strategies.sources]]
+type = "youtube"
+key = "the-fpl-wire-youtube"
+label = "The FPL Wire"
+channel_id = "UCtIPFexB6PLKNNl0XH3SKKw"
+max_videos = 10
+timeout_seconds = 20.0
+transcript_language = "en"
+transcript_mode = "native"
+transcript_poll_seconds = 2.0
+transcript_timeout_seconds = 60.0
+
+[[strategies.sources]]
+type = "youtube"
+key = "gianni-buttice-youtube"
+label = "Gianni Butticè"
+channel_id = "UCwoe4hkwLnjl7TAgcoeQgpA"
+max_videos = 10
+timeout_seconds = 20.0
+transcript_language = "en"
+transcript_mode = "native"
+transcript_poll_seconds = 2.0
+transcript_timeout_seconds = 60.0
+
+[[strategies.sources]]
+type = "blog"
+key = "fantasy-football-scout-blog"
+label = "Fantasy Football Scout"
+feed_url = "https://www.fantasyfootballscout.co.uk/feed/"
+allowed_article_hosts = [
+    "www.fantasyfootballscout.co.uk",
+    "fantasyfootballscout.co.uk",
+]
+max_articles = 20
+timeout_seconds = 15.0
+max_response_bytes = 2000000

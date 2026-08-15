@@ -17,7 +17,7 @@ import type {
   Team,
 } from "../api/types";
 
-export const health: Health = { status: "ok", schema_version: 3 };
+export const health: Health = { status: "ok", schema_version: 4 };
 export const season: Season = {
   id: "2025-26",
   start_year: 2025,
@@ -226,6 +226,13 @@ export const communityReport: CommunityReport = {
       input_tokens: 100,
       output_tokens: 50,
     },
+    extraction_cache: {
+      eligible_document_count: 1,
+      hit_count: 1,
+      miss_count: 0,
+      write_count: 0,
+      expired_entry_count: 0,
+    },
     stories: [
       {
         rank: 1,
@@ -313,7 +320,7 @@ export function makeFakeRelayApi(
 ): RelayApi {
   const api: RelayApi = {
     getHealth: async () => health,
-    getReadiness: async () => ({ status: "ready", schema_version: 3 }),
+    getReadiness: async () => ({ status: "ready", schema_version: 4 }),
     listSeasons: async () => [season],
     getCurrentSeason: async () => season,
     getSeason: async () => season,

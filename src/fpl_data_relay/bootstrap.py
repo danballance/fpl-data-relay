@@ -21,6 +21,9 @@ from fpl_data_relay.adapters.outbound.postgres.changes import (
 from fpl_data_relay.adapters.outbound.postgres.community import (
     PostgresCommunityReportRepository,
 )
+from fpl_data_relay.adapters.outbound.postgres.community_cache import (
+    PostgresCommunityExtractionCacheRepository,
+)
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
 from fpl_data_relay.adapters.outbound.postgres.ingestion import (
@@ -355,6 +358,9 @@ class ProductionCliOperations:
                 analyzer=analyzer,
                 ranking_policy=CommunityMomentumRankingPolicy(),
                 reports=PostgresCommunityReportRepository(database=database),
+                extraction_cache=(
+                    PostgresCommunityExtractionCacheRepository(database=database)
+                ),
                 references=PostgresReferenceRepository(database=database),
                 clock=lambda: datetime.now(tz=UTC),
             ).run(job=job)

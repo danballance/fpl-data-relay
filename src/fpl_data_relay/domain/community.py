@@ -151,6 +151,7 @@ class CommunityStrategyDefinition(CommunityModel):
     synthesis_prompt_version: Literal[1]
     extraction_concurrency: int = Field(ge=1)
     chunk_characters: int = Field(ge=1)
+    extraction_cache_retention_days: int = Field(ge=1)
     sources: list[CommunitySource]
 
     @field_validator("schedule_timezone")
@@ -172,6 +173,10 @@ class CommunityStrategyDefinition(CommunityModel):
         if self.maximum_candidate_stories < self.target_story_count:
             raise ValueError(
                 "maximum_candidate_stories cannot be below target_story_count.",
+            )
+        if self.extraction_cache_retention_days <= self.lookback_days:
+            raise ValueError(
+                "extraction_cache_retention_days must exceed lookback_days.",
             )
         keys = [source.key for source in self.sources]
         if len(keys) != len(set(keys)):
@@ -232,8 +237,17 @@ Engagement = Annotated[
 ]
 
 
-class SourceDocument(CommunityModel):
-    """Normalized untrusted content passed to the analyzer."""
+class SourceExclusion(CommunityModel):
+    """Stable reason and count for documents intentionally not analyzed."""
+
+    source_key: str
+    source_type: SourceType
+    code: str = Field(min_length=1)
+    count: int = Field(ge=1)
+
+
+class SourceDocumentMetadata(CommunityModel):
+    """Normalized source metadata retained without the source body."""
 
     document_id: str = Field(min_length=1)
     source_key: str = Field(min_length=1)
@@ -243,7 +257,6 @@ class SourceDocument(CommunityModel):
     title: str = Field(min_length=1)
     url: HttpUrl
     published_at: datetime
-    text: str = Field(min_length=1)
     engagement: Engagement
 
     @field_validator("published_at")
@@ -260,8 +273,62 @@ class SourceDocument(CommunityModel):
         return self.engagement.weighted_score
 
 
-class SourceCollectionResult(CommunityModel):
-    """Documents and intentional exclusions returned by one source collector."""
+class XDiscoveredDocument(SourceDocumentMetadata):
+    """X discovery result whose body already arrived with timeline metadata."""
+
+    source_type: Literal[SourceType.X]
+    engagement: XEngagement
+    content_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transient_text: str = Field(min_length=1)
+
+
+class YouTubeDiscoveredDocument(SourceDocumentMetadata):
+    """YouTube metadata discovered before native transcript retrieval."""
+
+    source_type: Literal[SourceType.YOUTUBE]
+    engagement: YouTubeEngagement
+    content_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BlogDiscoveredDocument(SourceDocumentMetadata):
+    """Feed metadata discovered before allow-listed article retrieval."""
+
+    source_type: Literal[SourceType.BLOG]
+    engagement: BlogEngagement
+    content_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+DiscoveredDocument = Annotated[
+    XDiscoveredDocument | YouTubeDiscoveredDocument | BlogDiscoveredDocument,
+    Field(discriminator="source_type"),
+]
+
+
+class SourceDocument(SourceDocumentMetadata):
+    """Normalized untrusted content passed transiently to extraction."""
+
+    text: str = Field(min_length=1)
+
+
+class SourceDiscoveryResult(CommunityModel):
+    """Lightweight document discovery and intentional exclusions."""
+
+    source_key: str
+    documents: list[DiscoveredDocument]
+    excluded_document_count: int = Field(ge=0)
+    exclusions: list[SourceExclusion]
+
+    @model_validator(mode="after")
+    def exclusion_counts_are_consistent(self) -> SourceDiscoveryResult:
+        if sum(item.count for item in self.exclusions) != (
+            self.excluded_document_count
+        ):
+            raise ValueError("Source discovery exclusion counts are inconsistent.")
+        return self
+
+
+class SourceMaterializationResult(CommunityModel):
+    """Transient bodies and intentional exclusions for cache misses."""
 
     source_key: str
     documents: list[SourceDocument]
@@ -269,21 +336,14 @@ class SourceCollectionResult(CommunityModel):
     exclusions: list[SourceExclusion]
 
     @model_validator(mode="after")
-    def exclusion_counts_are_consistent(self) -> SourceCollectionResult:
+    def exclusion_counts_are_consistent(self) -> SourceMaterializationResult:
         if sum(item.count for item in self.exclusions) != (
             self.excluded_document_count
         ):
-            raise ValueError("Source exclusion counts are inconsistent.")
+            raise ValueError(
+                "Source materialization exclusion counts are inconsistent.",
+            )
         return self
-
-
-class SourceExclusion(CommunityModel):
-    """Stable reason and count for documents intentionally not analyzed."""
-
-    source_key: str
-    source_type: SourceType
-    code: str = Field(min_length=1)
-    count: int = Field(ge=1)
 
 
 class SourceFailure(CommunityModel):
@@ -335,6 +395,28 @@ class TopicMentionBatch(CommunityModel):
     topics: list[TopicMention]
 
 
+class ExtractedTopic(CommunityModel):
+    """One document-local topic emitted by Structured Outputs."""
+
+    claim: str = Field(min_length=1)
+    category: TopicCategory
+    actionability: Actionability
+    mentioned_entities: list[str]
+
+
+class DocumentTopicExtraction(CommunityModel):
+    """Structured topics belonging to exactly one supplied document."""
+
+    document_id: str = Field(min_length=1)
+    topics: list[ExtractedTopic]
+
+
+class DocumentTopicExtractionBatch(CommunityModel):
+    """Per-document extraction output for one bounded request packet."""
+
+    documents: list[DocumentTopicExtraction]
+
+
 class EntityLinkCandidate(CommunityModel):
     """Model-selected canonical entity before confidence filtering."""
 
@@ -370,18 +452,15 @@ class EntityCatalogItem(CommunityModel):
     context: str = Field(min_length=1)
 
 
-class AgentAnalysisRequest(CommunityModel):
-    """Explicit analyzer input with no writable tools or trusted URLs."""
+class AgentExtractionRequest(CommunityModel):
+    """Explicit extraction input with no writable tools or trusted URLs."""
 
     documents: list[SourceDocument] = Field(min_length=1)
-    entity_catalog: list[EntityCatalogItem] = Field(min_length=1)
     extraction_instructions: str = Field(min_length=1)
-    synthesis_instructions: str = Field(min_length=1)
     model: str = Field(min_length=1)
     reasoning_effort: Literal["medium"]
     extraction_concurrency: int = Field(ge=1)
     chunk_characters: int = Field(ge=1)
-    maximum_candidate_stories: int = Field(ge=1)
 
 
 class ModelUsage(CommunityModel):
@@ -395,11 +474,132 @@ class ModelUsage(CommunityModel):
     output_tokens: int = Field(ge=0)
 
 
-class AgentAnalysisResult(CommunityModel):
-    """Strict synthesized candidates and aggregate model usage."""
+class DocumentExtraction(CommunityModel):
+    """Cacheable topic output for one complete source document."""
+
+    document_id: str = Field(min_length=1)
+    topics: TopicMentionBatch
+
+    @model_validator(mode="after")
+    def topics_only_cite_this_document(self) -> DocumentExtraction:
+        if any(
+            topic.document_ids != [self.document_id]
+            for topic in self.topics.topics
+        ):
+            raise ValueError("Cached topics may cite only their own document.")
+        return self
+
+
+class AgentExtractionResult(CommunityModel):
+    """Per-document extraction results and current-run model usage."""
+
+    documents: list[DocumentExtraction]
+    usage: ModelUsage
+
+    @model_validator(mode="after")
+    def document_ids_are_unique(self) -> AgentExtractionResult:
+        ids = [item.document_id for item in self.documents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Extraction document IDs must be unique.")
+        return self
+
+
+class AgentSynthesisRequest(CommunityModel):
+    """Daily synthesis input over cached and newly extracted topics."""
+
+    topics: list[TopicMention] = Field(min_length=1)
+    entity_catalog: list[EntityCatalogItem] = Field(min_length=1)
+    synthesis_instructions: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    reasoning_effort: Literal["medium"]
+    maximum_candidate_stories: int = Field(ge=1)
+
+
+class AgentSynthesisResult(CommunityModel):
+    """Strict synthesized candidates and current-run model usage."""
 
     candidates: CandidateStoryBatch
     usage: ModelUsage
+
+
+class ExtractionCacheLookup(CommunityModel):
+    """One exact document revision requested from the extraction cache."""
+
+    source_key: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
+    content_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExtractionCacheEntryDraft(CommunityModel):
+    """Insert-only structured extraction without source body text."""
+
+    strategy_key: str = Field(min_length=1)
+    strategy_version: int = Field(ge=1)
+    source_key: str = Field(min_length=1)
+    source_type: SourceType
+    document_id: str = Field(min_length=1)
+    external_id: str = Field(min_length=1)
+    content_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    extraction_contract_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    document: SourceDocumentMetadata
+    topics: TopicMentionBatch
+    published_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def values_are_consistent(self) -> ExtractionCacheEntryDraft:
+        if self.published_at.tzinfo is None or self.published_at.utcoffset() is None:
+            raise ValueError("Cache published_at must be timezone-aware.")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("Cache expires_at must be timezone-aware.")
+        if self.expires_at <= self.published_at:
+            raise ValueError("Cache expires_at must follow published_at.")
+        if (
+            self.document.document_id != self.document_id
+            or self.document.external_id != self.external_id
+            or self.document.source_key != self.source_key
+            or self.document.source_type is not self.source_type
+            or self.document.published_at != self.published_at
+        ):
+            raise ValueError("Cache entry metadata does not match its key columns.")
+        if any(
+            topic.document_ids != [self.document_id]
+            for topic in self.topics.topics
+        ):
+            raise ValueError("Cache topics may cite only their own document.")
+        return self
+
+
+class ExtractionCacheEntry(ExtractionCacheEntryDraft):
+    """Stored extraction cache entry with database identity."""
+
+    id: int = Field(ge=1)
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Cache created_at must be timezone-aware.")
+        return value
+
+
+class ExtractionCacheUsage(CommunityModel):
+    """Per-report cache behavior retained for cost review."""
+
+    eligible_document_count: int = Field(ge=0)
+    hit_count: int = Field(ge=0)
+    miss_count: int = Field(ge=0)
+    write_count: int = Field(ge=0)
+    expired_entry_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def counts_are_consistent(self) -> ExtractionCacheUsage:
+        if self.hit_count + self.miss_count != self.eligible_document_count:
+            raise ValueError("Cache hits and misses must equal eligible documents.")
+        if self.write_count > self.miss_count:
+            raise ValueError("Cache writes cannot exceed cache misses.")
+        return self
 
 
 class EvidenceReference(CommunityModel):
@@ -602,6 +802,7 @@ class CommunityReportContent(CommunityModel):
     synthesis_prompt_version: int = Field(ge=1)
     target_story_count: int = Field(ge=1, le=10)
     coverage: CollectionCoverage
+    extraction_cache: ExtractionCacheUsage
     model_usage: ModelUsage
     stories: list[CommunityStory] = Field(min_length=1, max_length=10)
 

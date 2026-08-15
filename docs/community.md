@@ -19,20 +19,27 @@ in place.
 2. The dispatcher creates one versioned `community_strategy` message per active
    strategy. Its `report_date` is the London local date and its half-open window
    is exactly `[scheduled_at - 7 days, scheduled_at)`.
-3. The worker checks `(strategy_key, report_date)` before any provider work,
-   loads the current season and gameweek, validates the secret, then collects
-   all configured sources concurrently.
-4. Documents are normalized and deduplicated by provider-native ID and canonical
-   URL. Oversized content is split without dropping characters. X posts are
-   grouped by account; videos and articles are analyzed independently.
-5. Asynchronous OpenAI Responses calls first extract topic mentions and then
-   synthesize semantically clustered candidates. Source bodies are explicitly
-   untrusted, the model receives opaque document IDs and no writable tools, and
-   responses use Pydantic Structured Outputs with `store=false`.
-6. Every cited document and entity ID is checked against the in-memory corpus
+3. The worker checks `(strategy_key, report_date)` before any provider or cache
+   work, prunes expired extraction rows, loads the current season and gameweek,
+   and validates the secret.
+4. Lightweight discovery runs concurrently for every configured source and
+   returns document identity, fresh evidence and engagement metadata, and a
+   deterministic revision. Documents are deduplicated by provider-native ID and
+   canonical URL.
+5. Exact cache hits reuse strict per-document topic output. Only misses are
+   materialized: X text already returned by the timeline is used transiently,
+   while YouTube transcripts and blog article bodies are fetched only when
+   needed. Oversized content is split without dropping characters. Asynchronous
+   OpenAI Responses calls extract one result per miss, including valid empty
+   topic batches.
+6. A fresh synthesis call consumes the complete cached-plus-new seven-day topic
+   corpus and writes semantically clustered candidates. Source bodies are
+   explicitly untrusted, the model receives opaque document IDs and no writable
+   tools, and responses use Pydantic Structured Outputs with `store=false`.
+7. Every cited document and entity ID is checked against the in-memory corpus
    and current database. Only high-confidence entity links survive. Stories
    without a canonical entity are dropped.
-7. The deterministic ranking policy selects one to ten stories and application
+8. The deterministic ranking policy selects one to ten stories and application
    code adds typed player, team, event, and fixture snapshots. The repository
    inserts one JSONB aggregate row; it never stores full posts, articles, or
    transcripts.
@@ -50,6 +57,10 @@ new packaged definition and may select another `CommunityRankingPolicy` when a
 policy is implemented and registered. Prompt revisions are explicit
 `extraction_prompt_version` and `synthesis_prompt_version` values; changing prompt
 behavior requires a corresponding version update.
+
+`extraction_cache_retention_days` is also explicit. It is eight for the first
+strategy: one day longer than its seven-day lookback, providing an operational
+buffer without retaining derivatives indefinitely.
 
 Populate the first strategy only with identifiers reviewed for production use.
 This example shows all v1 source fields:
@@ -109,6 +120,37 @@ Run offline validation after every manifest edit:
 uv run fpl-relay community validate-config
 ```
 
+## Persistent extraction cache
+
+Migration 4 creates `relay_community_extraction_cache`. Rows are scoped by
+strategy key and version and uniquely identify the source, document, content
+revision, and extraction contract. The extraction-contract hash is SHA-256 over
+canonical JSON containing the exact extraction prompt, model, reasoning effort,
+and chunk size. A prompt or model configuration change therefore cannot silently
+reuse an incompatible result.
+
+Revision hashes are metadata-driven:
+
+- X hashes the current post text;
+- YouTube hashes video ID, title, transcript language, and native mode;
+- blogs hash entry ID, canonical URL, title, publication time, and feed
+  `updated` time when present.
+
+Discovery still runs every day so seven-day membership, current engagement, and
+source failures remain accurate. On a hit, YouTube skips Supadata and blogs skip
+article download and extraction; X avoids only the OpenAI extraction because its
+timeline already includes text. Missing native captions and other intentional
+materialization exclusions are not cached and are retried on the next run.
+
+Cache rows contain normalized evidence metadata and strict topic output,
+including empty topic batches. They never contain source body text. Rows are
+insert-only during their lifetime but may be deleted after expiry; the worker
+prunes expired rows before external calls. Reports record eligible-document,
+hit, miss, write, and expiry-prune counts. Model usage includes only extraction
+calls actually made in the current run plus the required daily synthesis call.
+Immutable historical reports and their evidence are independent from cache
+expiry.
+
 ## Credentials
 
 The production application stack requires a pre-existing Secrets Manager ARN.
@@ -159,10 +201,11 @@ headline. Stored component values explain every final score.
 Migration 3 creates `relay_community_reports`. Each row records the strategy and
 version, London report date, season and optional current event, UTC window and
 generation timestamps, and one validated JSONB content object. The JSON contains
-strategy metadata, coverage, model identifiers and token usage, evidence
-metadata, ranked stories, and canonical snapshots. The database enforces an
-object-shaped JSON value and one-to-ten stories, and uniquely constrains
-`(strategy_key, report_date)`. Reports are insert-only and retained indefinitely.
+strategy metadata, coverage, extraction-cache metrics, model identifiers and
+token usage, evidence metadata, ranked stories, and canonical snapshots. The
+database enforces an object-shaped JSON value and one-to-ten stories, and
+uniquely constrains `(strategy_key, report_date)`. Reports are insert-only and
+retained indefinitely.
 
 Public endpoints are documented in `docs/api.md`. Report history returns bounded
 summaries; complete content is returned only by latest and by-ID reads. Community
@@ -176,18 +219,18 @@ succeed, and published coverage names failed sources and counts exclusions.
 Unavailable native captions count as exclusions rather than failures.
 
 Invalid manifest configuration, missing or malformed credentials,
-authentication failures, rate limiting, database errors, OpenAI failures,
-refusals or incomplete output, schema violations, invented citations, invalid
-entity IDs, and internal business-invariant failures abort the SQS delivery. A
-zero-story result is not published. SQS retries and then moves a repeatedly
-failing job to the dedicated DLQ. Recovery is to fix the systemic cause and
-redrive the exact job; idempotency makes this safe.
+authentication failures, rate limiting, database errors, corrupt cache data,
+OpenAI failures, refusals or incomplete output, schema violations, invented
+citations, invalid entity IDs, and internal business-invariant failures abort
+the SQS delivery. A zero-story result is not published. SQS retries and then
+moves a repeatedly failing job to the dedicated DLQ. Recovery is to fix the
+systemic cause and redrive the exact job; idempotency makes this safe.
 
 Structured logs retain report ID, strategy/date, story and failed-source counts,
-and aggregate input/output tokens. They do not include source bodies or secret
-values. Alarms cover worker errors, queue age, worker DLQ depth, Scheduler
-delivery errors and drops, and the absence of a daily dispatch attempt for 26
-hours.
+cache eligibility/hit/miss/write/prune counts, and aggregate input/output tokens.
+They do not include source bodies or secret values. Alarms cover worker errors,
+queue age, worker DLQ depth, Scheduler delivery errors and drops, and the absence
+of a daily dispatch attempt for 26 hours.
 
 ## Production review and rollout
 
@@ -199,7 +242,7 @@ paraphrase of community discussion, not copied source text or verified advice.
 
 Roll out in this order:
 
-1. Deploy migration 3 and the application resources with
+1. Deploy migrations 3 and 4 and the application resources with
    `CommunityScheduleState=DISABLED`.
 2. Create the exact four-key credential secret and supply its ARN to the stack.
 3. Add the reviewed catalog, leave the schedule disabled, and validate it

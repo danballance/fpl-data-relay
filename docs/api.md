@@ -16,7 +16,7 @@ Swagger's **Try it out** requests work through either access path.
 - `GET /healthz` checks only that the application is running. It never accesses
   the database.
 - `GET /readyz` checks database access and migration version and returns
-  `{"status":"ready","schema_version":3}`.
+  `{"status":"ready","schema_version":4}`.
 
 An Aurora resume returns HTTP 503, `Retry-After: 5`, and:
 
@@ -116,7 +116,9 @@ Both history limits are required integers from 1 through 100. Recent and history
 responses contain newest-first summaries and `next_before_id`; pass that cursor
 to the history route. Latest and by-ID return the complete immutable report,
 including coverage, model usage, ranked story evidence, momentum components, and
-typed canonical entity snapshots.
+typed canonical entity snapshots. Complete reports also expose extraction-cache
+metrics: eligible documents, hits, misses, writes, and expired entries pruned by
+that run. The Explorer labels the hit count as documents reused.
 
 An unknown strategy or report ID returns 404. A configured strategy that has
 never published returns 503. Database availability uses the existing stable

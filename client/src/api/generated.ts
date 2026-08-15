@@ -722,6 +722,7 @@ export interface components {
             /** Target Story Count */
             target_story_count: number;
             coverage: components["schemas"]["CollectionCoverage"];
+            extraction_cache: components["schemas"]["ExtractionCacheUsage"];
             model_usage: components["schemas"]["ModelUsage"];
             /** Stories */
             stories: components["schemas"]["CommunityStory"][];
@@ -1132,6 +1133,22 @@ export interface components {
             published_at: string;
             /** Engagement */
             engagement: components["schemas"]["XEngagement"] | components["schemas"]["YouTubeEngagement"] | components["schemas"]["BlogEngagement"];
+        };
+        /**
+         * ExtractionCacheUsage
+         * @description Per-report cache behavior retained for cost review.
+         */
+        ExtractionCacheUsage: {
+            /** Eligible Document Count */
+            eligible_document_count: number;
+            /** Hit Count */
+            hit_count: number;
+            /** Miss Count */
+            miss_count: number;
+            /** Write Count */
+            write_count: number;
+            /** Expired Entry Count */
+            expired_entry_count: number;
         };
         /**
          * FieldChangeResponse

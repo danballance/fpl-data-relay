@@ -19,9 +19,10 @@ It has five explicit runtime compositions:
    schedule reconciliation; it has no upstream HTTP client.
 5. Production community intelligence: a daily Scheduler delivery fans out
    versioned strategy jobs through a dedicated queue to one generic Lambda. The
-   worker collects official/feed-backed public sources, performs asynchronous
-   structured analysis and canonical entity linking, then inserts one immutable
-   aggregate report row.
+   worker discovers official/feed-backed public sources, reuses unchanged
+   structured topic extractions from PostgreSQL, materializes only misses,
+   performs daily synthesis and canonical entity linking, then inserts one
+   immutable aggregate report row.
 
 Production infrastructure has two independent top-level CloudFormation stacks:
 
@@ -54,7 +55,7 @@ transactions, and bounded parent/child reads avoid N+1 queries. Transaction
 advisory locks make concurrent ingestion exit cleanly; payload hashes and
 database constraints make repeated SQS delivery idempotent.
 
-Schema version 3 stores canonical current snapshots for every normalized
+Schema version 4 stores canonical current snapshots for every normalized
 family. A pure entity diff compares stable keys and top-level values, then an
 atomic persistence operation writes normalized rows, source freshness,
 snapshots, family summaries, and child entity changes together. Bootstrap and
@@ -68,6 +69,12 @@ their generation-time snapshots remain embedded in the report JSONB so each
 report is one resource and remains historically meaningful when current FPL
 records change. See [community.md](community.md) for the source, analysis,
 ranking, and rollout contracts.
+
+Migration 4 adds `relay_community_extraction_cache`, an insert-only,
+expiry-deletable cache of strict per-document topic output and evidence
+metadata. It never stores posts, transcripts, or article bodies. Exact strategy,
+document revision, and extraction-contract hashes isolate reusable results;
+daily synthesis is deliberately never cached.
 
 The first snapshot for a source is a silent baseline. Migration 2 discards the
 incompatible coarse history and clears source hashes while preserving

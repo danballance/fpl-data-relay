@@ -21,3 +21,9 @@ COMMUNITY_REPORTS_SQL = (
     .joinpath("migrations/0003_community_reports.sql")
     .read_text(encoding="utf-8")
 )
+
+COMMUNITY_EXTRACTION_CACHE_SQL = (
+    files("fpl_data_relay.adapters.outbound.postgres")
+    .joinpath("migrations/0004_community_extraction_cache.sql")
+    .read_text(encoding="utf-8")
+)

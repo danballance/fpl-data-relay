@@ -9,7 +9,7 @@ from fpl_data_relay.domain.community import (
     CandidateStory,
     MomentumComponents,
     ScoredCandidate,
-    SourceDocument,
+    SourceDocumentMetadata,
     SourceType,
 )
 
@@ -27,7 +27,7 @@ class CommunityRankingPolicy(Protocol):
         self,
         *,
         candidates: list[CandidateStory],
-        documents: Mapping[str, SourceDocument],
+        documents: Mapping[str, SourceDocumentMetadata],
         window_start: datetime,
         window_end: datetime,
         limit: int,
@@ -41,7 +41,7 @@ class CommunityMomentumRankingPolicy:
         self,
         *,
         candidates: list[CandidateStory],
-        documents: Mapping[str, SourceDocument],
+        documents: Mapping[str, SourceDocumentMetadata],
         window_start: datetime,
         window_end: datetime,
         limit: int,
@@ -80,7 +80,7 @@ class CommunityMomentumRankingPolicy:
 
 def engagement_percentiles(
     *,
-    documents: Mapping[str, SourceDocument],
+    documents: Mapping[str, SourceDocumentMetadata],
 ) -> dict[str, float]:
     """Normalize public engagement only against documents on the same platform."""
     platform_values: dict[SourceType, list[int]] = {
@@ -106,7 +106,7 @@ def engagement_percentiles(
 def score_candidate(
     *,
     candidate: CandidateStory,
-    documents: Mapping[str, SourceDocument],
+    documents: Mapping[str, SourceDocumentMetadata],
     percentiles: Mapping[str, float],
     window_start: datetime,
     window_end: datetime,

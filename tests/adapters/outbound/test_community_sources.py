@@ -17,6 +17,7 @@ from fpl_data_relay.config import CommunityCredentials
 from fpl_data_relay.domain.community import (
     BlogSource,
     SourceType,
+    XDiscoveredDocument,
     XSource,
     YouTubeSource,
 )
@@ -106,16 +107,76 @@ async def test_x_collector_pages_with_window_metrics_and_exclusions() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     gateway = CommunityHttpSourceGateway(credentials=credentials(), client=client)
-    result = await gateway.collect(
+    discovered = await gateway.discover(
         source=x_source(),
         window_start=NOW - timedelta(days=7),
         window_end=NOW,
+    )
+    assert discovered.documents[0].content_revision != (
+        discovered.documents[1].content_revision
+    )
+    result = await gateway.materialize(
+        source=x_source(),
+        documents=discovered.documents,
     )
     assert [item.document_id for item in result.documents] == ["x:1", "x:2"]
     assert result.documents[0].engagement_score == 20
     assert requests[0].url.params["exclude"] == "retweets,replies"
     assert requests[0].url.params["start_time"].endswith("Z")
     assert requests[1].url.params["pagination_token"] == "next"
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_x_revision_tracks_text_while_engagement_stays_fresh() -> None:
+    text = ["First version"]
+    likes = [1]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "1",
+                        "text": text[0],
+                        "created_at": (NOW - timedelta(hours=1)).isoformat(),
+                        "public_metrics": {
+                            "like_count": likes[0],
+                            "reply_count": 0,
+                            "retweet_count": 0,
+                            "quote_count": 0,
+                        },
+                    },
+                ],
+                "meta": {},
+            },
+            request=request,
+        )
+
+    gateway = CommunityHttpSourceGateway(
+        credentials=credentials(),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    first = await gateway.discover(
+        source=x_source(),
+        window_start=NOW - timedelta(days=7),
+        window_end=NOW,
+    )
+    text[0] = "Edited version"
+    likes[0] = 9
+    second = await gateway.discover(
+        source=x_source(),
+        window_start=NOW - timedelta(days=7),
+        window_end=NOW,
+    )
+
+    assert first.documents[0].document_id == second.documents[0].document_id
+    assert first.documents[0].content_revision != (
+        second.documents[0].content_revision
+    )
+    assert isinstance(second.documents[0], XDiscoveredDocument)
+    assert second.documents[0].engagement.likes == 9
     await gateway.close()
 
 
@@ -170,10 +231,15 @@ async def test_youtube_uses_native_transcripts_and_excludes_unavailable() -> Non
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    result = await gateway.collect(
+    discovered = await gateway.discover(
         source=youtube_source(),
         window_start=NOW - timedelta(days=7),
         window_end=NOW,
+    )
+    assert transcript_modes == []
+    result = await gateway.materialize(
+        source=youtube_source(),
+        documents=discovered.documents,
     )
     assert len(result.documents) == 1
     assert result.documents[0].text == "Native transcript"
@@ -181,6 +247,12 @@ async def test_youtube_uses_native_transcripts_and_excludes_unavailable() -> Non
     assert result.excluded_document_count == 1
     assert result.exclusions[0].code == "youtube_native_caption_unavailable"
     assert transcript_modes == ["native", "native"]
+    retried = await gateway.materialize(
+        source=youtube_source(),
+        documents=discovered.documents,
+    )
+    assert retried.excluded_document_count == 1
+    assert transcript_modes == ["native", "native", "native", "native"]
     await gateway.close()
 
 
@@ -228,10 +300,14 @@ async def test_supadata_async_job_is_polled_to_completion() -> None:
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    result = await gateway.collect(
+    discovered = await gateway.discover(
         source=youtube_source(),
         window_start=NOW - timedelta(days=7),
         window_end=NOW,
+    )
+    result = await gateway.materialize(
+        source=youtube_source(),
+        documents=discovered.documents,
     )
     assert result.documents[0].text == "one two"
     assert polls == 2
@@ -278,10 +354,14 @@ async def test_fatal_transcript_failure_cancels_the_video_batch() -> None:
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(CommunitySourceError) as raised:
-        await gateway.collect(
+        discovered = await gateway.discover(
             source=youtube_source(),
             window_start=NOW - timedelta(days=7),
             window_end=NOW,
+        )
+        await gateway.materialize(
+            source=youtube_source(),
+            documents=discovered.documents,
         )
     assert raised.value.code == "supadata_authentication"
     assert raised.value.fatal is True
@@ -302,9 +382,13 @@ async def test_blog_collector_parses_feed_redirect_and_main_text() -> None:
         for index in range(20)
     ) + "</article></body></html>"
 
+    article_requests = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal article_requests
         if request.url.host == "feed.example":
             return httpx.Response(200, text=feed)
+        article_requests += 1
         if request.url.path == "/go":
             return httpx.Response(302, headers={"Location": "/article"})
         return httpx.Response(200, text=article)
@@ -313,14 +397,64 @@ async def test_blog_collector_parses_feed_redirect_and_main_text() -> None:
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    result = await gateway.collect(
+    discovered = await gateway.discover(
         source=blog_source(),
         window_start=NOW - timedelta(days=7),
         window_end=NOW + timedelta(seconds=1),
     )
+    assert article_requests == 0
+    result = await gateway.materialize(
+        source=blog_source(),
+        documents=discovered.documents,
+    )
     assert len(result.documents) == 1
     assert "Paragraph 1" in result.documents[0].text
     assert str(result.documents[0].url).endswith("/article")
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_blog_revision_tracks_feed_entry_updated_time() -> None:
+    updated = [NOW - timedelta(hours=1)]
+
+    def feed() -> str:
+        return f"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+          <title>FPL</title><id>https://feed.example/</id>
+          <updated>{updated[0].isoformat()}</updated>
+          <entry><title>Transfer article</title><id>article-1</id>
+          <link href="https://blog.example/article" />
+          <published>{(NOW - timedelta(hours=2)).isoformat()}</published>
+          <updated>{updated[0].isoformat()}</updated>
+          <summary>Discussion</summary></entry></feed>"""
+
+    gateway = CommunityHttpSourceGateway(
+        credentials=credentials(),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    text=feed(),
+                    request=request,
+                ),
+            ),
+        ),
+    )
+    first = await gateway.discover(
+        source=blog_source(),
+        window_start=NOW - timedelta(days=7),
+        window_end=NOW + timedelta(seconds=1),
+    )
+    updated[0] = NOW
+    second = await gateway.discover(
+        source=blog_source(),
+        window_start=NOW - timedelta(days=7),
+        window_end=NOW + timedelta(seconds=1),
+    )
+
+    assert first.documents[0].document_id == second.documents[0].document_id
+    assert first.documents[0].content_revision != (
+        second.documents[0].content_revision
+    )
     await gateway.close()
 
 
@@ -336,7 +470,7 @@ async def test_systemic_provider_statuses_are_fatal(status: int) -> None:
         ),
     )
     with pytest.raises(CommunitySourceError) as raised:
-        await gateway.collect(
+        await gateway.discover(
             source=x_source(),
             window_start=NOW - timedelta(days=7),
             window_end=NOW,
@@ -355,7 +489,7 @@ async def test_network_and_blog_policy_failures_are_stable_best_effort() -> None
         client=httpx.AsyncClient(transport=httpx.MockTransport(network_error)),
     )
     with pytest.raises(CommunitySourceError) as raised:
-        await gateway.collect(
+        await gateway.discover(
             source=x_source(),
             window_start=NOW - timedelta(days=7),
             window_end=NOW,
@@ -380,7 +514,7 @@ async def test_malformed_provider_content_has_a_stable_parse_code() -> None:
         ),
     )
     with pytest.raises(CommunitySourceError) as raised:
-        await gateway.collect(
+        await gateway.discover(
             source=x_source(),
             window_start=NOW - timedelta(days=7),
             window_end=NOW,
