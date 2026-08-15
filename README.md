@@ -1,5 +1,12 @@
 # FPL Data Relay
 
+## Live Explorer and API
+
+- **[Open the FPL Data Relay Explorer](https://d3nlodyhp5cnr8.cloudfront.net/)**
+  to browse the latest players, teams, fixtures, gameweeks, and ingestion data.
+- **[Explore the interactive Swagger API documentation](https://d3nlodyhp5cnr8.cloudfront.net/api/docs)**
+  to inspect the read-only HTTP API and try requests against the live data.
+
 FPL Data Relay is a self-hosted relay for public Fantasy Premier League data.
 It stores normalized reference and live data in PostgreSQL, exposes a read-only
 HTTP API and React client, and can run locally or as an AWS serverless
