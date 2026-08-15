@@ -6,10 +6,11 @@ packaged strategy. The generic community Lambda collects the configured public
 sources, analyzes the preceding seven days, links the discussion to canonical
 FPL records, ranks the valid stories, and inserts one immutable PostgreSQL row.
 
-The first packaged strategy is `weekly-community-momentum-v1`. It is deliberately
-`active = false` and the source list is empty. Production must remain disabled
-until a reviewed source catalog and the provider credentials described below are
-in place.
+The first packaged strategy is `weekly-community-momentum-v1`. Its reviewed
+source catalog is populated and the strategy is active, allowing explicit
+production dispatches for manual review. The AWS schedule remains disabled until
+that review is complete; strategy activation and Scheduler activation are
+independent rollout controls.
 
 ## Runtime and data flow
 

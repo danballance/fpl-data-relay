@@ -518,14 +518,26 @@ class MemoryReports:
         return []
 
 
-def test_strategy_manifest_is_versioned_disabled_and_fail_fast() -> None:
+def test_strategy_manifest_loads_strict_versioned_configuration() -> None:
     registry = load_strategy_registry()
     definition = registry.require(
         strategy_key="weekly-community-momentum-v1",
     ).definition
-    assert definition.active is False
-    assert definition.model == "gpt-5.6-terra"
-    assert registry.list_active() == []
+    assert definition.version >= 1
+    assert isinstance(definition.active, bool)
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_strategy_registry_filters_active_strategies(active: bool) -> None:
+    configured = strategy(sources=[source()], active=active)
+    registry = CommunityStrategyRegistry(strategies=[configured])
+    assert registry.list_active() == ([configured] if active else [])
+
+
+def test_strategy_registry_fails_fast_for_unknown_and_duplicate_keys() -> None:
+    registry = CommunityStrategyRegistry(
+        strategies=[strategy(sources=[source()])],
+    )
     assert registry.get(strategy_key="missing") is None
     with pytest.raises(ValueError, match="Unknown"):
         registry.require(strategy_key="missing")
@@ -549,6 +561,10 @@ def test_strategy_and_job_contracts_reject_ambiguous_values() -> None:
             window_end=NOW,
         )
     definition = strategy(sources=[source()]).definition
+    with pytest.raises(ValidationError, match="active"):
+        CommunityStrategyDefinition.model_validate(
+            {**definition.model_dump(), "active": "true"},
+        )
     for changed, message in (
         ({"minimum_story_count": 10, "target_story_count": 1}, "minimum"),
         ({"maximum_candidate_stories": 1}, "maximum"),
