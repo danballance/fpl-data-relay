@@ -27,12 +27,19 @@ jobs:
       ALERT_EMAIL: nixprivacy@pm.me
       COLLECTOR_USER_NAME: fpl-relay-nas-source
       PAYLOAD_PREFIX: payloads
-      COMMUNITY_CREDENTIAL_SECRET_ARN: ${{ secrets.COMMUNITY_CREDENTIAL_SECRET_ARN }}
+      COMMUNITY_CREDENTIAL_SECRET_ARN: ${{ vars.COMMUNITY_CREDENTIAL_SECRET_ARN }}
       COMMUNITY_SCHEDULE_STATE: DISABLED
       COLLECTOR_IMAGE: ghcr.io/danballance/fpl-data-relay-collector
       GH_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Validate deployment variables
+        run: |
+          if [[ -z "${COMMUNITY_CREDENTIAL_SECRET_ARN}" ]]; then
+            echo "::error::The production environment variable COMMUNITY_CREDENTIAL_SECRET_ARN is required."
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}

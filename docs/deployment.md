@@ -20,13 +20,19 @@ always-running AWS application compute.
 ## Normal deployment
 
 Run **Deploy production** manually from `main` in GitHub Actions. Configure the
-`production` environment with:
+`production` environment with these environment secrets:
 
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
+
+Configure this environment variable separately under **Environment variables**:
+
 - `COMMUNITY_CREDENTIAL_SECRET_ARN`
 
-All non-secret production values are explicit in the workflow environment.
+The ARN identifies the Secrets Manager resource but contains no credential
+material, so it is deliberately stored as a variable rather than a GitHub
+secret. All other non-secret production values are explicit in the workflow
+environment.
 The workflow verifies the target AWS account and the commit-specific collector
 image, deploys and verifies the data stack, applies database migrations,
 deploys the application stack, publishes the frontend, and smoke-tests the
@@ -49,7 +55,7 @@ The workflow passes these required application parameters:
 - `AlertEmail=nixprivacy@pm.me`
 - `CollectorUserName=fpl-relay-nas-source`
 - `PayloadPrefix=payloads`
-- `CommunityCredentialSecretArn` from the protected environment secret
+- `CommunityCredentialSecretArn` from the production environment variable
 - `CommunityScheduleState=DISABLED`
 
 The payload builder adds its own schema-version segment, so objects are stored

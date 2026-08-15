@@ -195,6 +195,9 @@ def test_production_deployment_is_one_direct_manual_workflow() -> None:
     assert "--interval-seconds 5" in workflow
     assert "AWS_ACCESS_KEY_ID" in workflow
     assert "AWS_SECRET_ACCESS_KEY" in workflow
+    assert "${{ vars.COMMUNITY_CREDENTIAL_SECRET_ARN }}" in workflow
+    assert "${{ secrets.COMMUNITY_CREDENTIAL_SECRET_ARN }}" not in workflow
+    assert "Validate deployment variables" in workflow
 
     for removed_concept in (
         "fpl-infrastructure-migrate",
