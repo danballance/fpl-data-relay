@@ -21,8 +21,12 @@ from fpl_data_relay.application.ingestion.service import (
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
-from fpl_data_relay.bootstrap import RelayRuntime, build_postgres_database
-from fpl_data_relay.config import Settings
+from fpl_data_relay.bootstrap import (
+    ProductionCliOperations,
+    RelayRuntime,
+    build_postgres_database,
+)
+from fpl_data_relay.config import CommunityCredentials, Settings
 from fpl_data_relay.domain.community import CommunityReport
 from tests.adapters.outbound.test_community_postgres import draft
 from tests.conftest import FakeClient, FakePostgresPool, InMemoryStore
@@ -148,6 +152,88 @@ def test_cli_validates_and_runs_explicit_community_strategy() -> None:
     assert "community report id=7" in executed.output
     assert operations.calls[0][0] == "community-config"
     assert operations.calls[1][0] == "community-run"
+
+
+@pytest.mark.asyncio
+async def test_local_community_run_wires_configured_supadata_pacer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    import fpl_data_relay.adapters.outbound.community_sources as source_module
+    import fpl_data_relay.bootstrap as bootstrap_module
+
+    class WiringObserved(Exception):
+        pass
+
+    captured: dict[str, object] = {}
+
+    async def build_database() -> object:
+        return object()
+
+    def build_pacer(
+        *,
+        requests_per_second: int,
+        monotonic_clock: object,
+        sleeper: object,
+    ) -> object:
+        captured.update(
+            requests_per_second=requests_per_second,
+            monotonic_clock=monotonic_clock,
+            sleeper=sleeper,
+        )
+        return object()
+
+    def build_gateway(
+        *,
+        credentials: object,
+        client: object,
+        supadata_pacer: object,
+    ) -> object:
+        captured.update(
+            credentials=credentials,
+            client=client,
+            supadata_pacer=supadata_pacer,
+        )
+        raise WiringObserved
+
+    monkeypatch.setattr(
+        bootstrap_module,
+        "load_community_credentials_from_environment",
+        lambda: CommunityCredentials(
+            openai_api_key="openai",
+            x_bearer_token="x",
+            youtube_api_key="youtube",
+            supadata_api_key="supadata",
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "build_database_from_environment",
+        build_database,
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "EvenlySpacedRequestPacer",
+        build_pacer,
+    )
+    monkeypatch.setattr(
+        source_module,
+        "CommunityHttpSourceGateway",
+        build_gateway,
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: object())
+
+    with pytest.raises(WiringObserved):
+        await ProductionCliOperations().run_community(
+            strategy_key="weekly-community-momentum-v1",
+            scheduled_at=datetime.fromisoformat("2026-08-13T06:00:00+01:00"),
+        )
+
+    assert captured["requests_per_second"] == 8
+    assert captured["monotonic_clock"] is bootstrap_module.monotonic
+    assert captured["sleeper"] is bootstrap_module.asyncio.sleep
+    assert captured["supadata_pacer"] is not None
 
 
 def test_cli_drop_and_create_requires_confirmation() -> None:

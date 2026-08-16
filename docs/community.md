@@ -63,10 +63,20 @@ behavior requires a corresponding version update.
 strategy: one day longer than its seven-day lookback, providing an operational
 buffer without retaining derivatives indefinitely.
 
+`supadata_requests_per_second` is a required strategy-level provider limit. The
+first strategy uses `8`, evenly spacing request starts by 125 milliseconds below
+the [Supadata Basic plan](https://supadata.ai/pricing)'s advertised limit of ten
+requests per second. One pacer is shared by every YouTube source and
+transcript-status poll in a strategy job.
+Pacing limits request rate but does not change the monthly credit allowance; one
+newly retrieved transcript normally consumes one credit.
+
 Populate the first strategy only with identifiers reviewed for production use.
 This example shows all v1 source fields:
 
 ```toml
+supadata_requests_per_second = 8
+
 [[strategies.sources]]
 type = "x"
 key = "reviewed-x-source"
@@ -235,6 +245,14 @@ citations, invalid entity IDs, and internal business-invariant failures abort
 the SQS delivery. A zero-story result is not published. SQS retries and then
 moves a repeatedly failing job to the dedicated DLQ. Recovery is to fix the
 systemic cause and redrive the exact job; idempotency makes this safe.
+
+Supadata request pacing is in memory and per strategy invocation. It is
+effectively process-wide while the community Lambda retains reserved concurrency
+one and no other worker uses the credential. Increasing that concurrency or
+sharing the key with another worker requires a dedicated transcript queue or a
+distributed rate limiter. HTTP 429 remains fatal because it may indicate credit
+exhaustion; logs retain only allow-listed retry and rate-limit headers, never
+provider response bodies or credentials.
 
 Structured logs retain report ID, strategy/date, story and failed-source counts,
 cache eligibility/hit/miss/write/prune counts, and aggregate input/output tokens.

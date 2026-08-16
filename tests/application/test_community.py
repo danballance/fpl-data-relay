@@ -142,6 +142,7 @@ def strategy(
         extraction_concurrency=4,
         chunk_characters=24000,
         extraction_cache_retention_days=8,
+        supadata_requests_per_second=8,
         sources=sources,
     )
     return ConfiguredCommunityStrategy(definition=definition)
@@ -525,6 +526,7 @@ def test_strategy_manifest_loads_strict_versioned_configuration() -> None:
     ).definition
     assert definition.version >= 1
     assert isinstance(definition.active, bool)
+    assert definition.supadata_requests_per_second == 8
 
 
 @pytest.mark.parametrize("active", [True, False])
@@ -605,6 +607,33 @@ def test_strategy_provider_options_are_configurable_tokens() -> None:
             CommunityStrategyDefinition.model_validate(
                 {**definition.model_dump(), field: value},
             )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, 8.0, "8"],
+)
+def test_strategy_requires_a_positive_strict_supadata_rate(value: object) -> None:
+    definition = strategy(sources=[source()]).definition
+    with pytest.raises(ValidationError, match="supadata_requests_per_second"):
+        CommunityStrategyDefinition.model_validate(
+            {
+                **definition.model_dump(),
+                "supadata_requests_per_second": value,
+            },
+        )
+
+
+def test_strategy_requires_supadata_rate_and_rejects_extra_configuration() -> None:
+    definition = strategy(sources=[source()]).definition
+    missing = definition.model_dump()
+    del missing["supadata_requests_per_second"]
+    with pytest.raises(ValidationError, match="supadata_requests_per_second"):
+        CommunityStrategyDefinition.model_validate(missing)
+    with pytest.raises(ValidationError, match="unexpected_rate_setting"):
+        CommunityStrategyDefinition.model_validate(
+            {**definition.model_dump(), "unexpected_rate_setting": 8},
+        )
 
 
 def test_dispatch_builds_london_date_and_exact_seven_day_window() -> None:

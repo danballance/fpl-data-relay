@@ -1,7 +1,9 @@
 """Composition root for production relay runtimes."""
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -49,6 +51,7 @@ from fpl_data_relay.application.ingestion.service import (
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.ports.administration import SchemaStatus
 from fpl_data_relay.application.reference_queries import ReferenceQueries
+from fpl_data_relay.application.request_pacing import EvenlySpacedRequestPacer
 from fpl_data_relay.config import (
     Settings,
     load_community_credentials_from_environment,
@@ -332,6 +335,11 @@ class ProductionCliOperations:
         gateway = CommunityHttpSourceGateway(
             credentials=credentials,
             client=httpx.AsyncClient(),
+            supadata_pacer=EvenlySpacedRequestPacer(
+                requests_per_second=definition.supadata_requests_per_second,
+                monotonic_clock=monotonic,
+                sleeper=asyncio.sleep,
+            ),
         )
         analyzer = OpenAICommunityAnalyzer(
             client=AsyncOpenAI(api_key=credentials.openai_api_key),

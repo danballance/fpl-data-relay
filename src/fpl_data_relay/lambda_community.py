@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Protocol, TypedDict, cast
 
 import boto3
@@ -44,6 +45,7 @@ from fpl_data_relay.application.community_ranking import (
 )
 from fpl_data_relay.application.community_service import CommunityService
 from fpl_data_relay.application.community_strategies import load_strategy_registry
+from fpl_data_relay.application.request_pacing import EvenlySpacedRequestPacer
 from fpl_data_relay.config import load_rds_data_settings_from_environment
 
 LOGGER = logging.getLogger(__name__)
@@ -134,6 +136,12 @@ async def process_job(
             "job_kind": job.kind,
             "report_id": existing.id,
         }
+    definition = REGISTRY.require(strategy_key=job.strategy_key).definition
+    if definition.version != job.strategy_version:
+        raise ValueError(
+            f"Strategy version mismatch: job={job.strategy_version}, "
+            f"configured={definition.version}.",
+        )
     credentials = await load_community_credentials_from_secret(
         client=SECRETS,
         secret_arn=COMMUNITY_CREDENTIAL_SECRET_ARN,
@@ -141,6 +149,11 @@ async def process_job(
     gateway = CommunityHttpSourceGateway(
         credentials=credentials,
         client=httpx.AsyncClient(),
+        supadata_pacer=EvenlySpacedRequestPacer(
+            requests_per_second=definition.supadata_requests_per_second,
+            monotonic_clock=monotonic,
+            sleeper=asyncio.sleep,
+        ),
     )
     analyzer = OpenAICommunityAnalyzer(
         client=AsyncOpenAI(api_key=credentials.openai_api_key),

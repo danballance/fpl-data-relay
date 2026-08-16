@@ -219,6 +219,12 @@ queue age and DLQ depth, Scheduler errors/drops, and no daily attempt within 26
 hours. The worker reuses structured extraction results through the existing
 Aurora database; the cache adds no AWS resource or new secret.
 
+Each strategy explicitly configures its Supadata request rate. The worker uses
+one in-memory, evenly spaced pacer across every YouTube channel in the invocation;
+reserved concurrency one makes distributed coordination unnecessary. Do not
+increase community concurrency or reuse the same Supadata credential in another
+worker without adding cross-worker rate coordination.
+
 ## Teardown
 
 Stop the NAS collector first. Empty both disposable buckets, then delete

@@ -21,8 +21,9 @@ It has five explicit runtime compositions:
    versioned strategy jobs through a dedicated queue to one generic Lambda. The
    worker discovers official/feed-backed public sources, reuses unchanged
    structured topic extractions from PostgreSQL, materializes only misses,
-   performs daily synthesis and canonical entity linking, then inserts one
-   immutable aggregate report row.
+   paces Supadata transcript traffic across all YouTube sources, performs daily
+   synthesis and canonical entity linking, then inserts one immutable aggregate
+   report row.
 
 Production infrastructure has two independent top-level CloudFormation stacks:
 

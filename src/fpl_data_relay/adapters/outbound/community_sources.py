@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from time import struct_time
 from typing import Annotated, Literal
@@ -21,6 +22,7 @@ from pydantic import (
 )
 
 from fpl_data_relay.application.errors import CommunitySourceError
+from fpl_data_relay.application.request_pacing import RequestPacer
 from fpl_data_relay.config import CommunityCredentials
 from fpl_data_relay.domain.community import (
     BlogDiscoveredDocument,
@@ -44,6 +46,7 @@ X_API_BASE_URL = "https://api.x.com/2"
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 SUPADATA_API_BASE_URL = "https://api.supadata.ai/v1"
 MAX_REDIRECTS = 5
+LOGGER = logging.getLogger(__name__)
 
 
 class ExternalModel(BaseModel):
@@ -143,9 +146,11 @@ class CommunityHttpSourceGateway:
         *,
         credentials: CommunityCredentials,
         client: httpx.AsyncClient,
+        supadata_pacer: RequestPacer,
     ) -> None:
         self._credentials = credentials
         self._client = client
+        self._supadata_pacer = supadata_pacer
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -736,6 +741,7 @@ class CommunityHttpSourceGateway:
         params: dict[str, str],
         timeout_seconds: float,
     ) -> httpx.Response:
+        await self._supadata_pacer.wait()
         try:
             return await self._client.get(
                 url,
@@ -790,6 +796,7 @@ def _raise_provider_status(*, response: httpx.Response, provider: str) -> None:
             detail=f"{provider} authentication failed.",
         )
     if response.status_code == 429:
+        _log_rate_limit(response=response, provider=provider)
         raise CommunitySourceError(
             code=f"{provider}_rate_limit",
             fatal=True,
@@ -801,6 +808,20 @@ def _raise_provider_status(*, response: httpx.Response, provider: str) -> None:
             fatal=False,
             detail=f"{provider} returned HTTP {response.status_code}.",
         )
+
+
+def _log_rate_limit(*, response: httpx.Response, provider: str) -> None:
+    details: dict[str, str] = {"provider": provider}
+    for header, field in (
+        ("Retry-After", "retry_after"),
+        ("X-RateLimit-Limit", "rate_limit_limit"),
+        ("X-RateLimit-Remaining", "rate_limit_remaining"),
+        ("X-RateLimit-Reset", "rate_limit_reset"),
+    ):
+        value = response.headers.get(header)
+        if value is not None:
+            details[field] = value
+    LOGGER.error("community_provider_rate_limited", extra=details)
 
 
 def _ensure_size(*, response: httpx.Response, maximum: int) -> None:

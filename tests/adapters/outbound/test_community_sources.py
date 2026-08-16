@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import feedparser
@@ -23,6 +25,15 @@ from fpl_data_relay.domain.community import (
 )
 
 NOW = datetime(2026, 8, 13, 6, tzinfo=UTC)
+
+
+class RecordingRequestPacer:
+    def __init__(self) -> None:
+        self.wait_count = 0
+
+    async def wait(self) -> None:
+        self.wait_count += 1
+        await asyncio.sleep(0)
 
 
 def credentials() -> CommunityCredentials:
@@ -106,7 +117,12 @@ async def test_x_collector_pages_with_window_metrics_and_exclusions() -> None:
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    gateway = CommunityHttpSourceGateway(credentials=credentials(), client=client)
+    pacer = RecordingRequestPacer()
+    gateway = CommunityHttpSourceGateway(
+        credentials=credentials(),
+        client=client,
+        supadata_pacer=pacer,
+    )
     discovered = await gateway.discover(
         source=x_source(),
         window_start=NOW - timedelta(days=7),
@@ -124,6 +140,7 @@ async def test_x_collector_pages_with_window_metrics_and_exclusions() -> None:
     assert requests[0].url.params["exclude"] == "retweets,replies"
     assert requests[0].url.params["start_time"].endswith("Z")
     assert requests[1].url.params["pagination_token"] == "next"
+    assert pacer.wait_count == 0
     await gateway.close()
 
 
@@ -157,6 +174,7 @@ async def test_x_revision_tracks_text_while_engagement_stays_fresh() -> None:
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=RecordingRequestPacer(),
     )
     first = await gateway.discover(
         source=x_source(),
@@ -227,9 +245,11 @@ async def test_youtube_uses_native_transcripts_and_excludes_unavailable() -> Non
             json={"content": "Native transcript", "lang": "en"},
         )
 
+    pacer = RecordingRequestPacer()
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=pacer,
     )
     discovered = await gateway.discover(
         source=youtube_source(),
@@ -237,6 +257,7 @@ async def test_youtube_uses_native_transcripts_and_excludes_unavailable() -> Non
         window_end=NOW,
     )
     assert transcript_modes == []
+    assert pacer.wait_count == 0
     result = await gateway.materialize(
         source=youtube_source(),
         documents=discovered.documents,
@@ -253,6 +274,7 @@ async def test_youtube_uses_native_transcripts_and_excludes_unavailable() -> Non
     )
     assert retried.excluded_document_count == 1
     assert transcript_modes == ["native", "native", "native", "native"]
+    assert pacer.wait_count == 4
     await gateway.close()
 
 
@@ -296,9 +318,11 @@ async def test_supadata_async_job_is_polled_to_completion() -> None:
             },
         )
 
+    pacer = RecordingRequestPacer()
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=pacer,
     )
     discovered = await gateway.discover(
         source=youtube_source(),
@@ -311,6 +335,85 @@ async def test_supadata_async_job_is_polled_to_completion() -> None:
     )
     assert result.documents[0].text == "one two"
     assert polls == 2
+    assert pacer.wait_count == 3
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_shared_supadata_pacer_covers_concurrent_youtube_sources() -> None:
+    transcript_video_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        channel_id = request.url.params.get("channelId", "")
+        video_id = f"video-{channel_id}"
+        if request.url.host == "www.googleapis.com" and request.url.path.endswith(
+            "/search",
+        ):
+            return httpx.Response(
+                200,
+                json={"items": [{"id": {"videoId": video_id}}]},
+            )
+        if request.url.host == "www.googleapis.com":
+            requested_id = request.url.params["id"]
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": requested_id,
+                            "snippet": {
+                                "channelTitle": requested_id,
+                                "title": requested_id,
+                                "publishedAt": (NOW - timedelta(hours=1)).isoformat(),
+                            },
+                            "statistics": {"viewCount": "1"},
+                        },
+                    ],
+                },
+            )
+        transcript_video_ids.append(request.url.params["url"])
+        return httpx.Response(200, json={"content": "Transcript", "lang": "en"})
+
+    first_source = youtube_source()
+    second_source = YouTubeSource.model_validate(
+        {
+            **first_source.model_dump(),
+            "key": "youtube-source-two",
+            "channel_id": "UC456",
+        },
+    )
+    pacer = RecordingRequestPacer()
+    gateway = CommunityHttpSourceGateway(
+        credentials=credentials(),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=pacer,
+    )
+    first_discovery, second_discovery = await asyncio.gather(
+        gateway.discover(
+            source=first_source,
+            window_start=NOW - timedelta(days=7),
+            window_end=NOW,
+        ),
+        gateway.discover(
+            source=second_source,
+            window_start=NOW - timedelta(days=7),
+            window_end=NOW,
+        ),
+    )
+
+    await asyncio.gather(
+        gateway.materialize(
+            source=first_source,
+            documents=first_discovery.documents,
+        ),
+        gateway.materialize(
+            source=second_source,
+            documents=second_discovery.documents,
+        ),
+    )
+
+    assert pacer.wait_count == 2
+    assert len(transcript_video_ids) == 2
     await gateway.close()
 
 
@@ -352,6 +455,7 @@ async def test_fatal_transcript_failure_cancels_the_video_batch() -> None:
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=RecordingRequestPacer(),
     )
     with pytest.raises(CommunitySourceError) as raised:
         discovered = await gateway.discover(
@@ -393,9 +497,11 @@ async def test_blog_collector_parses_feed_redirect_and_main_text() -> None:
             return httpx.Response(302, headers={"Location": "/article"})
         return httpx.Response(200, text=article)
 
+    pacer = RecordingRequestPacer()
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=pacer,
     )
     discovered = await gateway.discover(
         source=blog_source(),
@@ -410,6 +516,7 @@ async def test_blog_collector_parses_feed_redirect_and_main_text() -> None:
     assert len(result.documents) == 1
     assert "Paragraph 1" in result.documents[0].text
     assert str(result.documents[0].url).endswith("/article")
+    assert pacer.wait_count == 0
     await gateway.close()
 
 
@@ -438,6 +545,7 @@ async def test_blog_revision_tracks_feed_entry_updated_time() -> None:
                 ),
             ),
         ),
+        supadata_pacer=RecordingRequestPacer(),
     )
     first = await gateway.discover(
         source=blog_source(),
@@ -468,6 +576,7 @@ async def test_systemic_provider_statuses_are_fatal(status: int) -> None:
                 lambda request: httpx.Response(status, request=request),
             ),
         ),
+        supadata_pacer=RecordingRequestPacer(),
     )
     with pytest.raises(CommunitySourceError) as raised:
         await gateway.discover(
@@ -480,6 +589,83 @@ async def test_systemic_provider_statuses_are_fatal(status: int) -> None:
 
 
 @pytest.mark.asyncio
+async def test_supadata_rate_limit_logs_only_allowlisted_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.googleapis.com" and request.url.path.endswith(
+            "/search",
+        ):
+            return httpx.Response(200, json={"items": [{"id": {"videoId": "v1"}}]})
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "v1",
+                            "snippet": {
+                                "channelTitle": "Channel",
+                                "title": "Video",
+                                "publishedAt": (NOW - timedelta(hours=1)).isoformat(),
+                            },
+                            "statistics": {"viewCount": "1"},
+                        },
+                    ],
+                },
+            )
+        return httpx.Response(
+            429,
+            headers={
+                "Retry-After": "2",
+                "X-RateLimit-Limit": "10",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "12345",
+                "X-Private-Diagnostic": "do-not-log-header",
+            },
+            text="do-not-log-body",
+        )
+
+    caplog.set_level(
+        logging.ERROR,
+        logger="fpl_data_relay.adapters.outbound.community_sources",
+    )
+    gateway = CommunityHttpSourceGateway(
+        credentials=credentials(),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        supadata_pacer=RecordingRequestPacer(),
+    )
+    discovered = await gateway.discover(
+        source=youtube_source(),
+        window_start=NOW - timedelta(days=7),
+        window_end=NOW,
+    )
+
+    with pytest.raises(CommunitySourceError) as raised:
+        await gateway.materialize(
+            source=youtube_source(),
+            documents=discovered.documents,
+        )
+
+    assert raised.value.code == "supadata_rate_limit"
+    record = next(
+        item
+        for item in caplog.records
+        if item.message == "community_provider_rate_limited"
+    )
+    assert record.__dict__["provider"] == "supadata"
+    assert record.__dict__["retry_after"] == "2"
+    assert record.__dict__["rate_limit_limit"] == "10"
+    assert record.__dict__["rate_limit_remaining"] == "0"
+    assert record.__dict__["rate_limit_reset"] == "12345"
+    serialized_record = str(record.__dict__)
+    assert "do-not-log-header" not in serialized_record
+    assert "do-not-log-body" not in serialized_record
+    assert "x-api-key" not in serialized_record.lower()
+    await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_network_and_blog_policy_failures_are_stable_best_effort() -> None:
     def network_error(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)
@@ -487,6 +673,7 @@ async def test_network_and_blog_policy_failures_are_stable_best_effort() -> None
     gateway = CommunityHttpSourceGateway(
         credentials=credentials(),
         client=httpx.AsyncClient(transport=httpx.MockTransport(network_error)),
+        supadata_pacer=RecordingRequestPacer(),
     )
     with pytest.raises(CommunitySourceError) as raised:
         await gateway.discover(
@@ -512,6 +699,7 @@ async def test_malformed_provider_content_has_a_stable_parse_code() -> None:
                 ),
             ),
         ),
+        supadata_pacer=RecordingRequestPacer(),
     )
     with pytest.raises(CommunitySourceError) as raised:
         await gateway.discover(

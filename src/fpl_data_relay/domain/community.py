@@ -155,6 +155,7 @@ class CommunityStrategyDefinition(CommunityModel):
     extraction_concurrency: int = Field(ge=1)
     chunk_characters: int = Field(ge=1)
     extraction_cache_retention_days: int = Field(ge=1)
+    supadata_requests_per_second: int = Field(ge=1)
     sources: list[CommunitySource]
 
     @field_validator("schedule_timezone")
