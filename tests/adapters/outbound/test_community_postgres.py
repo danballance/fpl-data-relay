@@ -261,11 +261,14 @@ async def test_report_repository_returns_conflict_and_detects_impossible_state(
 
 
 def test_repository_value_decoders_fail_fast() -> None:
+    naive_timestamp = datetime(2026, 8, 13, 6)
     assert _date(NOW) == NOW.date()
     assert _date(NOW.date()) == NOW.date()
     assert _datetime(NOW) == NOW
+    assert _datetime(naive_timestamp) == NOW
+    assert _datetime("2026-08-13 06:00:00") == NOW
     assert _content(content().model_dump(mode="json")) == content()
     with pytest.raises(TypeError, match="date value"):
         _date(1)
-    with pytest.raises(TypeError, match="datetime value"):
+    with pytest.raises(TypeError, match="community report timestamp"):
         _datetime(1)

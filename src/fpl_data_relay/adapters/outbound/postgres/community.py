@@ -5,7 +5,10 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import cast
 
-from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
+from fpl_data_relay.adapters.outbound.postgres.database import (
+    PostgresDatabase,
+    normalize_database_datetime,
+)
 from fpl_data_relay.domain.community import (
     CommunityReport,
     CommunityReportContent,
@@ -208,11 +211,10 @@ def _date(value: object) -> date:
 
 
 def _datetime(value: object) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    raise TypeError(f"Expected a datetime value, received {type(value).__name__}.")
+    return normalize_database_datetime(
+        value=value,
+        key="community report timestamp",
+    )
 
 
 def _content(value: object) -> CommunityReportContent:

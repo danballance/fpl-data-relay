@@ -186,8 +186,11 @@ async def test_cache_repository_prunes_reads_and_inserts_batches() -> None:
 
 
 def test_cache_decoders_fail_fast() -> None:
+    naive_timestamp = datetime(2026, 8, 13, 6)
     assert _datetime(NOW) == NOW
     assert _datetime(NOW.isoformat()) == NOW
+    assert _datetime(naive_timestamp) == NOW
+    assert _datetime("2026-08-13 06:00:00") == NOW
     assert _int("2") == 2
     with pytest.raises(TypeError, match="datetime"):
         _datetime(1)
