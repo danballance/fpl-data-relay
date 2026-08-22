@@ -92,13 +92,15 @@ class IngestionService:
     async def _ingest_reference_unlocked(self) -> IngestionResult:
         """Fetch and store reference resources while a lock is already held."""
         fetched_at = utc_now()
-        bootstrap, fixtures = await asyncio.gather(
+        bootstrap, fixtures, event_status = await asyncio.gather(
             self._client.fetch_bootstrap_static(),
             self._client.fetch_fixtures(),
+            self._client.fetch_event_status(),
         )
         return await self._persist_reference_unlocked(
             bootstrap=bootstrap,
             fixtures=fixtures,
+            event_status=event_status,
             fetched_at=fetched_at,
         )
 
@@ -107,6 +109,7 @@ class IngestionService:
         *,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        event_status: EventStatusResponse,
         fetched_at: datetime,
     ) -> IngestionResult:
         """Persist an already collected and validated reference snapshot."""
@@ -114,6 +117,7 @@ class IngestionService:
             return await self._persist_reference_unlocked(
                 bootstrap=bootstrap,
                 fixtures=fixtures,
+                event_status=event_status,
                 fetched_at=fetched_at,
             )
 
@@ -122,6 +126,7 @@ class IngestionService:
         *,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        event_status: EventStatusResponse,
         fetched_at: datetime,
     ) -> IngestionResult:
         """Persist reference resources while a lock is already held."""
@@ -131,6 +136,7 @@ class IngestionService:
             season=season,
             bootstrap=bootstrap,
             fixtures=fixtures,
+            status=event_status,
             bootstrap_metadata=metadata_for_payload(
                 season_id=season.id,
                 source_key=IngestionSourceKey.BOOTSTRAP,
@@ -143,6 +149,13 @@ class IngestionService:
                 source_key=IngestionSourceKey.FIXTURES,
                 event_id=None,
                 payload=model_to_payload(model=fixtures),
+                fetched_at=fetched_at,
+            ),
+            status_metadata=metadata_for_payload(
+                season_id=season.id,
+                source_key=IngestionSourceKey.EVENT_STATUS,
+                event_id=current_event_id,
+                payload=model_to_payload(model=event_status),
                 fetched_at=fetched_at,
             ),
         )

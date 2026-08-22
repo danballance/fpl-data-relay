@@ -19,7 +19,10 @@ from fpl_data_relay.application.ingestion.service import (
     IngestionService,
 )
 from fpl_data_relay.application.live_queries import LiveQueries
-from fpl_data_relay.application.ports.administration import SchemaStatus
+from fpl_data_relay.application.ports.administration import (
+    ChangeFeedRebaselineResult,
+    SchemaStatus,
+)
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.bootstrap import (
     ProductionCliOperations,
@@ -55,6 +58,22 @@ class FakeCliOperations:
 
     async def drop_and_create_database(self) -> None:
         self.calls.append(("drop", None, None))
+
+    async def rebaseline_current_change_feed(
+        self,
+        *,
+        reason: str,
+    ) -> ChangeFeedRebaselineResult:
+        self.calls.append(("rebaseline", reason, None))
+        return ChangeFeedRebaselineResult(
+            id=8,
+            season_id="2025-26",
+            reason=reason,
+            change_events_deleted=12,
+            entity_changes_deleted=34,
+            snapshots_rebuilt=700,
+            created_at=datetime.fromisoformat("2026-08-22T12:00:00+00:00"),
+        )
 
     async def ingest_reference(self) -> IngestionResult:
         self.calls.append(("reference", None, None))
@@ -117,7 +136,7 @@ def test_cli_preserves_config_schema_and_serve_commands() -> None:
     runner = CliRunner()
     app = create_cli_app(operations=operations)
     assert runner.invoke(app, ["config-check"]).output == "configuration ok\n"
-    assert "schema version 4 applied" in runner.invoke(app, ["db", "apply"]).output
+    assert "schema version 5 applied" in runner.invoke(app, ["db", "apply"]).output
     assert (
         runner.invoke(app, ["db", "status"]).output
         == "applied=[1] pending=[]\n"
@@ -246,6 +265,31 @@ def test_cli_drop_and_create_requires_confirmation() -> None:
     assert "without --yes" in refused.output
     assert accepted.exit_code == 0
     assert operations.calls == [("drop", None, None)]
+
+
+def test_cli_rebaseline_requires_confirmation_and_reports_audit() -> None:
+    operations = FakeCliOperations()
+    app = create_cli_app(operations=operations)
+    refused = CliRunner().invoke(
+        app,
+        ["change-feed", "rebaseline-current", "--reason", "season repair"],
+    )
+    accepted = CliRunner().invoke(
+        app,
+        [
+            "change-feed",
+            "rebaseline-current",
+            "--reason",
+            "season repair",
+            "--yes",
+        ],
+    )
+    assert refused.exit_code == 1
+    assert "without --yes" in refused.output
+    assert accepted.exit_code == 0
+    assert "season=2025-26" in accepted.output
+    assert "snapshots_rebuilt=700" in accepted.output
+    assert operations.calls == [("rebaseline", "season repair", None)]
 
 
 def test_cli_wait_ready_retries_only_database_waking(

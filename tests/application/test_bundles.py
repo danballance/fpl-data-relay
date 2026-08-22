@@ -18,12 +18,13 @@ from fpl_data_relay.application.jobs import LiveJob, ReferenceJob
 
 def reference_bundle() -> ReferencePayloadBundle:
     return ReferencePayloadBundle(
-        version=1,
+        version=2,
         kind="reference",
         job=ReferenceJob(version=1, kind="reference"),
         fetched_at=datetime(2026, 7, 26, 12, tzinfo=UTC),
         bootstrap_static={"events": []},
         fixtures=[],
+        event_status={"status": []},
     )
 
 
@@ -50,10 +51,10 @@ def test_bundle_contract_rejects_naive_time_and_unknown_fields() -> None:
 def test_collected_message_enforces_hash_size_and_strict_fields() -> None:
     job = ReferenceJob(version=1, kind="reference")
     message = CollectedPayloadMessage(
-        version=1,
+        version=2,
         job=job,
         bucket="payload-bucket",
-        key="payloads/v1/reference/key.json",
+        key="payloads/v2/reference/key.json",
         size_bytes=10,
         sha256="a" * 64,
     )
@@ -81,10 +82,10 @@ def test_collected_message_enforces_hash_size_and_strict_fields() -> None:
         )
     with pytest.raises(ValidationError):
         CollectedPayloadMessage(
-            version=1,
+            version=2,
             job=job,
             bucket="payload-bucket",
-            key="payloads/v1/reference/key.json",
+            key="payloads/v2/reference/key.json",
             size_bytes=MAX_COLLECTED_PAYLOAD_BYTES + 1,
             sha256="a" * 64,
         )
@@ -119,7 +120,7 @@ def test_live_bundle_rejects_naive_or_reversed_window() -> None:
         window_end=start + timedelta(hours=1),
     )
     bundle = LivePayloadBundle(
-        version=1,
+        version=2,
         kind="live",
         job=job,
         fetched_at=start,

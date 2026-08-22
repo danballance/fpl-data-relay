@@ -200,9 +200,10 @@ class CollectorWorker:
     ) -> PayloadBundle:
         fetched_at = datetime.now(tz=UTC)
         if isinstance(job, ReferenceJob):
-            bootstrap, fixtures = await asyncio.gather(
+            bootstrap, fixtures, event_status = await asyncio.gather(
                 self._client.fetch_bootstrap_static(),
                 self._client.fetch_fixtures(),
+                self._client.fetch_event_status(),
             )
             return ReferencePayloadBundle(
                 version=PAYLOAD_VERSION,
@@ -211,6 +212,7 @@ class CollectorWorker:
                 fetched_at=fetched_at,
                 bootstrap_static=bootstrap,
                 fixtures=fixtures,
+                event_status=event_status,
             )
         event_status, current_fixtures, event_live = await asyncio.gather(
             self._client.fetch_event_status(),
@@ -253,7 +255,7 @@ def payload_key(*, prefix: str, kind: str, fetched_at: datetime) -> str:
     """Build a unique, date-partitioned payload object key."""
     cleaned_prefix = prefix.strip("/")
     date_path = fetched_at.astimezone(UTC).strftime("%Y/%m/%d")
-    return f"{cleaned_prefix}/v1/{kind}/{date_path}/{uuid4()}.json"
+    return f"{cleaned_prefix}/v{PAYLOAD_VERSION}/{kind}/{date_path}/{uuid4()}.json"
 
 
 def elapsed_ms(*, started_at: float) -> int:

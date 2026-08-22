@@ -2,6 +2,8 @@ import type {
   Element,
   ElementType,
   Event,
+  EventStatusDay,
+  Fixture,
   Team,
 } from "../api/types";
 
@@ -27,6 +29,33 @@ export function formatCost(value: number | null | undefined): string {
     return "—";
   }
   return `£${(value / 10).toFixed(1)}m`;
+}
+
+export function fixtureStatus(
+  fixture: Pick<Fixture, "finished" | "finished_provisional" | "started">,
+): "Scheduled" | "Live" | "Provisional" | "Confirmed" {
+  if (fixture.finished) {
+    return "Confirmed";
+  }
+  if (fixture.finished_provisional) {
+    return "Provisional";
+  }
+  return fixture.started ? "Live" : "Scheduled";
+}
+
+export function eventPointsStatus(
+  status: Pick<EventStatusDay, "points">,
+): "Not started" | "Live" | "Provisional" | "Confirmed" {
+  if (status.points === "r") {
+    return "Confirmed";
+  }
+  if (status.points === "l") {
+    return "Live";
+  }
+  if (status.points === "p") {
+    return "Provisional";
+  }
+  return "Not started";
 }
 
 export function playerName(element: Element): string {

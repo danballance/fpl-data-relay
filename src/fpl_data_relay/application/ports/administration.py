@@ -1,5 +1,6 @@
 """Database administration ports."""
 
+from datetime import datetime
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -12,6 +13,20 @@ class SchemaStatus(BaseModel):
 
     applied_versions: list[int]
     pending_versions: list[int]
+
+
+class ChangeFeedRebaselineResult(BaseModel):
+    """Audited result of replacing one season's change-feed baseline."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    season_id: str
+    reason: str
+    change_events_deleted: int
+    entity_changes_deleted: int
+    snapshots_rebuilt: int
+    created_at: datetime
 
 
 class SchemaManager(Protocol):
@@ -33,3 +48,13 @@ class DatabaseRecreator(Protocol):
         database_url: str,
         maintenance_database_url: str,
     ) -> None: ...
+
+
+class ChangeFeedRebaseliner(Protocol):
+    """Replace the current season's feed baseline from normalized state."""
+
+    async def rebaseline_current(
+        self,
+        *,
+        reason: str,
+    ) -> ChangeFeedRebaselineResult: ...

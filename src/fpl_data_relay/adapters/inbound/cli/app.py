@@ -10,7 +10,10 @@ import typer
 from fpl_data_relay.application.database import SCHEMA_VERSION
 from fpl_data_relay.application.errors import DatabaseWakingError
 from fpl_data_relay.application.ingestion.service import IngestionResult
-from fpl_data_relay.application.ports.administration import SchemaStatus
+from fpl_data_relay.application.ports.administration import (
+    ChangeFeedRebaselineResult,
+    SchemaStatus,
+)
 from fpl_data_relay.domain.community import CommunityReport
 
 
@@ -24,6 +27,12 @@ class CliOperations(Protocol):
     async def schema_status(self) -> SchemaStatus: ...
 
     async def drop_and_create_database(self) -> None: ...
+
+    async def rebaseline_current_change_feed(
+        self,
+        *,
+        reason: str,
+    ) -> ChangeFeedRebaselineResult: ...
 
     async def ingest_reference(self) -> IngestionResult: ...
 
@@ -52,9 +61,11 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
     db_app = typer.Typer(no_args_is_help=True)
     ingest_app = typer.Typer(no_args_is_help=True)
     community_app = typer.Typer(no_args_is_help=True)
+    change_feed_app = typer.Typer(no_args_is_help=True)
     app.add_typer(db_app, name="db")
     app.add_typer(ingest_app, name="ingest")
     app.add_typer(community_app, name="community")
+    app.add_typer(change_feed_app, name="change-feed")
 
     @app.command("config-check")
     def config_check() -> None:
@@ -136,6 +147,43 @@ def create_cli_app(*, operations: CliOperations) -> typer.Typer:
         """Run one reference ingestion cycle."""
         result = asyncio.run(operations.ingest_reference())
         echo_ingestion_result(label="reference ingested", result=result)
+
+    @change_feed_app.command("rebaseline-current")
+    def rebaseline_current_change_feed(
+        *,
+        reason: Annotated[
+            str,
+            typer.Option(
+                "--reason",
+                min=1,
+                help="Required audit reason for replacing the current baseline.",
+            ),
+        ],
+        yes: Annotated[
+            bool,
+            typer.Option(
+                "--yes",
+                help="Confirm deletion of current-season change history.",
+            ),
+        ] = False,
+    ) -> None:
+        """Replace current-season history with the normalized current state."""
+        if not yes:
+            typer.echo(
+                "Refusing to rebaseline current change feed without --yes.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        result = asyncio.run(
+            operations.rebaseline_current_change_feed(reason=reason),
+        )
+        typer.echo(
+            f"change feed rebaselined id={result.id} "
+            f"season={result.season_id} "
+            f"change_events_deleted={result.change_events_deleted} "
+            f"entity_changes_deleted={result.entity_changes_deleted} "
+            f"snapshots_rebuilt={result.snapshots_rebuilt}",
+        )
 
     @ingest_app.command("live")
     def ingest_live(

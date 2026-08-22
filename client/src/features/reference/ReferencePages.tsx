@@ -19,6 +19,7 @@ import {
   formatBoolean,
   formatCost,
   formatDateTime,
+  fixtureStatus,
   playerName,
 } from "../../lib/format";
 import { useFilterParam } from "../../lib/query-state";
@@ -442,16 +443,7 @@ export function FixturesPage() {
         header: "Away",
         accessorFn: (row) => lookups.team(row.team_a),
       },
-      {
-        accessorKey: "started",
-        header: "Started",
-        cell: ({ getValue }) => formatBoolean(getValue<boolean>()),
-      },
-      {
-        accessorKey: "finished",
-        header: "Finished",
-        cell: ({ getValue }) => formatBoolean(getValue<boolean>()),
-      },
+      { id: "status", header: "Status", accessorFn: fixtureStatus },
     ],
     [lookups],
   );

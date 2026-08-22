@@ -136,8 +136,10 @@ class InMemoryStore:
         season: Season,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        status: EventStatusResponse,
         bootstrap_metadata: IngestionMetadata,
         fixtures_metadata: IngestionMetadata,
+        status_metadata: IngestionMetadata,
     ) -> list[UpsertOutcome]:
         return [
             await self.upsert_bootstrap(
@@ -148,6 +150,10 @@ class InMemoryStore:
             await self.upsert_fixtures(
                 fixtures=fixtures,
                 metadata=fixtures_metadata,
+            ),
+            await self.upsert_event_status(
+                status=status,
+                metadata=status_metadata,
             ),
         ]
 
@@ -568,6 +574,8 @@ class FakeClient:
         ]
 
     async def fetch_event_status(self) -> EventStatusResponse:
+        if self.bootstrap_current_id is None:
+            return EventStatusResponse(status=[])
         return EventStatusResponse.model_validate(
             {
                 "status": [
@@ -575,7 +583,7 @@ class FakeClient:
                         "event": self.bootstrap_current_id,
                         "bonus_added": False,
                         "date": "2026-06-20",
-                        "leagues_updated": False,
+                        "points": "",
                     },
                 ],
             },

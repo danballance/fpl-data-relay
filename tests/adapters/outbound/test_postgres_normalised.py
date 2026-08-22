@@ -5,10 +5,21 @@ from typing import cast
 
 import pytest
 
-from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
-from fpl_data_relay.domain.changes import IngestionMetadata, IngestionSourceKey
+from fpl_data_relay.adapters.outbound.postgres.database import (
+    IngestionLockError,
+    PostgresDatabase,
+)
+from fpl_data_relay.domain.changes import (
+    EntityFamily,
+    IngestionMetadata,
+    IngestionSourceKey,
+)
 from fpl_data_relay.domain.fixtures import Fixture
-from fpl_data_relay.domain.live import EventLiveResponse, EventStatusResponse
+from fpl_data_relay.domain.live import (
+    EventLiveResponse,
+    EventStatusPoints,
+    EventStatusResponse,
+)
 from fpl_data_relay.domain.reference import BootstrapStatic, Season
 from fpl_data_relay.domain.rules import derive_season
 from tests.conftest import FakeClient
@@ -52,6 +63,8 @@ class NormalisedConnection:
             dict[str, object],
         ] = {}
         self.notifications: list[str] = []
+        self.rebaseline_audits: list[dict[str, object]] = []
+        self.advisory_lock_available = True
         self.transaction_calls = 0
 
     def transaction(self) -> AbstractAsyncContextManager[object]:
@@ -59,6 +72,30 @@ class NormalisedConnection:
         return NormalisedTransaction()
 
     async def execute(self, query: str, *arguments: object) -> str:
+        if "DELETE FROM relay_change_events WHERE season_id" in query:
+            removed_ids = {
+                cast("int", event["id"])
+                for event in self.change_events
+                if event["season_id"] == arguments[0]
+            }
+            self.change_events = [
+                event
+                for event in self.change_events
+                if event["season_id"] != arguments[0]
+            ]
+            self.entity_changes = [
+                change
+                for change in self.entity_changes
+                if change["change_event_id"] not in removed_ids
+            ]
+            return "DELETE"
+        if "DELETE FROM relay_entity_snapshots WHERE season_id = $1" in query:
+            self.entity_snapshots = {
+                key: row
+                for key, row in self.entity_snapshots.items()
+                if key[0] != arguments[0]
+            }
+            return "DELETE"
         if "UPDATE fpl_seasons" in query and "is_current = false" in query:
             current_season_id = cast("str", arguments[0])
             for season_id, season in self.tables["fpl_seasons"].items():
@@ -72,7 +109,8 @@ class NormalisedConnection:
                 cast("str", arguments[1]),
                 cast("int | None", arguments[2]),
             )
-            self.sources[source_identity]["checked_at"] = arguments[3]
+            self.sources[source_identity]["fetched_at"] = arguments[3]
+            self.sources[source_identity]["checked_at"] = arguments[4]
             return "UPDATE 1"
         if "INSERT INTO relay_ingestion_sources" in query:
             source_key = cast("str", arguments[1])
@@ -245,6 +283,25 @@ class NormalisedConnection:
         query: str,
         *arguments: object,
     ) -> dict[str, object] | None:
+        if "INSERT INTO relay_change_feed_rebaselines" in query:
+            audit = {
+                "id": len(self.rebaseline_audits) + 1,
+                "season_id": arguments[0],
+                "reason": arguments[1],
+                "change_events_deleted": arguments[2],
+                "entity_changes_deleted": arguments[3],
+                "snapshots_rebuilt": arguments[4],
+                "created_at": datetime.now(tz=UTC),
+            }
+            self.rebaseline_audits.append(audit)
+            return audit
+        if "FROM relay_ingestion_sources" in query:
+            source_identity = (
+                cast("str", arguments[0]),
+                cast("str", arguments[1]),
+                cast("int | None", arguments[2]),
+            )
+            return self.sources.get(source_identity)
         if "INSERT INTO relay_change_events" in query:
             event = {
                 "id": len(self.change_events) + 1,
@@ -304,6 +361,12 @@ class NormalisedConnection:
 
     async def fetch(self, query: str, *arguments: object) -> list[object]:
         compact_query = " ".join(query.split())
+        if compact_query == "SELECT * FROM fpl_seasons WHERE is_current = true":
+            return [
+                row
+                for row in self.tables["fpl_seasons"].values()
+                if row["is_current"] is True
+            ]
         if compact_query.startswith("SELECT id FROM fpl_"):
             table = compact_query.split()[3]
             return [
@@ -316,6 +379,12 @@ class NormalisedConnection:
         ):
             return [
                 {"name": row["name"]}
+                for row in self.tables["fpl_element_stat_definitions"].values()
+                if row["season_id"] == arguments[0]
+            ]
+        if "FROM fpl_element_stat_definitions" in query:
+            return [
+                row
                 for row in self.tables["fpl_element_stat_definitions"].values()
                 if row["season_id"] == arguments[0]
             ]
@@ -357,6 +426,14 @@ class NormalisedConnection:
                 for row in self.tables["fpl_fixtures"].values()
                 if row["season_id"] == arguments[0] and row["event"] == arguments[1]
             ]
+        if "FROM fpl_fixtures" in query and "id = ANY($2)" in query:
+            fixture_ids = cast("list[int]", arguments[1])
+            return [
+                row
+                for row in self.tables["fpl_fixtures"].values()
+                if row["season_id"] == arguments[0]
+                and row["id"] in fixture_ids
+            ]
         if "FROM fpl_fixtures" in query and "ORDER BY id" in query:
             return [
                 row
@@ -364,11 +441,16 @@ class NormalisedConnection:
                 if row["season_id"] == arguments[0]
             ]
         if "FROM fpl_fixture_stat_entries" in query:
+            fixture_ids = (
+                cast("list[int]", arguments[1])
+                if "ANY($2)" in query
+                else [cast("int", arguments[1])]
+            )
             return [
                 row
                 for row in self.fixture_stat_entries
                 if row["season_id"] == arguments[0]
-                and row["fixture_id"] == arguments[1]
+                and row["fixture_id"] in fixture_ids
             ]
         if "FROM fpl_event_status_days" in query:
             return [
@@ -380,15 +462,24 @@ class NormalisedConnection:
             return [
                 row
                 for row in self.tables["fpl_event_live_elements"].values()
-                if row["season_id"] == arguments[0] and row["event_id"] == arguments[1]
+                if row["season_id"] == arguments[0]
+                and (
+                    "event_id = $2" not in query
+                    or row["event_id"] == arguments[1]
+                )
             ]
         if "FROM fpl_event_live_explain_stats" in query:
+            element_ids = (
+                cast("list[int]", arguments[2])
+                if "ANY($3)" in query
+                else [cast("int", arguments[2])]
+            )
             return [
                 row
                 for row in self.live_explain_stats
                 if row["season_id"] == arguments[0]
                 and row["event_id"] == arguments[1]
-                and row["element_id"] == arguments[2]
+                and row["element_id"] in element_ids
             ]
         if "FROM relay_change_events" in query:
             after_id = cast("int", arguments[0])
@@ -432,6 +523,23 @@ class NormalisedConnection:
         return []
 
     async def fetchval(self, query: str, *arguments: object) -> object:
+        if "pg_try_advisory_xact_lock" in query:
+            return self.advisory_lock_available
+        if "COUNT(*) FROM relay_change_events" in query:
+            return sum(
+                event["season_id"] == arguments[0]
+                for event in self.change_events
+            )
+        if "COUNT(*)" in query and "relay_entity_changes" in query:
+            event_ids = {
+                event["id"]
+                for event in self.change_events
+                if event["season_id"] == arguments[0]
+            }
+            return sum(
+                change["change_event_id"] in event_ids
+                for change in self.entity_changes
+            )
         if "SELECT payload_hash" in query:
             source_identity = (
                 cast("str", arguments[0]),
@@ -506,6 +614,7 @@ def metadata(
     source_key: IngestionSourceKey,
     event_id: int | None,
     hash_seed: str | None = None,
+    fetched_minute: int = 0,
 ) -> IngestionMetadata:
     seed = source_key.value if hash_seed is None else hash_seed
     return IngestionMetadata(
@@ -513,8 +622,8 @@ def metadata(
         source_key=source_key,
         event_id=event_id,
         payload_hash=seed.ljust(64, "a")[:64],
-        fetched_at=datetime(2026, 6, 20, tzinfo=UTC),
-        checked_at=datetime(2026, 6, 20, tzinfo=UTC),
+        fetched_at=datetime(2026, 6, 20, 0, fetched_minute, tzinfo=UTC),
+        checked_at=datetime(2026, 6, 20, 0, fetched_minute, tzinfo=UTC),
     )
 
 
@@ -529,6 +638,7 @@ async def test_postgres_store_persists_reference_and_live_bundles_atomically() -
         season=season,
         bootstrap=bootstrap,
         fixtures=await client.fetch_fixtures(),
+        status=await client.fetch_event_status(),
         bootstrap_metadata=metadata(
             source_key=IngestionSourceKey.BOOTSTRAP,
             event_id=None,
@@ -537,9 +647,13 @@ async def test_postgres_store_persists_reference_and_live_bundles_atomically() -
             source_key=IngestionSourceKey.FIXTURES,
             event_id=None,
         ),
+        status_metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+        ),
     )
 
-    assert len(reference_outcomes) == 2
+    assert len(reference_outcomes) == 3
     assert pool.connection.transaction_calls == 1
     live_outcomes = await store.upsert_live_snapshot(
         event_id=1,
@@ -636,7 +750,7 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
                     "event": 1,
                     "bonus_added": False,
                     "date": date(2026, 6, 20),
-                    "leagues_updated": True,
+                    "points": "r",
                 },
             ],
         },
@@ -764,6 +878,7 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
             source_key=IngestionSourceKey.FIXTURES,
             event_id=None,
             hash_seed="fixtures-removed",
+            fetched_minute=1,
         ),
     )
     assert fixture_deletion.change_events[0].deleted_count == 1
@@ -830,8 +945,9 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
         bootstrap=changed,
         metadata=metadata(
             source_key=IngestionSourceKey.BOOTSTRAP,
-            event_id=None,
-            hash_seed="changed",
+                event_id=None,
+                hash_seed="changed",
+                fetched_minute=1,
         ),
         delete_missing=True,
     )
@@ -887,6 +1003,7 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
             source_key=IngestionSourceKey.BOOTSTRAP,
             event_id=None,
             hash_seed="removed",
+            fetched_minute=2,
         ),
         delete_missing=True,
     )
@@ -989,3 +1106,275 @@ async def test_postgres_store_normalised_missing_reads_return_none() -> None:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_source_freshness_rejects_older_and_conflicting_payloads() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    fresh_status = EventStatusResponse.model_validate(
+        {
+            "status": [
+                {
+                    "event": 1,
+                    "bonus_added": False,
+                    "date": "2026-06-20",
+                    "points": "l",
+                },
+            ],
+        },
+    )
+    stale_status = fresh_status.model_copy(
+        update={
+            "status": [
+                fresh_status.status[0].model_copy(
+                    update={"points": EventStatusPoints.NOT_STARTED},
+                ),
+            ],
+        },
+    )
+    fresh_metadata = metadata(
+        source_key=IngestionSourceKey.EVENT_STATUS,
+        event_id=1,
+        hash_seed="fresh",
+        fetched_minute=2,
+    )
+    stale_metadata = metadata(
+        source_key=IngestionSourceKey.EVENT_STATUS,
+        event_id=1,
+        hash_seed="stale",
+        fetched_minute=1,
+    )
+
+    await store.upsert_event_status(status=fresh_status, metadata=fresh_metadata)
+    stale = await store.upsert_event_status(
+        status=stale_status,
+        metadata=stale_metadata,
+    )
+    stored = await store.get_event_status(season_id="2025-26")
+    assert stale.changed is False
+    assert stored is not None
+    assert stored.status[0].points == "l"
+    with pytest.raises(ValueError, match="conflicting payloads"):
+        await store.upsert_event_status(
+            status=stale_status,
+            metadata=stale_metadata.model_copy(
+                update={"fetched_at": fresh_metadata.fetched_at},
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_full_fixtures_cannot_regress_live_owned_fields() -> None:
+    store = PostgresDatabase(pool=NormalisedPool())
+    kickoff = datetime(2026, 6, 20, tzinfo=UTC)
+    live_fixture = Fixture(
+        id=1,
+        event=1,
+        kickoff_time=kickoff,
+        started=True,
+        finished=False,
+        finished_provisional=True,
+        minutes=90,
+        team_h=1,
+        team_a=2,
+        team_h_score=3,
+        team_a_score=0,
+    )
+    await store.upsert_fixtures(
+        fixtures=[live_fixture],
+        metadata=metadata(
+            source_key=IngestionSourceKey.CURRENT_FIXTURES,
+            event_id=1,
+            fetched_minute=5,
+        ),
+    )
+    await store.upsert_fixtures(
+        fixtures=[
+            live_fixture.model_copy(
+                update={
+                    "started": False,
+                    "finished_provisional": False,
+                    "minutes": 0,
+                    "team_h_score": 2,
+                },
+            ),
+        ],
+        metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+            fetched_minute=6,
+        ),
+    )
+    stored = await store.get_fixture(season_id="2025-26", fixture_id=1)
+    assert stored is not None
+    assert stored.started is True
+    assert stored.finished_provisional is True
+    assert stored.minutes == 90
+    assert stored.team_h_score == 3
+
+
+@pytest.mark.asyncio
+async def test_rebaseline_rebuilds_current_snapshots_and_preserves_sources() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    client = FakeClient()
+    bootstrap = await client.fetch_bootstrap_static()
+    season = derive_season(bootstrap=bootstrap)
+    await store.upsert_reference_snapshot(
+        season=season,
+        bootstrap=bootstrap,
+        fixtures=await client.fetch_fixtures(),
+        status=await client.fetch_event_status(),
+        bootstrap_metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+        ),
+        fixtures_metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+        ),
+        status_metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+        ),
+    )
+    await store.upsert_event_live(
+        event_id=1,
+        live=await client.fetch_event_live(event_id=1),
+        metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_LIVE,
+            event_id=1,
+        ),
+    )
+    connection = pool.connection
+    connection.change_events.append(
+        {
+            "id": 99,
+            "season_id": season.id,
+            "entity_family": "fixtures",
+        },
+    )
+    connection.entity_changes.append(
+        {"id": 100, "change_event_id": 99},
+    )
+    connection.entity_snapshots[("other-season", "fixtures", "7")] = {
+        "season_id": "other-season",
+        "entity_family": "fixtures",
+        "source_event_id": None,
+        "entity_key": "7",
+        "entity_label": "Other fixture",
+        "snapshot": {"id": 7},
+        "row_hash": "a" * 64,
+    }
+    source_count = len(connection.sources)
+    normalized_counts = {
+        table: len(rows) for table, rows in connection.tables.items()
+    }
+
+    result = await store.rebaseline_current_change_feed(reason="season repair")
+    rebuilt_count = len(
+        [key for key in connection.entity_snapshots if key[0] == season.id],
+    )
+    assert result.season_id == season.id
+    assert result.change_events_deleted == 1
+    assert result.entity_changes_deleted == 1
+    assert result.snapshots_rebuilt == rebuilt_count
+    assert rebuilt_count > 0
+    assert len(connection.sources) == source_count
+    assert {
+        table: len(rows) for table, rows in connection.tables.items()
+    } == normalized_counts
+    assert ("other-season", "fixtures", "7") in connection.entity_snapshots
+
+    repeated = await store.rebaseline_current_change_feed(reason="repeat repair")
+    assert repeated.id == 2
+    assert repeated.change_events_deleted == 0
+    assert repeated.snapshots_rebuilt == result.snapshots_rebuilt
+
+    identical = await store.upsert_reference_snapshot(
+        season=season,
+        bootstrap=bootstrap,
+        fixtures=await client.fetch_fixtures(),
+        status=await client.fetch_event_status(),
+        bootstrap_metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+        ),
+        fixtures_metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+        ),
+        status_metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+        ),
+    )
+    assert all(not outcome.change_events for outcome in identical)
+
+    newer_bootstrap = bootstrap.model_copy(
+        update={
+            "elements": [
+                bootstrap.elements[0].model_copy(update={"web_name": "New Ada"}),
+                *bootstrap.elements[1:],
+            ],
+        },
+    )
+    newer = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=newer_bootstrap,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+            hash_seed="newer-bootstrap",
+            fetched_minute=1,
+        ),
+        delete_missing=True,
+    )
+    assert len(newer.change_events) == 1
+    assert newer.change_events[0].entity_family is EntityFamily.ELEMENTS
+    assert newer.change_events[0].updated_count == 1
+
+    stale = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=bootstrap,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+        ),
+        delete_missing=True,
+    )
+    stored_element = await store.get_element(
+        season_id=season.id,
+        element_id=bootstrap.elements[0].id,
+    )
+    assert stale.changed is False
+    assert stored_element is not None
+    assert stored_element.web_name == "New Ada"
+
+
+@pytest.mark.asyncio
+async def test_rebaseline_fails_without_current_season_or_ingestion_lock() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    with pytest.raises(RuntimeError, match="exactly one current"):
+        await store.rebaseline_current_change_feed(reason="missing season")
+    pool.connection.advisory_lock_available = False
+    with pytest.raises(IngestionLockError):
+        await store.rebaseline_current_change_feed(reason="busy")
+
+    ambiguous_pool = NormalisedPool()
+    ambiguous_store = PostgresDatabase(pool=ambiguous_pool)
+    season = derive_season(
+        bootstrap=await FakeClient().fetch_bootstrap_static(),
+    )
+    ambiguous_pool.connection.tables["fpl_seasons"] = {
+        season.id: season.model_dump(),
+        "other-current": season.model_copy(
+            update={"id": "other-current"},
+        ).model_dump(),
+    }
+    with pytest.raises(RuntimeError, match="exactly one current"):
+        await ambiguous_store.rebaseline_current_change_feed(
+            reason="ambiguous season",
+        )

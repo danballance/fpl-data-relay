@@ -11,7 +11,7 @@ from fpl_data_relay.application.jobs import IngestionJob, LiveJob, ReferenceJob
 from fpl_data_relay.domain.types import JsonValue
 
 MAX_COLLECTED_PAYLOAD_BYTES = 20 * 1024 * 1024
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
 
 
 class CollectedBundle(BaseModel):
@@ -19,7 +19,7 @@ class CollectedBundle(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    version: Literal[1]
+    version: Literal[2]
     fetched_at: datetime
 
     @field_validator("fetched_at")
@@ -38,6 +38,7 @@ class ReferencePayloadBundle(CollectedBundle):
     job: ReferenceJob
     bootstrap_static: JsonValue
     fixtures: JsonValue
+    event_status: JsonValue
 
 
 class LivePayloadBundle(CollectedBundle):
@@ -62,7 +63,7 @@ class CollectedPayloadMessage(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    version: Literal[1]
+    version: Literal[2]
     job: IngestionJob
     bucket: str = Field(min_length=3)
     key: str = Field(min_length=1)

@@ -13,9 +13,10 @@ from pydantic import (
 )
 
 from fpl_data_relay.domain.fixtures import Fixture
+from fpl_data_relay.domain.rules import LIVE_WINDOW_AFTER_KICKOFF
 
 WINDOW_BEFORE_KICKOFF = timedelta(minutes=10)
-WINDOW_AFTER_KICKOFF = timedelta(hours=3)
+WINDOW_CATCHUP_DELAY = timedelta(minutes=1)
 LIVE_ACTIVE_DELAY_SECONDS = 15
 LIVE_IDLE_DELAY_SECONDS = 60
 DATABASE_WAKING_DELAY_SECONDS = 15
@@ -76,6 +77,12 @@ class MatchWindow(BaseModel):
     event_id: int
     start: datetime
     end: datetime
+
+    def schedule_at(self, *, now: datetime) -> datetime:
+        """Return the future trigger time without changing window identity."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware.")
+        return max(self.start, now + WINDOW_CATCHUP_DELAY)
 
     @property
     def schedule_name(self) -> str:
@@ -141,14 +148,14 @@ def build_match_windows(
             raise ValueError(
                 f"Fixture {fixture.id} kickoff_time must be timezone-aware.",
             )
-        end = kickoff_time + WINDOW_AFTER_KICKOFF
+        end = kickoff_time + LIVE_WINDOW_AFTER_KICKOFF
         if end <= now:
             continue
         candidates.append(
             MatchWindow(
                 season_id=season_id,
                 event_id=fixture.event,
-                start=max(kickoff_time - WINDOW_BEFORE_KICKOFF, now),
+                start=kickoff_time - WINDOW_BEFORE_KICKOFF,
                 end=end,
             ),
         )

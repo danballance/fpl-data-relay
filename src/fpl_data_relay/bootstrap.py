@@ -32,6 +32,9 @@ from fpl_data_relay.adapters.outbound.postgres.ingestion import (
     PostgresIngestionRepository,
 )
 from fpl_data_relay.adapters.outbound.postgres.live import PostgresLiveRepository
+from fpl_data_relay.adapters.outbound.postgres.rebaseline import (
+    PostgresChangeFeedRebaseliner,
+)
 from fpl_data_relay.adapters.outbound.postgres.reference import (
     PostgresReferenceRepository,
 )
@@ -49,7 +52,11 @@ from fpl_data_relay.application.ingestion.service import (
     IngestionService,
 )
 from fpl_data_relay.application.live_queries import LiveQueries
-from fpl_data_relay.application.ports.administration import SchemaStatus
+from fpl_data_relay.application.ports.administration import (
+    ChangeFeedRebaselineResult,
+    SchemaStatus,
+)
+from fpl_data_relay.application.rebaseline import ChangeFeedRebaselineService
 from fpl_data_relay.application.reference_queries import ReferenceQueries
 from fpl_data_relay.application.request_pacing import EvenlySpacedRequestPacer
 from fpl_data_relay.config import (
@@ -274,6 +281,22 @@ class ProductionCliOperations:
             database_url=settings.database_url,
             maintenance_database_url=maintenance_url,
         )
+
+    async def rebaseline_current_change_feed(
+        self,
+        *,
+        reason: str,
+    ) -> ChangeFeedRebaselineResult:
+        database = await build_database_from_environment()
+        try:
+            await PostgresSchemaManager(database=database).check_schema_version(
+                expected_version=SCHEMA_VERSION,
+            )
+            return await ChangeFeedRebaselineService(
+                rebaseliner=PostgresChangeFeedRebaseliner(database=database),
+            ).rebaseline_current(reason=reason)
+        finally:
+            await database.close()
 
     async def ingest_reference(self) -> IngestionResult:
         settings = load_settings_from_environment()

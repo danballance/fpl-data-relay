@@ -21,15 +21,19 @@ class PostgresIngestionRepository:
         season: Season,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        status: EventStatusResponse,
         bootstrap_metadata: IngestionMetadata,
         fixtures_metadata: IngestionMetadata,
+        status_metadata: IngestionMetadata,
     ) -> list[UpsertOutcome]:
         return await self._database.upsert_reference_snapshot(
             season=season,
             bootstrap=bootstrap,
             fixtures=fixtures,
+            status=status,
             bootstrap_metadata=bootstrap_metadata,
             fixtures_metadata=fixtures_metadata,
+            status_metadata=status_metadata,
         )
 
     async def upsert_live_snapshot(

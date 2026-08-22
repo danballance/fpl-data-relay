@@ -222,7 +222,7 @@ async def test_reference_collection_uploads_sends_then_deletes(
         cast("str", sqs.actions[0][1]["MessageBody"]),
     )
     assert result.size_bytes == len(uploaded)
-    assert result.key.startswith("payloads/v1/reference/")
+    assert result.key.startswith("payloads/v2/reference/")
 
 
 @pytest.mark.asyncio
@@ -285,7 +285,7 @@ async def test_collection_does_not_delete_when_upload_fails(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("job", "expected_requests"),
     [
-        (ReferenceJob(version=1, kind="reference"), 2),
+        (ReferenceJob(version=1, kind="reference"), 3),
         (
             LiveJob(
                 version=1,
@@ -381,7 +381,7 @@ def test_receive_shape_and_payload_key_are_strict() -> None:
         kind="reference",
         fetched_at=datetime(2026, 7, 26, tzinfo=UTC),
     )
-    assert key.startswith("payloads/v1/reference/2026/07/26/")
+    assert key.startswith("payloads/v2/reference/2026/07/26/")
     assert failed_job_kind(body=message["Body"]) == "reference"
     assert failed_job_kind(body="{}") == "invalid"
 

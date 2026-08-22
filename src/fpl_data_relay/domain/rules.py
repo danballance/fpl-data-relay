@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from typing import cast
 
 from pydantic import BaseModel
@@ -10,6 +11,8 @@ from pydantic import BaseModel
 from fpl_data_relay.domain.fixtures import Fixture
 from fpl_data_relay.domain.reference import BootstrapStatic, Season
 from fpl_data_relay.domain.types import JsonValue
+
+LIVE_WINDOW_AFTER_KICKOFF = timedelta(hours=4)
 
 
 def canonical_json(*, payload: object) -> str:
@@ -94,5 +97,23 @@ def derive_season(*, bootstrap: BootstrapStatic) -> Season:
 
 
 def has_active_fixture(*, fixtures: list[Fixture]) -> bool:
-    """Return whether any current fixture is started but not finished."""
-    return any(fixture.started and not fixture.finished for fixture in fixtures)
+    """Return whether any fixture is actively accumulating live data."""
+    return any(
+        fixture.started
+        and not fixture.finished
+        and fixture.finished_provisional is not True
+        for fixture in fixtures
+    )
+
+
+def live_fixture_ownership_active(
+    *,
+    fixture: Fixture,
+    fetched_at: datetime,
+) -> bool:
+    """Return whether live ingestion still owns a fixture's dynamic fields."""
+    return (
+        fixture.started
+        and fixture.kickoff_time is not None
+        and fetched_at < fixture.kickoff_time + LIVE_WINDOW_AFTER_KICKOFF
+    )

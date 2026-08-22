@@ -45,8 +45,10 @@ class IngestionRepository(Protocol):
         season: Season,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        status: EventStatusResponse,
         bootstrap_metadata: IngestionMetadata,
         fixtures_metadata: IngestionMetadata,
+        status_metadata: IngestionMetadata,
     ) -> list[UpsertOutcome]:
         """Persist one complete reference bundle atomically."""
         ...

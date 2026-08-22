@@ -72,6 +72,7 @@ def test_live_schedule_parameters_include_retry_and_dead_letter_policy(
             start=start,
             end=start + timedelta(hours=3),
         ),
+        now=start - timedelta(hours=1),
     )
     target = cast("dict[str, object]", parameters["Target"])
     assert target["DeadLetterConfig"] == {
@@ -81,11 +82,58 @@ def test_live_schedule_parameters_include_retry_and_dead_letter_policy(
         "MaximumEventAgeInSeconds": 900,
         "MaximumRetryAttempts": 3,
     }
+    assert parameters["ActionAfterCompletion"] == "NONE"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_restart_retained_active_schedule(
+    lambda_module: Any,
+) -> None:
+    start = datetime(2026, 8, 21, 18, 50, tzinfo=UTC)
+    window = MatchWindow(
+        season_id="2026-27",
+        event_id=1,
+        start=start,
+        end=start + timedelta(hours=4),
+    )
+
+    class RetainedScheduler:
+        def __init__(self) -> None:
+            self.mutations: list[str] = []
+
+        def list_schedules(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Schedules": [{"Name": window.schedule_name}]}
+
+        def create_schedule(self, **parameters: object) -> None:
+            del parameters
+            self.mutations.append("create")
+
+        def update_schedule(self, **parameters: object) -> None:
+            del parameters
+            self.mutations.append("update")
+
+        def delete_schedule(self, **parameters: object) -> None:
+            del parameters
+            self.mutations.append("delete")
+
+    scheduler = RetainedScheduler()
+    lambda_module.SCHEDULER = scheduler
+    result = await lambda_module.reconcile_schedules(
+        windows=[window],
+        now=start + timedelta(minutes=15),
+    )
+    assert result.model_dump() == {
+        "created_count": 0,
+        "updated_count": 0,
+        "deleted_count": 0,
+    }
+    assert scheduler.mutations == []
 
 
 def reference_bundle() -> ReferencePayloadBundle:
     return ReferencePayloadBundle(
-        version=1,
+        version=2,
         kind="reference",
         job=ReferenceJob(version=1, kind="reference"),
         fetched_at=datetime(2026, 7, 26, 12, tzinfo=UTC),
@@ -101,6 +149,7 @@ def reference_bundle() -> ReferencePayloadBundle:
                 ),
             ],
         ),
+        event_status={"status": []},
     )
 
 
@@ -111,11 +160,11 @@ def collected_message(
     payload = canonical_bundle_bytes(bundle=bundle)
     return (
         CollectedPayloadMessage(
-            version=1,
+            version=2,
             job=bundle.job,
             bucket="payload-bucket",
             key=(
-                f"payloads/v1/{bundle.kind}/2026/07/26/"
+                f"payloads/v2/{bundle.kind}/2026/07/26/"
                 "12345678-1234-4123-8123-123456789abc.json"
             ),
             size_bytes=len(payload),
@@ -142,7 +191,7 @@ async def test_lambda_loads_only_expected_verified_payload(
             message=message.model_copy(
                 update={
                     "key": (
-                        "payloads/v1/live/2026/07/26/"
+                        "payloads/v2/live/2026/07/26/"
                         "12345678-1234-4123-8123-123456789abc.json"
                     ),
                 },
@@ -175,7 +224,12 @@ async def test_lambda_persists_reference_and_reconciles_schedules(
         assert season_id == "2025-26"
         return list(store.fixtures.values())
 
-    async def reconcile_schedules(*, windows: list[object]) -> object:
+    async def reconcile_schedules(
+        *,
+        windows: list[object],
+        now: datetime,
+    ) -> object:
+        assert now == datetime(2025, 8, 1, tzinfo=UTC)
         reconciled.append(windows)
         return lambda_module.ScheduleReconciliationResult(
             created_count=0,
@@ -197,7 +251,11 @@ async def test_lambda_persists_reference_and_reconciles_schedules(
         record for record in caplog.records if record.message == "ingestion_completed"
     )
     assert completed.__dict__["source"] == "reference"
-    assert completed.__dict__["sources"] == ["bootstrap-static", "fixtures"]
+    assert completed.__dict__["sources"] == [
+        "bootstrap-static",
+        "fixtures",
+        "event-status",
+    ]
     assert completed.__dict__["changed_entity_counts"] == {}
     assert completed.__dict__["schedules_created"] == 0
 
@@ -222,7 +280,7 @@ async def test_lambda_persists_live_and_enqueues_continuation(
         window_end=now + timedelta(hours=3),
     )
     bundle = LivePayloadBundle(
-        version=1,
+        version=2,
         kind="live",
         job=job,
         fetched_at=now,
@@ -232,7 +290,7 @@ async def test_lambda_persists_live_and_enqueues_continuation(
                     "event": 1,
                     "bonus_added": False,
                     "date": "2026-05-01",
-                    "leagues_updated": False,
+                    "points": "l",
                 },
             ],
         },
@@ -282,7 +340,7 @@ async def test_lambda_requeues_live_job_while_aurora_wakes(
         window_end=now + timedelta(hours=3),
     )
     bundle = LivePayloadBundle(
-        version=1,
+        version=2,
         kind="live",
         job=job,
         fetched_at=now,

@@ -33,10 +33,7 @@ from fpl_data_relay.application.errors import (
     DatabaseWakingError,
     SchemaUnavailableError,
 )
-from fpl_data_relay.application.jobs import (
-    WINDOW_AFTER_KICKOFF,
-    WINDOW_BEFORE_KICKOFF,
-)
+from fpl_data_relay.application.jobs import WINDOW_BEFORE_KICKOFF
 from fpl_data_relay.application.live_queries import LiveQueries
 from fpl_data_relay.application.ports.administration import SchemaManager
 from fpl_data_relay.application.ports.inbound import IngestionRunner
@@ -59,6 +56,7 @@ from fpl_data_relay.domain.reference import (
     Season,
     Team,
 )
+from fpl_data_relay.domain.rules import LIVE_WINDOW_AFTER_KICKOFF
 
 OPENAPI_TAGS = [
     {
@@ -935,7 +933,7 @@ def build_ingestion_status(
         if fixture.event is None or fixture.kickoff_time is None:
             continue
         start = fixture.kickoff_time - WINDOW_BEFORE_KICKOFF
-        end = fixture.kickoff_time + WINDOW_AFTER_KICKOFF
+        end = fixture.kickoff_time + LIVE_WINDOW_AFTER_KICKOFF
         if start <= now < end:
             active_ends.append(end)
             active_event_ids.add(fixture.event)

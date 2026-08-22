@@ -18,7 +18,10 @@ from fpl_data_relay.adapters.outbound.postgres.schema import (
     ADVISORY_LOCK_ID,
 )
 from fpl_data_relay.application.errors import SchemaUnavailableError
-from fpl_data_relay.application.ports.administration import SchemaStatus
+from fpl_data_relay.application.ports.administration import (
+    ChangeFeedRebaselineResult,
+    SchemaStatus,
+)
 from fpl_data_relay.domain.changes import (
     EVENT_NAMES,
     ChangeEvent,
@@ -52,13 +55,14 @@ from fpl_data_relay.domain.live import (
 from fpl_data_relay.domain.reference import (
     BootstrapStatic,
     Element,
+    ElementStatDefinition,
     ElementType,
     Event,
     Phase,
     Season,
     Team,
 )
-from fpl_data_relay.domain.rules import payload_sha256
+from fpl_data_relay.domain.rules import live_fixture_ownership_active, payload_sha256
 from fpl_data_relay.domain.types import JsonValue
 
 type StatScalar = int | float | str | bool | None
@@ -378,8 +382,10 @@ class PostgresDatabase(_PostgresOperations):
         season: Season,
         bootstrap: BootstrapStatic,
         fixtures: list[Fixture],
+        status: EventStatusResponse,
         bootstrap_metadata: IngestionMetadata,
         fixtures_metadata: IngestionMetadata,
+        status_metadata: IngestionMetadata,
     ) -> list[UpsertOutcome]:
         """Persist a complete reference bundle in one physical transaction."""
         async with self._pool.acquire() as connection, connection.transaction():
@@ -394,12 +400,16 @@ class PostgresDatabase(_PostgresOperations):
                 fixtures=fixtures,
                 metadata=fixtures_metadata,
             )
+            status_outcome = await bound.upsert_event_status(
+                status=status,
+                metadata=status_metadata,
+            )
             await delete_bootstrap_rows_missing_from_snapshot(
                 connection=connection,
                 season_id=season.id,
                 bootstrap=bootstrap,
             )
-        return [bootstrap_outcome, fixtures_outcome]
+        return [bootstrap_outcome, fixtures_outcome, status_outcome]
 
     async def upsert_live_snapshot(
         self,
@@ -433,6 +443,87 @@ class PostgresDatabase(_PostgresOperations):
     async def close(self) -> None:
         """Close the underlying connection pool."""
         await self._pool.close()
+
+    async def rebaseline_current_change_feed(
+        self,
+        *,
+        reason: str,
+    ) -> ChangeFeedRebaselineResult:
+        """Atomically rebuild the current season's feed from normalized rows."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            acquired = await connection.fetchval(
+                "SELECT pg_try_advisory_xact_lock($1)",
+                ADVISORY_LOCK_ID,
+            )
+            if acquired is not True:
+                raise IngestionLockError("Another ingestion cycle is already running.")
+            season_rows = await connection.fetch(
+                "SELECT * FROM fpl_seasons WHERE is_current = true",
+            )
+            if len(season_rows) != 1:
+                raise RuntimeError(
+                    "Rebaseline requires exactly one current normalized season.",
+                )
+            season_id = season_from_row(row=season_rows[0]).id
+            change_events_deleted = require_database_count(
+                value=await connection.fetchval(
+                    "SELECT COUNT(*) FROM relay_change_events WHERE season_id = $1",
+                    season_id,
+                ),
+                label="change events",
+            )
+            entity_changes_deleted = require_database_count(
+                value=await connection.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM relay_entity_changes entity_change
+                    JOIN relay_change_events change_event
+                      ON change_event.id = entity_change.change_event_id
+                    WHERE change_event.season_id = $1
+                    """,
+                    season_id,
+                ),
+                label="entity changes",
+            )
+            baselines = await build_normalized_baselines(
+                connection=connection,
+                season_id=season_id,
+            )
+            await connection.execute(
+                "DELETE FROM relay_change_events WHERE season_id = $1",
+                season_id,
+            )
+            await connection.execute(
+                "DELETE FROM relay_entity_snapshots WHERE season_id = $1",
+                season_id,
+            )
+            for baseline in baselines:
+                await upsert_entity_snapshot(
+                    connection=connection,
+                    season_id=season_id,
+                    family=baseline.family,
+                    source_event_id=baseline.source_event_id,
+                    snapshot=baseline.snapshot,
+                )
+            audit_row = await connection.fetchrow(
+                """
+                INSERT INTO relay_change_feed_rebaselines (
+                    season_id, reason, change_events_deleted,
+                    entity_changes_deleted, snapshots_rebuilt
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, season_id, reason, change_events_deleted,
+                          entity_changes_deleted, snapshots_rebuilt, created_at
+                """,
+                season_id,
+                reason,
+                change_events_deleted,
+                entity_changes_deleted,
+                len(baselines),
+            )
+            if audit_row is None:
+                raise RuntimeError("Failed to record change-feed rebaseline audit.")
+            return change_feed_rebaseline_from_row(row=audit_row)
 
     async def apply_schema(self) -> None:
         """Apply pending immutable migrations."""
@@ -588,11 +679,6 @@ class PostgresDatabase(_PostgresOperations):
         metadata: IngestionMetadata,
     ) -> UpsertOutcome:
         """Upsert fixture rows and stat entries."""
-        snapshots = {
-            EntityFamily.FIXTURES: [
-                snapshot_for_fixture(fixture=fixture) for fixture in fixtures
-            ],
-        }
         authoritative = metadata.source_key is IngestionSourceKey.FIXTURES
         async with self._pool.acquire() as connection, connection.transaction():
             comparison = await compare_source(
@@ -601,6 +687,16 @@ class PostgresDatabase(_PostgresOperations):
             )
             if comparison.unchanged:
                 return UpsertOutcome(changed=False, change_events=[])
+            fixtures = await fixtures_with_live_ownership(
+                connection=connection,
+                fixtures=fixtures,
+                metadata=metadata,
+            )
+            snapshots = {
+                EntityFamily.FIXTURES: [
+                    snapshot_for_fixture(fixture=fixture) for fixture in fixtures
+                ],
+            }
             diffs = await compare_snapshot_families(
                 connection=connection,
                 season_id=metadata.season_id,
@@ -1191,15 +1287,197 @@ class SourceComparison(BaseModel):
     unchanged: bool
 
 
+class NormalizedBaseline(BaseModel):
+    """One canonical snapshot rebuilt from normalized persistence."""
+
+    model_config = ConfigDict(frozen=True)
+
+    family: EntityFamily
+    source_event_id: int | None
+    snapshot: EntitySnapshot
+
+
+async def build_normalized_baselines(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+) -> list[NormalizedBaseline]:
+    """Build all current feed snapshots directly from normalized tables."""
+    baselines: list[NormalizedBaseline] = []
+    family_queries: list[
+        tuple[
+            EntityFamily,
+            str,
+            Callable[..., BaseModel],
+            Callable[[BaseModel], tuple[str, str]],
+        ]
+    ] = [
+        (
+            EntityFamily.EVENTS,
+            "SELECT * FROM fpl_events WHERE season_id = $1 ORDER BY id",
+            event_from_row,
+            lambda model: (str(cast("Event", model).id), cast("Event", model).name),
+        ),
+        (
+            EntityFamily.PHASES,
+            "SELECT * FROM fpl_phases WHERE season_id = $1 ORDER BY id",
+            phase_from_row,
+            lambda model: (str(cast("Phase", model).id), cast("Phase", model).name),
+        ),
+        (
+            EntityFamily.TEAMS,
+            "SELECT * FROM fpl_teams WHERE season_id = $1 ORDER BY id",
+            team_from_row,
+            lambda model: (str(cast("Team", model).id), cast("Team", model).name),
+        ),
+        (
+            EntityFamily.ELEMENT_TYPES,
+            "SELECT * FROM fpl_element_types WHERE season_id = $1 ORDER BY id",
+            element_type_from_row,
+            lambda model: (
+                str(cast("ElementType", model).id),
+                cast("ElementType", model).singular_name,
+            ),
+        ),
+        (
+            EntityFamily.ELEMENT_STATS,
+            """
+            SELECT * FROM fpl_element_stat_definitions
+            WHERE season_id = $1 ORDER BY name
+            """,
+            element_stat_definition_from_row,
+            lambda model: (
+                cast("ElementStatDefinition", model).name,
+                cast("ElementStatDefinition", model).label,
+            ),
+        ),
+        (
+            EntityFamily.ELEMENTS,
+            "SELECT * FROM fpl_elements WHERE season_id = $1 ORDER BY id",
+            element_from_row,
+            lambda model: (
+                str(cast("Element", model).id),
+                f"{cast('Element', model).web_name} ({cast('Element', model).id})",
+            ),
+        ),
+    ]
+    for family, query, converter, identity in family_queries:
+        for row in await connection.fetch(query, season_id):
+            model = converter(row=row)
+            entity_key, entity_label = identity(model)
+            baselines.append(
+                NormalizedBaseline(
+                    family=family,
+                    source_event_id=None,
+                    snapshot=snapshot_for_model(
+                        entity_key=entity_key,
+                        entity_label=entity_label,
+                        model=model,
+                    ),
+                ),
+            )
+
+    fixture_rows = await connection.fetch(
+        "SELECT * FROM fpl_fixtures WHERE season_id = $1 ORDER BY id",
+        season_id,
+    )
+    fixtures = [fixture_from_row(row=row) for row in fixture_rows]
+    fixture_stats = await fetch_fixture_stats_for_ids(
+        connection=connection,
+        season_id=season_id,
+        fixture_ids=[fixture.id for fixture in fixtures],
+    )
+    for fixture in fixtures:
+        complete = fixture.model_copy(
+            update={"stats": fixture_stats.get(fixture.id, [])},
+        )
+        baselines.append(
+            NormalizedBaseline(
+                family=EntityFamily.FIXTURES,
+                source_event_id=None,
+                snapshot=snapshot_for_fixture(fixture=complete),
+            ),
+        )
+
+    status_row = await connection.fetchrow(
+        "SELECT * FROM fpl_event_status WHERE season_id = $1",
+        season_id,
+    )
+    if status_row is not None:
+        day_rows = await connection.fetch(
+            """
+            SELECT * FROM fpl_event_status_days
+            WHERE season_id = $1 ORDER BY date, event
+            """,
+            season_id,
+        )
+        status_values = row_values(row=status_row)
+        status = EventStatusResponse(
+            leagues=optional_str(values=status_values, key="leagues"),
+            status=[event_status_day_from_row(row=row) for row in day_rows],
+        )
+        current_event_row = await connection.fetchrow(
+            """
+            SELECT id FROM fpl_events
+            WHERE season_id = $1 AND is_current = true
+            """,
+            season_id,
+        )
+        current_event_id = (
+            None
+            if current_event_row is None
+            else require_int(values=row_values(row=current_event_row), key="id")
+        )
+        baselines.append(
+            NormalizedBaseline(
+                family=EntityFamily.EVENT_STATUS,
+                source_event_id=current_event_id,
+                snapshot=snapshot_for_event_status(
+                    status=status,
+                    event_id=current_event_id,
+                ),
+            ),
+        )
+
+    live_rows = await connection.fetch(
+        """
+        SELECT * FROM fpl_event_live_elements
+        WHERE season_id = $1 ORDER BY event_id, element_id
+        """,
+        season_id,
+    )
+    rows_by_event: dict[int, list[object]] = {}
+    for row in live_rows:
+        event_id = require_int(values=row_values(row=row), key="event_id")
+        rows_by_event.setdefault(event_id, []).append(row)
+    for event_id, event_rows in rows_by_event.items():
+        live_elements = await live_elements_from_rows(
+            connection=connection,
+            rows=event_rows,
+        )
+        baselines.extend(
+            NormalizedBaseline(
+                family=EntityFamily.EVENT_LIVE,
+                source_event_id=event_id,
+                snapshot=snapshot_for_live_element(
+                    live_element=live_element,
+                    event_id=event_id,
+                ),
+            )
+            for live_element in live_elements
+        )
+    return baselines
+
+
 async def compare_source(
     *,
     connection: ConnectionProtocol,
     metadata: IngestionMetadata,
 ) -> SourceComparison:
     """Compare source hashes and refresh checked time for unchanged payloads."""
-    existing_hash = await connection.fetchval(
+    existing_row = await connection.fetchrow(
         """
-        SELECT payload_hash
+        SELECT payload_hash, fetched_at
         FROM relay_ingestion_sources
         WHERE season_id = $1
           AND source_key = $2
@@ -1209,13 +1487,30 @@ async def compare_source(
         metadata.source_key.value,
         metadata.event_id,
     )
-    exists = existing_hash is not None
+    if existing_row is None:
+        return SourceComparison(exists=False, unchanged=False)
+    existing_values = row_values(row=existing_row)
+    existing_hash = require_str(values=existing_values, key="payload_hash")
+    existing_fetched_at = require_datetime(
+        values=existing_values,
+        key="fetched_at",
+    )
+    if metadata.fetched_at < existing_fetched_at:
+        return SourceComparison(exists=True, unchanged=True)
+    if (
+        metadata.fetched_at == existing_fetched_at
+        and metadata.payload_hash != existing_hash
+    ):
+        raise ValueError(
+            "An ingestion source returned conflicting payloads with the "
+            "same fetched_at timestamp.",
+        )
     if existing_hash != metadata.payload_hash:
-        return SourceComparison(exists=exists, unchanged=False)
+        return SourceComparison(exists=True, unchanged=False)
     await connection.execute(
         """
         UPDATE relay_ingestion_sources
-        SET checked_at = $4, updated_at = now()
+        SET fetched_at = $4, checked_at = $5, updated_at = now()
         WHERE season_id = $1
           AND source_key = $2
           AND event_id IS NOT DISTINCT FROM $3
@@ -1223,6 +1518,7 @@ async def compare_source(
         metadata.season_id,
         metadata.source_key.value,
         metadata.event_id,
+        metadata.fetched_at,
         metadata.checked_at,
     )
     return SourceComparison(exists=True, unchanged=True)
@@ -2000,6 +2296,61 @@ async def fetch_fixture_stats_for_ids(
     }
 
 
+async def fixtures_with_live_ownership(
+    *,
+    connection: ConnectionProtocol,
+    fixtures: list[Fixture],
+    metadata: IngestionMetadata,
+) -> list[Fixture]:
+    """Protect live-owned fixture fields from the full-fixtures source."""
+    if metadata.source_key is not IngestionSourceKey.FIXTURES or not fixtures:
+        return fixtures
+    fixture_ids = [fixture.id for fixture in fixtures]
+    rows = await connection.fetch(
+        """
+        SELECT * FROM fpl_fixtures
+        WHERE season_id = $1 AND id = ANY($2)
+        """,
+        metadata.season_id,
+        fixture_ids,
+    )
+    stats_by_fixture = await fetch_fixture_stats_for_ids(
+        connection=connection,
+        season_id=metadata.season_id,
+        fixture_ids=fixture_ids,
+    )
+    existing_by_id: dict[int, Fixture] = {}
+    for row in rows:
+        existing = fixture_from_row(row=row)
+        existing_by_id[existing.id] = existing.model_copy(
+            update={"stats": stats_by_fixture.get(existing.id, [])},
+        )
+    merged: list[Fixture] = []
+    for fixture in fixtures:
+        existing = existing_by_id.get(fixture.id)
+        if existing is None or not live_fixture_ownership_active(
+            fixture=existing,
+            fetched_at=metadata.fetched_at,
+        ):
+            merged.append(fixture)
+            continue
+        merged.append(
+            fixture.model_copy(
+                update={
+                    "finished": existing.finished,
+                    "finished_provisional": existing.finished_provisional,
+                    "minutes": existing.minutes,
+                    "provisional_start_time": existing.provisional_start_time,
+                    "started": existing.started,
+                    "team_a_score": existing.team_a_score,
+                    "team_h_score": existing.team_h_score,
+                    "stats": existing.stats,
+                },
+            ),
+        )
+    return merged
+
+
 async def live_element_from_row(
     *,
     connection: ConnectionProtocol,
@@ -2165,6 +2516,29 @@ def ingestion_source_status_from_row(*, row: object) -> IngestionSourceStatus:
     )
 
 
+def change_feed_rebaseline_from_row(
+    *,
+    row: object,
+) -> ChangeFeedRebaselineResult:
+    """Convert a rebaseline audit row to its application result."""
+    values = row_values(row=row)
+    return ChangeFeedRebaselineResult(
+        id=require_int(values=values, key="id"),
+        season_id=require_str(values=values, key="season_id"),
+        reason=require_str(values=values, key="reason"),
+        change_events_deleted=require_int(
+            values=values,
+            key="change_events_deleted",
+        ),
+        entity_changes_deleted=require_int(
+            values=values,
+            key="entity_changes_deleted",
+        ),
+        snapshots_rebuilt=require_int(values=values, key="snapshots_rebuilt"),
+        created_at=require_datetime(values=values, key="created_at"),
+    )
+
+
 def event_from_row(*, row: object) -> Event:
     """Convert a row to Event."""
     values = filter_row_values(values=row_values(row=row))
@@ -2203,6 +2577,13 @@ def team_from_row(*, row: object) -> Team:
 def element_type_from_row(*, row: object) -> ElementType:
     """Convert a row to ElementType."""
     return ElementType.model_validate(filter_row_values(values=row_values(row=row)))
+
+
+def element_stat_definition_from_row(*, row: object) -> ElementStatDefinition:
+    """Convert a row to ElementStatDefinition."""
+    return ElementStatDefinition.model_validate(
+        filter_row_values(values=row_values(row=row)),
+    )
 
 
 def element_from_row(*, row: object) -> Element:
@@ -2271,6 +2652,13 @@ def require_int(*, values: dict[str, object], key: str) -> int:
     if isinstance(value, int):
         return value
     raise TypeError(f"Expected {key} to be int, found {type(value).__name__}.")
+
+
+def require_database_count(*, value: object, label: str) -> int:
+    """Validate a scalar COUNT result from either database executor."""
+    if isinstance(value, int) and value >= 0:
+        return value
+    raise TypeError(f"Expected nonnegative count for {label}.")
 
 
 def optional_int(*, values: dict[str, object], key: str) -> int | None:

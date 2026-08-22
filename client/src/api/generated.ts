@@ -1094,9 +1094,14 @@ export interface components {
              * Format: date
              */
             date: string;
-            /** Leagues Updated */
-            leagues_updated?: boolean | null;
+            points: components["schemas"]["EventStatusPoints"];
         };
+        /**
+         * EventStatusPoints
+         * @description Official FPL points-processing states from event-status.
+         * @enum {string}
+         */
+        EventStatusPoints: "" | "l" | "p" | "r";
         /**
          * EventStatusResponse
          * @description Aggregate response from event-status.

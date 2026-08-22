@@ -360,7 +360,7 @@ describe("relay explorer application", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Event")).toHaveValue("1"),
     );
-    expect(screen.getByText("Version 4")).toBeInTheDocument();
+    expect(screen.getByText("Version 5")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThan(0);
     const apiReference = screen.getByRole("link", { name: /API reference/ });
     expect(apiReference).toHaveAttribute("href", "/api/docs");
@@ -664,7 +664,9 @@ describe("relay explorer application", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Latest stored event-status response."),
+      screen.getByText(
+        "Latest stored event-status response · leagues: not reported.",
+      ),
     ).toBeInTheDocument();
   });
 

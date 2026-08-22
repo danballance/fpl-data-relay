@@ -46,6 +46,11 @@ before/after field values, including explicit absent and null values. Player
 prices use millions, while player availability/news, fixture kickoff, and
 gameweek changes have recognizable labels. Raw JSON remains available.
 
+Fixtures display Scheduled, Live, Provisional, or Confirmed rather than reducing
+the upstream state to two booleans. Event status displays the official points
+processing state and bonus signal; it does not invent a per-day league-updated
+flag that FPL no longer publishes.
+
 The UI exposes `Polling`, `Paused`, and `Error` states independently of source
 freshness.
 

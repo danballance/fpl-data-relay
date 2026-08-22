@@ -109,7 +109,7 @@ async def test_fpl_client_fetches_all_core_documents() -> None:
                             "event": 1,
                             "bonus_added": False,
                             "date": "2026-06-20",
-                            "leagues_updated": False,
+                            "points": "l",
                         },
                     ],
                 },
@@ -179,7 +179,20 @@ def test_event_status_accepts_current_upstream_shape() -> None:
         },
     )
     dumped = status.model_dump(mode="json")
-    assert "points" not in dumped["status"][0]
+    assert dumped["status"][0]["points"] == "r"
+    with pytest.raises(ValidationError, match="points"):
+        EventStatusResponse.model_validate(
+            {
+                "status": [
+                    {
+                        "event": 38,
+                        "bonus_added": False,
+                        "date": "2026-06-20",
+                        "points": "unknown",
+                    },
+                ],
+            },
+        )
 
 
 def test_model_to_payload_handles_model_and_model_lists() -> None:
@@ -190,7 +203,7 @@ def test_model_to_payload_handles_model_and_model_lists() -> None:
                     "event": 1,
                     "bonus_added": False,
                     "date": "2026-06-20",
-                    "leagues_updated": False,
+                    "points": "p",
                 },
             ],
         },
@@ -212,7 +225,7 @@ def test_model_to_payload_handles_model_and_model_lists() -> None:
             "event": 1,
             "bonus_added": False,
             "date": "2026-06-20",
-            "leagues_updated": False,
+            "points": "p",
         },
     ]
     assert fixture_payloads[0]["id"] == 1

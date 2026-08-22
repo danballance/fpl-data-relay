@@ -9,6 +9,7 @@ import { API_OPERATIONS } from "../../components/ApiDocsLink";
 import { ResourcePage } from "../../components/ResourcePage";
 import { SelectionRequired } from "../../components/SelectionRequired";
 import {
+  eventPointsStatus,
   formatBoolean,
 } from "../../lib/format";
 import { useReferenceLookups } from "../reference/useReferenceLookups";
@@ -37,9 +38,9 @@ export function EventStatusPage() {
         cell: ({ getValue }) => formatBoolean(getValue<boolean>()),
       },
       {
-        accessorKey: "leagues_updated",
-        header: "Leagues updated",
-        cell: ({ getValue }) => formatBoolean(getValue<boolean | null>()),
+        id: "points_status",
+        header: "Points status",
+        accessorFn: (row) => eventPointsStatus(row),
       },
     ],
     [lookups],
@@ -51,8 +52,8 @@ export function EventStatusPage() {
     <ResourcePage
       eyebrow={seasonId}
       title="Event status"
-      description={`Latest stored event-status response${
-        query.data?.leagues ? ` · leagues: ${query.data.leagues}` : ""
+      description={`Latest stored event-status response · leagues: ${
+        query.data?.leagues || "not reported"
       }.`}
       apiOperations={[API_OPERATIONS.getEventStatus]}
       query={query}

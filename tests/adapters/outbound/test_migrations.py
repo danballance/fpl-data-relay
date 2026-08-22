@@ -51,6 +51,11 @@ def test_community_migration_enforces_aggregate_and_immutability() -> None:
     assert "relay_community_extraction_cache_insert_only" in cache_sql
     assert "BEFORE UPDATE" in cache_sql
 
+    rebaseline_sql = MIGRATIONS[4].sql
+    assert "DROP COLUMN leagues_updated" in rebaseline_sql
+    assert "points IN ('', 'l', 'p', 'r')" in rebaseline_sql
+    assert "relay_change_feed_rebaselines" in rebaseline_sql
+
 
 def test_migration_row_values_accepts_asyncpg_mapping_shape() -> None:
     values: dict[str, object] = {
@@ -115,14 +120,14 @@ async def test_apply_migrations_is_ordered_and_idempotent() -> None:
     pool = FakePostgresPool()
     assert (await migration_status(pool=pool)).model_dump() == {
         "applied_versions": [],
-        "pending_versions": [1, 2, 3, 4],
+        "pending_versions": [1, 2, 3, 4, 5],
     }
     await apply_migrations(pool=pool)
-    assert pool.schema_version == 4
-    assert len(pool.applied_migrations) == 4
+    assert pool.schema_version == 5
+    assert len(pool.applied_migrations) == 5
     await apply_migrations(pool=pool)
-    assert len(pool.applied_migrations) == 4
+    assert len(pool.applied_migrations) == 5
     assert (await migration_status(pool=pool)).model_dump() == {
-        "applied_versions": [1, 2, 3, 4],
+        "applied_versions": [1, 2, 3, 4, 5],
         "pending_versions": [],
     }

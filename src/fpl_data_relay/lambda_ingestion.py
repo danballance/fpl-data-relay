@@ -169,9 +169,14 @@ async def process_collected_payload(
             model=Fixture,
             payload=bundle.fixtures,
         )
+        event_status = validate_fpl_model(
+            model=EventStatusResponse,
+            payload=bundle.event_status,
+        )
         result = await ingestion.ingest_reference_payload(
             bootstrap=bootstrap,
             fixtures=fixtures,
+            event_status=event_status,
             fetched_at=bundle.fetched_at,
         )
         season = await REPOSITORY.get_current_season()
@@ -188,13 +193,13 @@ async def process_collected_payload(
                 "fixture_missing_schedule_data",
                 extra={"fixture_id": fixture_id, "season_id": season.id},
             )
-        schedule_result = await reconcile_schedules(windows=windows)
+        schedule_result = await reconcile_schedules(windows=windows, now=now)
         LOGGER.info(
             "ingestion_completed",
             extra={
                 "job_kind": bundle.job.kind,
                 "source": bundle.job.kind,
-                "sources": ["bootstrap-static", "fixtures"],
+                "sources": ["bootstrap-static", "fixtures", "event-status"],
                 "season_id": result.season_id,
                 "event_id": result.current_event_id,
                 "changed_count": result.changed_count,
@@ -311,7 +316,7 @@ async def load_payload_bundle(
     if message.bucket != PAYLOAD_BUCKET:
         raise ValueError("Collected payload references an unexpected S3 bucket.")
     expected_key = re.compile(
-        rf"{re.escape(PAYLOAD_PREFIX)}/v1/{message.job.kind}/"
+        rf"{re.escape(PAYLOAD_PREFIX)}/v2/{message.job.kind}/"
         r"\d{4}/\d{2}/\d{2}/"
         r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
         r"[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json",
@@ -378,6 +383,7 @@ class ScheduleReconciliationResult(BaseModel):
 async def reconcile_schedules(
     *,
     windows: list[MatchWindow],
+    now: datetime,
 ) -> ScheduleReconciliationResult:
     """Create desired one-time schedules and prune obsolete relay schedules."""
     existing = await list_live_schedule_names()
@@ -388,15 +394,23 @@ async def reconcile_schedules(
             GroupName=SCHEDULE_GROUP_NAME,
             Name=obsolete_name,
         )
+    created_count = 0
+    updated_count = 0
     for name, window in desired.items():
-        parameters = schedule_parameters(window=window)
+        if name in existing and window.start <= now:
+            continue
+        parameters = schedule_parameters(window=window, now=now)
         operation = (
             SCHEDULER.update_schedule if name in existing else SCHEDULER.create_schedule
         )
         operation(**parameters)
+        if name in existing:
+            updated_count += 1
+        else:
+            created_count += 1
     return ScheduleReconciliationResult(
-        created_count=len(desired.keys() - existing),
-        updated_count=len(desired.keys() & existing),
+        created_count=created_count,
+        updated_count=updated_count,
         deleted_count=len(obsolete),
     )
 
@@ -429,16 +443,18 @@ async def list_live_schedule_names() -> set[str]:
         next_token = raw_token
 
 
-def schedule_parameters(*, window: MatchWindow) -> dict[str, object]:
+def schedule_parameters(*, window: MatchWindow, now: datetime) -> dict[str, object]:
     """Build a complete create/update request for a one-time schedule."""
-    utc_start = window.start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    utc_start = window.schedule_at(now=now).astimezone(UTC).strftime(
+        "%Y-%m-%dT%H:%M:%S",
+    )
     return {
         "Name": window.schedule_name,
         "GroupName": SCHEDULE_GROUP_NAME,
         "ScheduleExpression": f"at({utc_start})",
         "ScheduleExpressionTimezone": "UTC",
         "FlexibleTimeWindow": {"Mode": "OFF"},
-        "ActionAfterCompletion": "DELETE",
+        "ActionAfterCompletion": "NONE",
         "State": "ENABLED",
         "Target": {
             "Arn": FETCH_QUEUE_ARN,

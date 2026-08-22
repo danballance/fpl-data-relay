@@ -1,10 +1,20 @@
 """Event-status and live-gameweek entities."""
 
 from datetime import date
+from enum import StrEnum
 
 from pydantic import Field
 
 from fpl_data_relay.domain.types import FplModel, ScalarValue
+
+
+class EventStatusPoints(StrEnum):
+    """Official FPL points-processing states from event-status."""
+
+    NOT_STARTED = ""
+    LIVE = "l"
+    PROVISIONAL = "p"
+    CONFIRMED = "r"
 
 
 class EventStatusDay(FplModel):
@@ -13,7 +23,7 @@ class EventStatusDay(FplModel):
     event: int
     bonus_added: bool
     date: date
-    leagues_updated: bool | None = None
+    points: EventStatusPoints
 
 
 class EventStatusResponse(FplModel):

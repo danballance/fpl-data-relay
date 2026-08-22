@@ -27,3 +27,9 @@ COMMUNITY_EXTRACTION_CACHE_SQL = (
     .joinpath("migrations/0004_community_extraction_cache.sql")
     .read_text(encoding="utf-8")
 )
+
+EVENT_STATUS_REBASELINE_SQL = (
+    files("fpl_data_relay.adapters.outbound.postgres")
+    .joinpath("migrations/0005_event_status_rebaseline.sql")
+    .read_text(encoding="utf-8")
+)

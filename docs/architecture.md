@@ -56,14 +56,22 @@ transactions, and bounded parent/child reads avoid N+1 queries. Transaction
 advisory locks make concurrent ingestion exit cleanly; payload hashes and
 database constraints make repeated SQS delivery idempotent.
 
-Schema version 4 stores canonical current snapshots for every normalized
+Schema version 5 stores canonical current snapshots for every normalized
 family. A pure entity diff compares stable keys and top-level values, then an
 atomic persistence operation writes normalized rows, source freshness,
 snapshots, family summaries, and child entity changes together. Bootstrap and
-full fixtures are authoritative; event-live is authoritative within one
-gameweek; current-gameweek fixture polling is partial and cannot imply a
-deletion. Explicit nulls overwrite stored values, and authoritative missing
-entities are deleted in foreign-key-safe order.
+full fixtures are authoritative for structural data; current-gameweek polling
+owns dynamic fixture fields during the four-hour live window and cannot imply a
+deletion. Older source timestamps are rejected, and equal timestamps must have
+equal payload hashes. Explicit nulls overwrite stored values, and authoritative
+missing entities are deleted in foreign-key-safe order.
+
+Migration 5 replaces the obsolete event-status `leagues_updated` field with
+FPL's required `points` state (`""`, `l`, `p`, or `r`) and adds the
+`relay_change_feed_rebaselines` audit table. It never deletes change history.
+The explicit `change-feed rebaseline-current` command rebuilds current-season
+snapshots from normalized tables under the ingestion advisory lock, then records
+the reason and affected counts while preserving source freshness watermarks.
 
 Migration 3 adds insert-only `relay_community_reports`. Entity references and
 their generation-time snapshots remain embedded in the report JSONB so each

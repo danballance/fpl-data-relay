@@ -16,7 +16,7 @@ Swagger's **Try it out** requests work through either access path.
 - `GET /healthz` checks only that the application is running. It never accesses
   the database.
 - `GET /readyz` checks database access and migration version and returns
-  `{"status":"ready","schema_version":4}`.
+  `{"status":"ready","schema_version":5}`.
 
 An Aurora resume returns HTTP 503, `Retry-After: 5`, and:
 
@@ -101,6 +101,12 @@ freshness without creating a change event.
 Entity collections return 503 when their source data has not yet been ingested.
 Unknown individual entities return 404. Invalid pagination arguments return
 FastAPI validation errors.
+
+Event-status rows expose FPL's official `points` state: empty means not started,
+`l` means live, `p` means provisional, and `r` means confirmed. `bonus_added`
+remains a separate settlement signal, while `leagues` remains the response-level
+upstream value. Fixtures retain both `finished_provisional` and `finished` so
+clients can distinguish provisional from confirmed results.
 
 ## Community intelligence
 

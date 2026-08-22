@@ -43,6 +43,7 @@ export default defineConfig(({ command, mode }) => {
       setupFiles: ["./src/test/setup.ts"],
       clearMocks: true,
       restoreMocks: true,
+      testTimeout: 10_000,
       coverage: {
         provider: "v8",
         reporter: ["text", "html"],

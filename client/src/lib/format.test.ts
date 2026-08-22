@@ -9,9 +9,11 @@ import {
 import {
   compactHash,
   createLookups,
+  eventPointsStatus,
   formatBoolean,
   formatCost,
   formatDateTime,
+  fixtureStatus,
   playerName,
 } from "./format";
 
@@ -27,6 +29,31 @@ describe("relay formatting", () => {
     expect(playerName(element)).toBe("Ada Striker");
     expect(compactHash("short")).toBe("short");
     expect(compactHash("a".repeat(64))).toBe(`${"a".repeat(12)}…`);
+  });
+
+  it("presents official fixture and event-status lifecycle states", () => {
+    expect(fixtureStatus({ started: false, finished: false })).toBe("Scheduled");
+    expect(fixtureStatus({ started: true, finished: false })).toBe("Live");
+    expect(
+      fixtureStatus({
+        started: true,
+        finished: false,
+        finished_provisional: true,
+      }),
+    ).toBe("Provisional");
+    expect(
+      fixtureStatus({
+        started: true,
+        finished: true,
+        finished_provisional: true,
+      }),
+    ).toBe("Confirmed");
+    expect(eventPointsStatus({ points: "" })).toBe("Not started");
+    expect(eventPointsStatus({ points: "l" })).toBe("Live");
+    expect(eventPointsStatus({ points: "p" })).toBe("Provisional");
+    expect(eventPointsStatus({ points: "r" })).toBe(
+      "Confirmed",
+    );
   });
 
   it("resolves stored identifiers and labels unknown identifiers explicitly", () => {

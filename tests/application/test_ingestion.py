@@ -62,7 +62,7 @@ async def test_ingest_all_once_writes_normalised_entity_events() -> None:
     service = IngestionService(client=FakeClient(), repository=store)
     result = await service.ingest_all_once()
     assert result.changed_count == 1
-    assert result.unchanged_count == 0
+    assert result.unchanged_count == 1
     assert result.season_id == "2025-26"
     assert result.current_event_id == 1
     assert result.has_active_fixture is True
@@ -168,7 +168,7 @@ async def test_same_payload_hash_does_not_duplicate_change_events() -> None:
     second = await service.ingest_all_once()
     assert first.changed_count == 1
     assert second.changed_count == 0
-    assert second.unchanged_count == 5
+    assert second.unchanged_count == 6
     assert len(store.events) == 1
 
 
@@ -195,6 +195,7 @@ async def test_collected_payload_preserves_fetch_time_and_checks_season() -> Non
     await service.ingest_reference_payload(
         bootstrap=await client.fetch_bootstrap_static(),
         fixtures=await client.fetch_fixtures(),
+        event_status=await client.fetch_event_status(),
         fetched_at=fetched_at,
     )
     assert {
@@ -233,6 +234,8 @@ def test_has_active_fixture_detects_started_unfinished_fixture() -> None:
         ),
     ]
     assert has_active_fixture(fixtures=fixtures) is True
+    provisional = fixtures[0].model_copy(update={"finished_provisional": True})
+    assert has_active_fixture(fixtures=[provisional]) is False
 
 
 @pytest.mark.asyncio

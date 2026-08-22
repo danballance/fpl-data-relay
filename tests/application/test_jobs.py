@@ -67,7 +67,7 @@ def test_match_windows_merge_overlaps_only_within_an_event() -> None:
         now=now,
     )
     assert len(windows) == 2
-    assert windows[0].end == kickoff + timedelta(hours=5)
+    assert windows[0].end == kickoff + timedelta(hours=6)
     assert windows[0].schedule_name.startswith("fpl-live-202627-1-")
     assert isinstance(windows[0].job(), LiveJob)
     assert missing == [4, 5]
@@ -109,6 +109,25 @@ def test_match_windows_skip_finished_windows_and_require_aware_now() -> None:
             ],
             now=now,
         )
+
+
+def test_active_match_window_keeps_stable_identity_across_reconciliation() -> None:
+    kickoff = datetime(2026, 8, 21, 19, tzinfo=UTC)
+    first_now = kickoff + timedelta(minutes=5)
+    second_now = first_now + timedelta(minutes=15)
+    first, _ = build_match_windows(
+        season_id="2026-27",
+        fixtures=[fixture(fixture_id=1, event_id=1, kickoff=kickoff)],
+        now=first_now,
+    )
+    second, _ = build_match_windows(
+        season_id="2026-27",
+        fixtures=[fixture(fixture_id=1, event_id=1, kickoff=kickoff)],
+        now=second_now,
+    )
+    assert first[0].start == kickoff - timedelta(minutes=10)
+    assert first[0].schedule_name == second[0].schedule_name
+    assert first[0].schedule_at(now=first_now) == first_now + timedelta(minutes=1)
 
 
 def test_live_requeue_delays_and_window_termination() -> None:

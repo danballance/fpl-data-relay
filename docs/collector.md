@@ -94,9 +94,15 @@ acknowledged: it becomes visible after 240 seconds and reaches the fetch DLQ
 after three receives. AWS alarms report queue messages older than five minutes,
 queue and Scheduler DLQ contents, missed 15-minute reference invocations,
 Scheduler delivery errors or dropped invocations, and repeated ingestion
-Lambda failures. Reference jobs are scheduled every 15 minutes. Live schedules
-span ten minutes before kickoff through three hours after, polling every 15
-seconds while active and 60 seconds while idle.
+Lambda failures. Reference jobs collect bootstrap, fixtures, and event status
+every 15 minutes. Live schedules span ten minutes before kickoff through four
+hours after, polling every 15 seconds while active and 60 seconds while idle.
+Each live window keeps a stable retained Scheduler identity while active, so
+reference reconciliation cannot restart an already-fired polling chain.
+
+Collected S3 bundles and their result messages use strict payload contract v2
+and are stored under the `v2` prefix. Fetch jobs remain the separately versioned
+v1 job contract.
 
 Use the `FetchDeadLetterQueueUrl`, `ResultDeadLetterQueueUrl`, and
 `ScheduleDeadLetterQueueUrl` outputs when inspecting failures:

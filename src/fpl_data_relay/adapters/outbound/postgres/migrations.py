@@ -11,6 +11,7 @@ from fpl_data_relay.adapters.outbound.postgres.schema import (
     ACCURATE_CHANGES_SQL,
     COMMUNITY_EXTRACTION_CACHE_SQL,
     COMMUNITY_REPORTS_SQL,
+    EVENT_STATUS_REBASELINE_SQL,
     SCHEMA_SQL,
 )
 from fpl_data_relay.application.ports.administration import SchemaStatus
@@ -79,6 +80,11 @@ MIGRATIONS = (
         version=4,
         name="community_extraction_cache",
         sql=COMMUNITY_EXTRACTION_CACHE_SQL.strip(),
+    ),
+    Migration(
+        version=5,
+        name="event_status_rebaseline",
+        sql=EVENT_STATUS_REBASELINE_SQL.strip(),
     ),
 )
 
