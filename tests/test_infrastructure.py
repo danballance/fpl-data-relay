@@ -249,7 +249,7 @@ def test_nas_compose_is_hardened_and_uses_direct_immutable_identity() -> None:
     assert "source_profile" not in aws_config
 
 
-def test_makefile_is_the_newcomer_and_ci_control_surface() -> None:
+def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     makefile = (ROOT / "Makefile").read_text()
     workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
 
@@ -259,6 +259,24 @@ def test_makefile_is_the_newcomer_and_ci_control_surface() -> None:
         "doctor",
         "install",
         "setup",
+        "local-dev",
+        "local-up",
+        "local-client",
+        "local-logs",
+        "local-ps",
+        "local-down",
+        "local-db-status",
+        "local-db-migrate",
+        "lint",
+        "test",
+        "check",
+        "infra",
+        "images",
+        "ci",
+    ):
+        assert re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE)
+
+    for removed_target in (
         "dev",
         "up",
         "client",
@@ -267,16 +285,14 @@ def test_makefile_is_the_newcomer_and_ci_control_surface() -> None:
         "down",
         "db-status",
         "db-apply",
-        "lint",
-        "test",
-        "check",
-        "infra",
-        "images",
-        "ci",
         "deploy",
         "deploy-status",
     ):
-        assert re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE)
+        assert not re.search(
+            rf"^{re.escape(removed_target)}:",
+            makefile,
+            re.MULTILINE,
+        )
 
     assert "test ! -e .env" in makefile
     assert "test ! -e client/.env.local" in makefile
@@ -290,11 +306,16 @@ def test_makefile_is_the_newcomer_and_ci_control_surface() -> None:
         in makefile
     )
     assert 'find_spec("fastapi") is None' in makefile
-    assert "gh workflow run deploy-production.yaml --ref main" in makefile
+    assert "local-*" in makefile
+    assert "GitHub Actions" in makefile
+    assert "gh workflow run" not in makefile
     assert "sam deploy" not in makefile
 
-    down_target = makefile.split("down: require-root-env", maxsplit=1)[1].split(
-        "db-status:",
+    down_target = makefile.split(
+        "local-down: require-local-env",
+        maxsplit=1,
+    )[1].split(
+        "local-db-status:",
         maxsplit=1,
     )[0]
     assert "--volumes" not in down_target

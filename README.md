@@ -15,7 +15,7 @@ deployment with collection performed by a NAS worker.
 ## Getting started
 
 The supported developer toolchain is uv, Node.js 24 with npm, Docker Compose,
-the AWS SAM CLI, GNU Make, and the GitHub CLI. Check it before starting:
+the AWS SAM CLI, and GNU Make. Check it before starting:
 
 ```fish
 make doctor
@@ -34,7 +34,7 @@ exist, refresh only the dependencies with `make install`.
 Start PostgreSQL and the API, apply pending migrations, and run the Vite client:
 
 ```fish
-make dev
+make local-dev
 ```
 
 The API is available at <http://127.0.0.1:8000> and the client at
@@ -42,7 +42,7 @@ The API is available at <http://127.0.0.1:8000> and the client at
 they can be reused; stop them without deleting PostgreSQL data with:
 
 ```fish
-make down
+make local-down
 ```
 
 ## Common commands
@@ -51,10 +51,10 @@ Run `make` or `make help` for the complete command list. The main workflows are:
 
 | Command | Purpose |
 | --- | --- |
-| `make up` | Build and start the database and API, including migrations. |
-| `make client` | Run only the Vite development client. |
-| `make logs` | Follow API and PostgreSQL logs. |
-| `make db-status` | Show applied and pending local migrations. |
+| `make local-up` | Build and start the local database and API, including migrations. |
+| `make local-client` | Run only the local Vite development client. |
+| `make local-logs` | Follow local API and PostgreSQL logs. |
+| `make local-db-status` | Show applied and pending local migrations. |
 | `make lint` | Run all Python and client static checks. |
 | `make test` | Run Python and client coverage suites. |
 | `make check` | Run the normal backend and client quality gate. |
@@ -62,17 +62,10 @@ Run `make` or `make help` for the complete command list. The main workflows are:
 
 ## Production deployment
 
-Production deployment remains a guarded GitHub Actions operation. It deploys
-the remote `main` commit only after that commit has passed CI and has an
-immutable collector image:
-
-```fish
-make deploy
-make deploy-status
-```
-
-AWS credentials remain in the protected GitHub `production` environment; the
-Make target does not perform a direct local AWS deployment.
+Production deployment remains a guarded GitHub Actions operation. Run and
+inspect **Deploy production** from GitHub after the remote `main` commit has
+passed CI and published its immutable collector image. The Makefile deliberately
+contains no deployment target.
 
 ## Documentation
 

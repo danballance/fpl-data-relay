@@ -7,10 +7,10 @@ it never calls the upstream FPL API.
 After the one-time root-level `make setup`, run the client on its own with:
 
 ```fish
-make client
+make local-client
 ```
 
-Use `make dev` instead to prepare and start PostgreSQL and the API before
+Use `make local-dev` instead to prepare and start PostgreSQL and the API before
 running the client. Both commands load the explicit proxy target from
 `client/.env.local`.
 

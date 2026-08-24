@@ -38,16 +38,9 @@ image, deploys and verifies the data stack, applies database migrations,
 deploys the application stack, publishes the frontend, and smoke-tests the
 public API.
 
-From an authenticated GitHub CLI session, dispatch the guarded workflow and
-inspect its status with:
-
-```fish
-make deploy
-make deploy-status
-```
-
-These targets deploy the remote `main` commit; they do not use local AWS
-credentials or deploy uncommitted changes.
+Dispatch and inspect the guarded workflow from the GitHub Actions interface.
+The repository Makefile deliberately exposes no deployment target: production
+credentials, workflow approval, logs, and status remain within GitHub.
 
 The workflow passes these required application parameters:
 
