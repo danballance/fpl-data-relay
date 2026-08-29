@@ -1,0 +1,51 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VerifyIdentityAndDiscoverStacks",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity", "cloudformation:DescribeStacks"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OperateRelayQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes",
+        "sqs:ReceiveMessage",
+        "sqs:SendMessage"
+      ],
+      "Resource": "arn:aws:sqs:eu-west-2:757771412865:fpl-relay-app-*"
+    },
+    {
+      "Sid": "InspectSchedules",
+      "Effect": "Allow",
+      "Action": "scheduler:ListSchedules",
+      "Resource": "*"
+    },
+    {
+      "Sid": "OperateRelaySchedules",
+      "Effect": "Allow",
+      "Action": ["scheduler:GetSchedule", "scheduler:UpdateSchedule"],
+      "Resource": "arn:aws:scheduler:eu-west-2:757771412865:schedule/fpl-relay-app-*/*"
+    },
+    {
+      "Sid": "AdministerRelayDatabase",
+      "Effect": "Allow",
+      "Action": [
+        "rds-data:BatchExecuteStatement",
+        "rds-data:BeginTransaction",
+        "rds-data:CommitTransaction",
+        "rds-data:ExecuteStatement",
+        "rds-data:RollbackTransaction"
+      ],
+      "Resource": "arn:aws:rds:eu-west-2:757771412865:cluster:*"
+    },
+    {
+      "Sid": "ReadRelayDatabaseSecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:eu-west-2:757771412865:secret:rds!cluster-*"
+    }
+  ]
+}

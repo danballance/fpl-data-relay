@@ -26,6 +26,14 @@ Parameters:
     Type: String
     AllowedValues: [ENABLED, DISABLED]
     Description: Explicit community schedule rollout state.
+  ReferenceScheduleState:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Explicit reference schedule operational state.
+  DeployedRevision:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{40}$"
+    Description: Full Git revision deployed by the production workflow.
 
 Conditions:
   CommunityScheduleEnabled: !Equals [!Ref CommunityScheduleState, ENABLED]
@@ -246,7 +254,7 @@ Resources:
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
-      State: ENABLED
+      State: !Ref ReferenceScheduleState
       Target:
         Arn: !GetAtt FetchQueue.Arn
         RoleArn: !GetAtt ScheduleTargetRole.Arn
@@ -876,3 +884,15 @@ Outputs:
     Value: !Ref PayloadBucket
   PayloadPrefix:
     Value: !Ref PayloadPrefix
+  ReferenceScheduleGroupName:
+    Value: !Ref ReferenceScheduleGroup
+  ReferenceScheduleName:
+    Value: !Ref ReferenceSchedule
+  LiveScheduleGroupName:
+    Value: !Ref LiveScheduleGroup
+  CommunityScheduleGroupName:
+    Value: !Ref CommunityScheduleGroup
+  CommunityScheduleName:
+    Value: !Ref CommunitySchedule
+  DeployedRevision:
+    Value: !Ref DeployedRevision

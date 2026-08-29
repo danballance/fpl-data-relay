@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 fpl-relay = "fpl_data_relay.bootstrap:app"
 fpl-collector = "fpl_data_relay.collector_cli:app"
+fpl-admin = "fpl_data_relay.admin_bootstrap:app"
 
 [dependency-groups]
 aws = [
@@ -26,6 +27,10 @@ local = [
     "uvicorn[standard]>=0.38.0",
 ]
 collector = [
+    "boto3>=1.42.0",
+    "typer>=0.20.0",
+]
+admin = [
     "boto3>=1.42.0",
     "typer>=0.20.0",
 ]
@@ -63,6 +68,7 @@ include = ["fpl_data_relay*"]
 [tool.setuptools.package-data]
 fpl_data_relay = [
     "adapters/outbound/postgres/migrations/*.sql",
+    "adapters/outbound/nas_admin.sh",
     "community_strategies.toml",
 ]
 

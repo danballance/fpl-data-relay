@@ -50,6 +50,8 @@ The workflow passes these required application parameters:
 - `PayloadPrefix=payloads`
 - `CommunityCredentialSecretArn` from the production environment variable
 - `CommunityScheduleState=DISABLED`
+- `ReferenceScheduleState`, preserving the current operational state
+- `DeployedRevision` set to the full GitHub commit SHA
 
 The payload builder adds its own schema-version segment, so objects are stored
 under `payloads/v2/...`.
@@ -162,7 +164,9 @@ uv run sam deploy \
     CollectorUserName=fpl-relay-nas-source \
     PayloadPrefix=payloads \
     CommunityCredentialSecretArn=$COMMUNITY_CREDENTIAL_SECRET_ARN \
-    CommunityScheduleState=DISABLED
+    CommunityScheduleState=DISABLED \
+    ReferenceScheduleState=ENABLED \
+    DeployedRevision=$GIT_SHA
 ```
 
 If initial application creation rolls back, delete the resulting
@@ -198,23 +202,16 @@ Lambda, and the API should expose persisted reference data.
 ## Current-season rebaseline
 
 Rebaselining is an explicit operation after migration and refreshed ingestion;
-migration 5 never deletes history itself. For a controlled repair, stop the NAS
-collector, allow both queues and in-flight Lambda work to drain, deploy and apply
-the schema, then submit one reference job and one live job for the current event.
-After verifying the normalized fixtures, event status, and live data, run:
+migration 5 never deletes history itself. Its one-time coordinated rollout uses
+the resumable `scripts/bootstrap-migration-0005.sh` prepare/complete workflow in
+[administration.md](administration.md). The script leaves deployment in GitHub
+Actions, refreshes normalized reference/live data under maintenance, records the
+audited current-season baseline, and restores the exact prior writer states.
 
-```fish
-set -x DATABASE_EXECUTOR rds_data
-uv run fpl-relay change-feed rebaseline-current \
-  --reason "season-start ingestion repair" \
-  --yes
-```
-
-The command requires exactly one current season and the ingestion advisory lock.
-It deletes only that season's change events, rebuilds its snapshots from current
-normalized rows, preserves source checkpoints and all other application data,
-and reports the durable audit ID and counts. Resume the collector only after the
-reported baseline and ingestion-status watermarks have been checked.
+After that bootstrap, use the durable `prod-maintenance-*` and
+`prod-rebaseline-current` Make workflows documented in the administration
+guide. The lower-level `fpl-relay change-feed rebaseline-current` command remains
+an implementation primitive rather than the normal production runbook.
 
 The reference Scheduler sends a collection job every 15 minutes. Scheduler
 targets retry for up to 15 minutes with three attempts and route exhausted

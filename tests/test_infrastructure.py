@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -106,6 +107,10 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
     assert "BucketOwnerEnforced" in template
     assert "BlockPublicPolicy: true" in template
     assert "ScheduleExpression: cron(0/15 * * * ? *)" in template
+    assert "State: !Ref ReferenceScheduleState" in template
+    assert "ReferenceScheduleGroupName:" in template
+    assert "LiveScheduleGroupName:" in template
+    assert "DeployedRevision:" in template
     assert "MaximumEventAgeInSeconds: 900" in template
     assert "MaximumRetryAttempts: 3" in template
     assert "DeadLetterConfig:" in template
@@ -153,6 +158,9 @@ def test_application_template_has_disabled_isolated_community_runtime() -> None:
     assert "RetentionInDays: 14" in template
     assert "COMMUNITY_SCHEDULE_STATE: DISABLED" in workflow
     assert '"CommunityScheduleState=${COMMUNITY_SCHEDULE_STATE}"' in workflow
+    assert '"ReferenceScheduleState=${REFERENCE_SCHEDULE_STATE}"' in workflow
+    assert '"DeployedRevision=${GITHUB_SHA}"' in workflow
+    assert "Preserve operational schedule states" in workflow
     assert "--group community" in makefile
 
 
@@ -198,6 +206,10 @@ def test_production_deployment_is_one_direct_manual_workflow() -> None:
     assert "${{ vars.COMMUNITY_CREDENTIAL_SECRET_ARN }}" in workflow
     assert "${{ secrets.COMMUNITY_CREDENTIAL_SECRET_ARN }}" not in workflow
     assert "Validate deployment variables" in workflow
+    assert 'app_stack="$(aws cloudformation describe-stacks' in workflow
+    assert 'grep -q "does not exist"' in workflow
+    assert "Preserve operational schedule states" in workflow
+    assert '2>/dev/null; then' not in workflow
 
     for removed_concept in (
         "fpl-infrastructure-migrate",
@@ -249,6 +261,50 @@ def test_nas_compose_is_hardened_and_uses_direct_immutable_identity() -> None:
     assert "source_profile" not in aws_config
 
 
+def test_administration_configuration_and_example_policy_are_nonsecret() -> None:
+    example = (ROOT / ".admin.env.example").read_text()
+    policy_text = (ROOT / "deploy/admin-policy.example.json").read_text()
+    policy = json.loads(policy_text)
+    bootstrap = (
+        ROOT
+        / "src/fpl_data_relay/adapters/outbound/aws_profile_bootstrap.py"
+    ).read_text()
+    profile = (
+        ROOT / "src/fpl_data_relay/adapters/outbound/aws_profile.py"
+    ).read_text()
+    guide = (ROOT / "docs/administration.md").read_text()
+    helper = (
+        ROOT / "src/fpl_data_relay/adapters/outbound/nas_admin.sh"
+    ).read_text()
+
+    assert "FPL_ADMIN_AWS_PROFILE=fpl-relay-admin" in example
+    assert "FPL_ADMIN_NAS_SSH_TARGET=fpl-nas" in example
+    assert "SECRET_ACCESS_KEY" not in example
+    actions = {
+        action
+        for statement in policy["Statement"]
+        for action in (
+            statement["Action"]
+            if isinstance(statement["Action"], list)
+            else [statement["Action"]]
+        )
+    }
+    assert "cloudformation:DescribeStacks" in actions
+    assert "scheduler:UpdateSchedule" in actions
+    assert "signin:AuthorizeOAuth2Access" not in actions
+    assert "signin:CreateOAuth2Token" not in actions
+    assert "sqs:PurgeQueue" not in actions
+    assert "sqs:DeleteMessage" not in actions
+    assert "REPLACE_ACCOUNT_ID" not in policy_text
+    assert "757771412865" in policy_text
+    assert "SignInLocalDevelopmentAccess" in profile
+    assert "make aws-profile-onboard" in guide
+    assert "There are no account-ID placeholders to edit" in guide
+    assert "cannot grant" in bootstrap
+    assert "COLLECTOR_IMAGE_TAG" in helper
+    assert "backup" in helper
+
+
 def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     makefile = (ROOT / "Makefile").read_text()
     workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
@@ -267,6 +323,43 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
         "local-down",
         "local-db-status",
         "local-db-migrate",
+        "aws-profile-bootstrap",
+        "aws-profile-setup",
+        "aws-profile-onboard",
+        "aws-profile-login",
+        "aws-profile-status",
+        "aws-profile-logout",
+        "aws-doctor",
+        "aws-status",
+        "aws-app-revision",
+        "aws-db-status",
+        "aws-db-migrate",
+        "aws-queues-status",
+        "aws-queues-drain",
+        "aws-dlqs-status",
+        "aws-dlq-peek",
+        "aws-send-reference",
+        "aws-send-live",
+        "aws-send-community",
+        "aws-schedules-status",
+        "aws-schedules-bootstrap-pause",
+        "aws-schedules-bootstrap-restore",
+        "aws-maintenance-status",
+        "aws-schedules-pause",
+        "aws-schedules-restore",
+        "aws-rebaseline-current",
+        "nas-doctor",
+        "nas-status",
+        "nas-start",
+        "nas-stop",
+        "nas-logs",
+        "nas-update",
+        "nas-rollback",
+        "prod-doctor",
+        "prod-status",
+        "prod-maintenance-begin",
+        "prod-maintenance-end",
+        "prod-rebaseline-current",
         "lint",
         "test",
         "check",
@@ -307,9 +400,33 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     )
     assert 'find_spec("fastapi") is None' in makefile
     assert "local-*" in makefile
+    assert "aws-*" in makefile
+    assert "nas-*" in makefile
+    assert "prod-*" in makefile
+    assert "fpl-admin --config .admin.env" in makefile
+    assert "AWS CLI >= 2.32" in makefile
+    assert "uv run aws --version" in makefile
+    assert "created .admin.env from .admin.env.example" in makefile
+    assert "AWS administrator onboarding complete" in makefile
     assert "GitHub Actions" in makefile
     assert "gh workflow run" not in makefile
     assert "sam deploy" not in makefile
+
+    bootstrap_script = ROOT / "scripts/bootstrap-migration-0005.sh"
+    bootstrap = bootstrap_script.read_text()
+    administration_guide = (ROOT / "docs/administration.md").read_text()
+    gitignore = (ROOT / ".gitignore").read_text()
+    assert bootstrap_script.stat().st_mode & 0o111
+    assert "set -Eeuo pipefail" in bootstrap
+    assert "prod-maintenance-begin" in bootstrap
+    assert "prod-rebaseline-current" in bootstrap
+    assert "aws-schedules-bootstrap-pause" in bootstrap
+    assert "aws-schedules-bootstrap-restore" in bootstrap
+    assert "gh workflow run" not in bootstrap
+    assert "aws-db-migrate" not in bootstrap
+    assert "scripts/bootstrap-migration-0005.sh prepare" in administration_guide
+    assert "scripts/bootstrap-migration-0005.sh complete" in administration_guide
+    assert ".admin-state/" in gitignore
 
     down_target = makefile.split(
         "local-down: require-local-env",
@@ -325,3 +442,56 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     assert "make install" in workflow
     assert "make ci" in workflow
     assert "docker build" not in workflow
+
+
+def test_aws_profile_setup_creates_but_never_overwrites_admin_config(
+    tmp_path: Path,
+) -> None:
+    example = "FPL_ADMIN_AWS_PROFILE=fpl-relay-admin\n"
+    (tmp_path / ".admin.env.example").write_text(example)
+    command = [
+        "make",
+        "--file",
+        str(ROOT / "Makefile"),
+        "aws-profile-setup",
+        "ADMIN=true",
+    ]
+
+    first = subprocess.run(
+        command,
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert (tmp_path / ".admin.env").read_text() == example
+
+    existing = "FPL_ADMIN_AWS_PROFILE=custom-admin\n"
+    (tmp_path / ".admin.env").write_text(existing)
+    second = subprocess.run(
+        command,
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert (tmp_path / ".admin.env").read_text() == existing
+
+    onboard = subprocess.run(
+        [
+            "make",
+            "--file",
+            str(ROOT / "Makefile"),
+            "aws-profile-onboard",
+            "ADMIN=true",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert onboard.returncode == 0, onboard.stderr
+    assert "AWS administrator onboarding complete" in onboard.stdout
+    assert (tmp_path / ".admin.env").read_text() == existing

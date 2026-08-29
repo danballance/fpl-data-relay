@@ -88,6 +88,7 @@ class InMemoryStore:
         self.event_status: dict[str, EventStatusResponse] = {}
         self.live_elements: dict[tuple[str, int], EventLiveResponse] = {}
         self.locked = False
+        self.is_maintenance_active = False
         self.schema_applied = False
         self.closed = False
 
@@ -522,6 +523,9 @@ class InMemoryStore:
 
     def ingestion_lock(self) -> FakeLock:
         return FakeLock(store=self)
+
+    async def maintenance_active(self) -> bool:
+        return self.is_maintenance_active
 
     async def close(self) -> None:
         self.closed = True

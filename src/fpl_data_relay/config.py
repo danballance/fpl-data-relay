@@ -1,9 +1,18 @@
 """Environment-backed runtime configuration for the relay."""
 
 import os
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveFloat, PositiveInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 POSTGRES_MAINTENANCE_DATABASE_URL = "POSTGRES_MAINTENANCE_DATABASE_URL"
@@ -119,6 +128,42 @@ class CommunityCredentials(BaseModel):
     supadata_api_key: str = Field(min_length=1)
 
 
+class AdminSettings(BaseSettings):
+    """Explicit non-secret settings for local production administration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="FPL_ADMIN_",
+        env_file_encoding="utf-8",
+        extra="forbid",
+    )
+
+    aws_profile: str = Field(min_length=1)
+    aws_region: str = Field(min_length=1)
+    aws_account_id: str = Field(pattern=r"^\d{12}$")
+    data_stack_name: str = Field(min_length=1)
+    app_stack_name: str = Field(min_length=1)
+    nas_ssh_target: str = Field(pattern=r"^[A-Za-z0-9_.@-]+$")
+    nas_stack_directory: str = Field(pattern=r"^/[^\n]+$")
+    nas_compose_executable: str = Field(pattern=r"^/[^\n]+$")
+    nas_docker_executable: str = Field(pattern=r"^/[^\n]+$")
+    nas_ssh_connect_timeout_seconds: PositiveInt
+    drain_timeout_seconds: PositiveInt
+    drain_poll_seconds: PositiveInt
+    drain_stable_seconds: PositiveInt
+    nas_health_attempts: PositiveInt
+    nas_health_interval_seconds: PositiveInt
+    nas_log_tail_lines: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_drain_intervals(self) -> AdminSettings:
+        """Reject drain timings which can never establish stable emptiness."""
+        if self.drain_poll_seconds > self.drain_timeout_seconds:
+            raise ValueError("Drain poll interval must not exceed its timeout.")
+        if self.drain_stable_seconds > self.drain_timeout_seconds:
+            raise ValueError("Drain stable period must not exceed its timeout.")
+        return self
+
+
 def load_settings_from_environment() -> Settings:
     """Load settings after checking that every required variable is present."""
     missing_names = [name for name in REQUIRED_ENV_VARS if name not in os.environ]
@@ -218,3 +263,38 @@ def load_community_credentials_from_environment() -> CommunityCredentials:
             "supadata_api_key": os.environ["SUPADATA_API_KEY"],
         },
     )
+
+
+def load_admin_settings(*, path: Path) -> AdminSettings:
+    """Load production administration settings from one explicit file."""
+    if not path.is_file():
+        raise RuntimeError(f"Administration config does not exist: {path}")
+    values: dict[str, str] = {}
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if line == "" or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if separator == "" or key.strip() == "" or value.strip() == "":
+            raise RuntimeError(
+                f"Invalid administration config line {line_number}.",
+            )
+        normalized_key = key.strip()
+        if normalized_key in values:
+            raise RuntimeError(
+                f"Duplicate administration config key: {normalized_key}",
+            )
+        values[normalized_key] = value.strip()
+    prefix = "FPL_ADMIN_"
+    unexpected = sorted(key for key in values if not key.startswith(prefix))
+    if unexpected:
+        raise RuntimeError(
+            "Unexpected administration config keys: " + ", ".join(unexpected),
+        )
+    field_values = {
+        key.removeprefix(prefix).lower(): value for key, value in values.items()
+    }
+    return AdminSettings.model_validate(field_values)

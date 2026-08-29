@@ -89,6 +89,11 @@ Rollback uses the same commands with a previously verified SHA tag.
 
 ## Operations
 
+From an administrator checkout, prefer the root `nas-status`, `nas-start`,
+`nas-stop`, `nas-logs`, `nas-update`, and `nas-rollback` targets documented in
+[administration.md](administration.md). These commands execute locally and
+control this Compose service over the configured SSH alias.
+
 The health check requires a current SQS polling heartbeat. A failed job is not
 acknowledged: it becomes visible after 240 seconds and reaches the fetch DLQ
 after three receives. AWS alarms report queue messages older than five minutes,

@@ -129,5 +129,8 @@ class PostgresIngestionRepository:
             fixture_id=fixture_id,
         )
 
+    async def maintenance_active(self) -> bool:
+        return await self._database.maintenance_active()
+
     def ingestion_lock(self) -> AbstractAsyncContextManager[None]:
         return self._database.ingestion_lock()

@@ -29,6 +29,7 @@ jobs:
       PAYLOAD_PREFIX: payloads
       COMMUNITY_CREDENTIAL_SECRET_ARN: ${{ vars.COMMUNITY_CREDENTIAL_SECRET_ARN }}
       COMMUNITY_SCHEDULE_STATE: DISABLED
+      REFERENCE_SCHEDULE_STATE: ENABLED
       COLLECTOR_IMAGE: ghcr.io/danballance/fpl-data-relay-collector
       GH_TOKEN: ${{ github.token }}
 
@@ -93,6 +94,32 @@ jobs:
         run: |
           account="$(aws sts get-caller-identity --query Account --output text)"
           test "${account}" = "${AWS_ACCOUNT_ID}"
+
+      - name: Preserve operational schedule states
+        run: |
+          if app_stack="$(aws cloudformation describe-stacks \
+            --stack-name "${APP_STACK_NAME}" 2>&1)"; then
+            printf '%s' "${app_stack}" > "${RUNNER_TEMP}/app-stack.json"
+          elif grep -q "does not exist" <<< "${app_stack}"; then
+            exit 0
+          else
+            printf '%s\n' "${app_stack}" >&2
+            exit 1
+          fi
+          aws scheduler get-schedule \
+            --group-name "${APP_STACK_NAME}-reference" \
+            --name "${APP_STACK_NAME}-reference-quarter-hour" \
+            > "${RUNNER_TEMP}/reference-schedule.json"
+          state="$(jq -r '.State' "${RUNNER_TEMP}/reference-schedule.json")"
+          case "${state}" in ENABLED|DISABLED) ;; *) exit 1 ;; esac
+          echo "REFERENCE_SCHEDULE_STATE=${state}" >> "${GITHUB_ENV}"
+          aws scheduler get-schedule \
+            --group-name "${APP_STACK_NAME}-community" \
+            --name "${APP_STACK_NAME}-community-daily" \
+            > "${RUNNER_TEMP}/community-schedule.json"
+          state="$(jq -r '.State' "${RUNNER_TEMP}/community-schedule.json")"
+          case "${state}" in ENABLED|DISABLED) ;; *) exit 1 ;; esac
+          echo "COMMUNITY_SCHEDULE_STATE=${state}" >> "${GITHUB_ENV}"
 
       - name: Protect existing data stack
         run: |
@@ -199,7 +226,9 @@ jobs:
               "CollectorUserName=${COLLECTOR_USER_NAME}" \
               "PayloadPrefix=${PAYLOAD_PREFIX}" \
               "CommunityCredentialSecretArn=${COMMUNITY_CREDENTIAL_SECRET_ARN}" \
-              "CommunityScheduleState=${COMMUNITY_SCHEDULE_STATE}"
+              "CommunityScheduleState=${COMMUNITY_SCHEDULE_STATE}" \
+              "ReferenceScheduleState=${REFERENCE_SCHEDULE_STATE}" \
+              "DeployedRevision=${GITHUB_SHA}"
 
       - name: Build frontend
         run: |

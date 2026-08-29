@@ -55,6 +55,9 @@ def test_community_migration_enforces_aggregate_and_immutability() -> None:
     assert "DROP COLUMN leagues_updated" in rebaseline_sql
     assert "points IN ('', 'l', 'p', 'r')" in rebaseline_sql
     assert "relay_change_feed_rebaselines" in rebaseline_sql
+    assert "relay_maintenance_windows" in rebaseline_sql
+    assert "relay_maintenance_windows_one_open_idx" in rebaseline_sql
+    assert "phase IN ('entering', 'active', 'exiting', 'closed')" in rebaseline_sql
 
 
 def test_migration_row_values_accepts_asyncpg_mapping_shape() -> None:

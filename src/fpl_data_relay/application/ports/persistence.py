@@ -126,6 +126,10 @@ class IngestionRepository(Protocol):
         """Return one fixture."""
         ...
 
+    async def maintenance_active(self) -> bool:
+        """Return whether scheduling follow-ups are suppressed."""
+        ...
+
     def ingestion_lock(self) -> AbstractAsyncContextManager[None]:
         """Acquire the process-wide ingestion lock."""
         ...

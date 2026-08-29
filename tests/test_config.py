@@ -1,9 +1,12 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from fpl_data_relay.config import (
     CollectorSettings,
     Settings,
+    load_admin_settings,
     load_collector_settings_from_environment,
     load_fpl_settings_from_environment,
     load_postgres_maintenance_database_url_from_environment,
@@ -136,3 +139,78 @@ def test_collector_environment_loader_is_explicit(
     monkeypatch.delenv("RESULT_QUEUE_URL")
     with pytest.raises(RuntimeError, match="RESULT_QUEUE_URL"):
         load_collector_settings_from_environment()
+
+
+def test_load_admin_settings_requires_one_strict_explicit_file(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "admin.env"
+    config.write_text(
+        "\n".join(
+            [
+                "# non-secret production administration",
+                "FPL_ADMIN_AWS_PROFILE=admin",
+                "FPL_ADMIN_AWS_REGION=eu-west-2",
+                "FPL_ADMIN_AWS_ACCOUNT_ID=123456789012",
+                "FPL_ADMIN_DATA_STACK_NAME=data",
+                "FPL_ADMIN_APP_STACK_NAME=app",
+                "FPL_ADMIN_NAS_SSH_TARGET=relay@nas",
+                "FPL_ADMIN_NAS_STACK_DIRECTORY=/stack",
+                "FPL_ADMIN_NAS_COMPOSE_EXECUTABLE=/compose",
+                "FPL_ADMIN_NAS_DOCKER_EXECUTABLE=/docker",
+                "FPL_ADMIN_NAS_SSH_CONNECT_TIMEOUT_SECONDS=10",
+                "FPL_ADMIN_DRAIN_TIMEOUT_SECONDS=20",
+                "FPL_ADMIN_DRAIN_POLL_SECONDS=2",
+                "FPL_ADMIN_DRAIN_STABLE_SECONDS=4",
+                "FPL_ADMIN_NAS_HEALTH_ATTEMPTS=2",
+                "FPL_ADMIN_NAS_HEALTH_INTERVAL_SECONDS=1",
+                "FPL_ADMIN_NAS_LOG_TAIL_LINES=10",
+                "",
+            ],
+        ),
+    )
+    loaded = load_admin_settings(path=config)
+    assert loaded.aws_profile == "admin"
+    assert loaded.nas_stack_directory == "/stack"
+    config.write_text(
+        config.read_text() + "FPL_ADMIN_UNKNOWN=value\n",
+    )
+    with pytest.raises(ValidationError, match="unknown"):
+        load_admin_settings(path=config)
+    with pytest.raises(RuntimeError, match="does not exist"):
+        load_admin_settings(path=tmp_path / "missing")
+
+
+def test_load_admin_settings_rejects_impossible_drain_timings(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "admin.env"
+    config.write_text(
+        Path(".admin.env.example")
+        .read_text()
+        .replace(
+            "FPL_ADMIN_DRAIN_STABLE_SECONDS=120",
+            "FPL_ADMIN_DRAIN_STABLE_SECONDS=7200",
+        ),
+    )
+    with pytest.raises(ValidationError, match="stable period"):
+        load_admin_settings(path=config)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("INVALID", "Invalid administration config line"),
+        ("FPL_ADMIN_A=1\nFPL_ADMIN_A=2", "Duplicate administration config key"),
+        ("WRONG_KEY=value", "Unexpected administration config keys"),
+    ],
+)
+def test_load_admin_settings_rejects_malformed_files(
+    tmp_path: Path,
+    content: str,
+    message: str,
+) -> None:
+    config = tmp_path / "admin.env"
+    config.write_text(content)
+    with pytest.raises(RuntimeError, match=message):
+        load_admin_settings(path=config)

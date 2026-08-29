@@ -20,6 +20,10 @@ from fpl_data_relay.adapters.outbound.postgres.schema import (
 from fpl_data_relay.application.errors import SchemaUnavailableError
 from fpl_data_relay.application.ports.administration import (
     ChangeFeedRebaselineResult,
+    MaintenancePhase,
+    MaintenanceWindow,
+    QueueDepth,
+    ScheduleSnapshot,
     SchemaStatus,
 )
 from fpl_data_relay.domain.changes import (
@@ -68,6 +72,8 @@ from fpl_data_relay.domain.types import JsonValue
 type StatScalar = int | float | str | bool | None
 
 FIELD_CHANGES_ADAPTER = TypeAdapter(list[FieldChange])
+SCHEDULE_SNAPSHOTS_ADAPTER = TypeAdapter(list[ScheduleSnapshot])
+QUEUE_DEPTHS_ADAPTER = TypeAdapter(list[QueueDepth])
 
 
 class IngestionLockError(RuntimeError):
@@ -524,6 +530,166 @@ class PostgresDatabase(_PostgresOperations):
             if audit_row is None:
                 raise RuntimeError("Failed to record change-feed rebaseline audit.")
             return change_feed_rebaseline_from_row(row=audit_row)
+
+    async def maintenance_active(self) -> bool:
+        """Return whether one production maintenance window is open."""
+        async with self._pool.acquire() as connection:
+            active = await connection.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM relay_maintenance_windows
+                    WHERE phase <> 'closed'
+                )
+                """,
+            )
+        if not isinstance(active, bool):
+            raise TypeError("Maintenance query did not return a boolean.")
+        return active
+
+    async def get_open_maintenance(self) -> MaintenanceWindow | None:
+        """Return the single open maintenance window, if present."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT *
+                FROM relay_maintenance_windows
+                WHERE phase <> 'closed'
+                ORDER BY id DESC
+                """,
+            )
+        if len(rows) > 1:
+            raise RuntimeError("More than one maintenance window is open.")
+        return None if not rows else maintenance_window_from_row(row=rows[0])
+
+    async def get_latest_maintenance(self) -> MaintenanceWindow | None:
+        """Return the newest maintenance audit record."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM relay_maintenance_windows
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+            )
+        return None if row is None else maintenance_window_from_row(row=row)
+
+    async def open_maintenance(
+        self,
+        *,
+        reason: str,
+        operator_arn: str,
+        schedules: list[ScheduleSnapshot],
+        queues_before: list[QueueDepth],
+        collector_was_running: bool | None,
+    ) -> MaintenanceWindow:
+        """Open one maintenance window while excluding active ingestion."""
+        async with self._pool.acquire() as connection, connection.transaction():
+            acquired = await connection.fetchval(
+                "SELECT pg_try_advisory_xact_lock($1)",
+                ADVISORY_LOCK_ID,
+            )
+            if acquired is not True:
+                raise IngestionLockError("Another ingestion cycle is already running.")
+            existing = await connection.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM relay_maintenance_windows
+                WHERE phase <> 'closed'
+                """,
+            )
+            if existing != 0:
+                raise RuntimeError("A maintenance window is already open.")
+            row = await connection.fetchrow(
+                """
+                INSERT INTO relay_maintenance_windows (
+                    reason, operator_arn, phase, schedules, queues_before,
+                    collector_was_running
+                )
+                VALUES (
+                    $1, $2, 'entering', CAST($3 AS jsonb), CAST($4 AS jsonb), $5
+                )
+                RETURNING *
+                """,
+                reason,
+                operator_arn,
+                json.dumps([item.model_dump(mode="json") for item in schedules]),
+                json.dumps([item.model_dump(mode="json") for item in queues_before]),
+                collector_was_running,
+            )
+        if row is None:
+            raise RuntimeError("Failed to open maintenance window.")
+        return maintenance_window_from_row(row=row)
+
+    async def activate_maintenance(
+        self,
+        *,
+        maintenance_id: int,
+        collector_was_running: bool,
+        queues_after: list[QueueDepth],
+    ) -> MaintenanceWindow:
+        """Mark a drained and stopped maintenance window active."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE relay_maintenance_windows
+                SET phase = 'active',
+                    collector_was_running = $2,
+                    queues_after = CAST($3 AS jsonb),
+                    activated_at = COALESCE(activated_at, now())
+                WHERE id = $1 AND phase IN ('entering', 'active')
+                RETURNING *
+                """,
+                maintenance_id,
+                collector_was_running,
+                json.dumps([item.model_dump(mode="json") for item in queues_after]),
+            )
+        if row is None:
+            raise RuntimeError("Maintenance window cannot be activated from its phase.")
+        return maintenance_window_from_row(row=row)
+
+    async def begin_maintenance_exit(
+        self,
+        *,
+        maintenance_id: int,
+    ) -> MaintenanceWindow:
+        """Mark an active window as exiting, allowing an idempotent retry."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE relay_maintenance_windows
+                SET phase = 'exiting'
+                WHERE id = $1 AND phase IN ('entering', 'active', 'exiting')
+                RETURNING *
+                """,
+                maintenance_id,
+            )
+        if row is None:
+            raise RuntimeError("Maintenance window cannot begin exit from its phase.")
+        return maintenance_window_from_row(row=row)
+
+    async def close_maintenance(
+        self,
+        *,
+        maintenance_id: int,
+        operator_arn: str,
+    ) -> MaintenanceWindow:
+        """Close a restored maintenance window."""
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE relay_maintenance_windows
+                SET phase = 'closed', closed_at = now(), closed_by = $2
+                WHERE id = $1 AND phase = 'exiting'
+                RETURNING *
+                """,
+                maintenance_id,
+                operator_arn,
+            )
+        if row is None:
+            raise RuntimeError("Maintenance window cannot be closed from its phase.")
+        return maintenance_window_from_row(row=row)
 
     async def apply_schema(self) -> None:
         """Apply pending immutable migrations."""
@@ -2539,6 +2705,37 @@ def change_feed_rebaseline_from_row(
     )
 
 
+def maintenance_window_from_row(*, row: object) -> MaintenanceWindow:
+    """Convert one maintenance JSONB audit row from either executor."""
+    values = row_values(row=row)
+    schedules = values.get("schedules")
+    queues_before = values.get("queues_before")
+    queues_after = values.get("queues_after")
+    if isinstance(schedules, str):
+        schedules = json.loads(schedules)
+    if isinstance(queues_before, str):
+        queues_before = json.loads(queues_before)
+    if isinstance(queues_after, str):
+        queues_after = json.loads(queues_after)
+    return MaintenanceWindow(
+        id=require_int(values=values, key="id"),
+        reason=require_str(values=values, key="reason"),
+        operator_arn=require_str(values=values, key="operator_arn"),
+        phase=MaintenancePhase(require_str(values=values, key="phase")),
+        schedules=SCHEDULE_SNAPSHOTS_ADAPTER.validate_python(schedules),
+        collector_was_running=optional_bool(
+            values=values,
+            key="collector_was_running",
+        ),
+        queues_before=QUEUE_DEPTHS_ADAPTER.validate_python(queues_before),
+        queues_after=QUEUE_DEPTHS_ADAPTER.validate_python(queues_after),
+        started_at=require_datetime(values=values, key="started_at"),
+        activated_at=optional_datetime(values=values, key="activated_at"),
+        closed_at=optional_datetime(values=values, key="closed_at"),
+        closed_by=optional_str(values=values, key="closed_by"),
+    )
+
+
 def event_from_row(*, row: object) -> Event:
     """Convert a row to Event."""
     values = filter_row_values(values=row_values(row=row))
@@ -2667,6 +2864,14 @@ def optional_int(*, values: dict[str, object], key: str) -> int | None:
     if value is None or isinstance(value, int):
         return value
     raise TypeError(f"Expected {key} to be int or None, found {type(value).__name__}.")
+
+
+def optional_bool(*, values: dict[str, object], key: str) -> bool | None:
+    """Return a nullable boolean field from row values."""
+    value = values[key]
+    if value is None or isinstance(value, bool):
+        return value
+    raise TypeError(f"Expected {key} to be bool or None, found {type(value).__name__}.")
 
 
 def require_datetime(*, values: dict[str, object], key: str) -> datetime:

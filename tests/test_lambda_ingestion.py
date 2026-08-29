@@ -261,6 +261,35 @@ async def test_lambda_persists_reference_and_reconciles_schedules(
 
 
 @pytest.mark.asyncio
+async def test_reference_maintenance_persists_without_schedule_reconciliation(
+    lambda_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStore()
+    store.is_maintenance_active = True
+    bundle = reference_bundle()
+    message, payload = collected_message(bundle=bundle)
+    lambda_module.S3.payload = payload
+    lambda_module.REPOSITORY = store
+
+    async def unexpected_reconciliation(**parameters: object) -> object:
+        del parameters
+        raise AssertionError("maintenance must suppress reconciliation")
+
+    monkeypatch.setattr(
+        lambda_module,
+        "reconcile_schedules",
+        unexpected_reconciliation,
+    )
+    result = await lambda_module.process_collected_payload(
+        message=message,
+        now=datetime(2025, 8, 1, tzinfo=UTC),
+    )
+    assert result == {"status": "reference_ingested", "job_kind": "reference"}
+    assert await store.get_current_season() is not None
+
+
+@pytest.mark.asyncio
 async def test_lambda_persists_live_and_enqueues_continuation(
     lambda_module: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -323,6 +352,47 @@ async def test_lambda_persists_live_and_enqueues_continuation(
     )
     assert result == {"status": "live_ingested", "job_kind": "live"}
     assert delays == [15]
+
+
+@pytest.mark.asyncio
+async def test_live_maintenance_persists_without_enqueuing_continuation(
+    lambda_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStore()
+    await IngestionService(
+        client=FakeClient(), repository=store
+    ).ingest_reference_once()
+    store.is_maintenance_active = True
+    now = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    job = LiveJob(
+        version=1,
+        kind="live",
+        season_id="2025-26",
+        event_id=1,
+        window_start=now - timedelta(minutes=10),
+        window_end=now + timedelta(hours=3),
+    )
+    bundle = LivePayloadBundle(
+        version=2,
+        kind="live",
+        job=job,
+        fetched_at=now,
+        event_status={"status": []},
+        current_fixtures=[],
+        event_live={"elements": []},
+    )
+    message, payload = collected_message(bundle=bundle)
+    lambda_module.S3.payload = payload
+    lambda_module.REPOSITORY = store
+
+    async def unexpected_requeue(**parameters: object) -> None:
+        del parameters
+        raise AssertionError("maintenance must suppress live continuation")
+
+    monkeypatch.setattr(lambda_module, "requeue_live_job", unexpected_requeue)
+    result = await lambda_module.process_collected_payload(message=message, now=now)
+    assert result == {"status": "live_ingested", "job_kind": "live"}
 
 
 @pytest.mark.asyncio

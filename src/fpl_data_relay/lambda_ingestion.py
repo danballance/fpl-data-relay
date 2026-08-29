@@ -179,21 +179,30 @@ async def process_collected_payload(
             event_status=event_status,
             fetched_at=bundle.fetched_at,
         )
-        season = await REPOSITORY.get_current_season()
-        if season is None:
-            raise RuntimeError("Reference ingestion did not create a current season.")
-        fixtures = await read_all_fixtures(season_id=season.id)
-        windows, missing_ids = build_match_windows(
-            season_id=season.id,
-            fixtures=fixtures,
-            now=now,
+        maintenance_active = await REPOSITORY.maintenance_active()
+        schedule_result = ScheduleReconciliationResult(
+            created_count=0,
+            updated_count=0,
+            deleted_count=0,
         )
-        for fixture_id in missing_ids:
-            LOGGER.warning(
-                "fixture_missing_schedule_data",
-                extra={"fixture_id": fixture_id, "season_id": season.id},
+        if not maintenance_active:
+            season = await REPOSITORY.get_current_season()
+            if season is None:
+                raise RuntimeError(
+                    "Reference ingestion did not create a current season.",
+                )
+            fixtures = await read_all_fixtures(season_id=season.id)
+            windows, missing_ids = build_match_windows(
+                season_id=season.id,
+                fixtures=fixtures,
+                now=now,
             )
-        schedule_result = await reconcile_schedules(windows=windows, now=now)
+            for fixture_id in missing_ids:
+                LOGGER.warning(
+                    "fixture_missing_schedule_data",
+                    extra={"fixture_id": fixture_id, "season_id": season.id},
+                )
+            schedule_result = await reconcile_schedules(windows=windows, now=now)
         LOGGER.info(
             "ingestion_completed",
             extra={
@@ -208,6 +217,7 @@ async def process_collected_payload(
                 "schedules_created": schedule_result.created_count,
                 "schedules_updated": schedule_result.updated_count,
                 "schedules_deleted": schedule_result.deleted_count,
+                "maintenance_active": maintenance_active,
             },
         )
         return {"status": "reference_ingested", "job_kind": bundle.job.kind}
@@ -242,11 +252,16 @@ async def process_collected_payload(
         if delay is not None:
             await requeue_live_job(job=bundle.job, delay_seconds=delay)
         return {"status": "database_waking", "job_kind": bundle.job.kind}
-    delay = next_live_delay(
-        job=bundle.job,
-        now=now,
-        has_active_fixture=result.has_active_fixture,
-        database_waking=False,
+    maintenance_active = await REPOSITORY.maintenance_active()
+    delay = (
+        None
+        if maintenance_active
+        else next_live_delay(
+            job=bundle.job,
+            now=now,
+            has_active_fixture=result.has_active_fixture,
+            database_waking=False,
+        )
     )
     if delay is not None:
         await requeue_live_job(job=bundle.job, delay_seconds=delay)
@@ -270,6 +285,7 @@ async def process_collected_payload(
             "schedules_created": 0,
             "schedules_updated": 0,
             "schedules_deleted": 0,
+            "maintenance_active": maintenance_active,
         },
     )
     return {"status": "live_ingested", "job_kind": bundle.job.kind}

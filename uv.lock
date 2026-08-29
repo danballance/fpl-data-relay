@@ -341,6 +341,10 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+admin = [
+    { name = "boto3" },
+    { name = "typer" },
+]
 aws = [
     { name = "boto3" },
     { name = "fastapi" },
@@ -386,6 +390,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+admin = [
+    { name = "boto3", specifier = ">=1.42.0" },
+    { name = "typer", specifier = ">=0.20.0" },
+]
 aws = [
     { name = "boto3", specifier = ">=1.42.0" },
     { name = "fastapi", specifier = ">=0.135.0" },

@@ -55,6 +55,7 @@ Run `make` or `make help` for the complete command list. The main workflows are:
 | `make local-client` | Run only the local Vite development client. |
 | `make local-logs` | Follow local API and PostgreSQL logs. |
 | `make local-db-status` | Show applied and pending local migrations. |
+| `make aws-profile-onboard` | Bootstrap, authenticate, and verify the production AWS administrator profile. |
 | `make lint` | Run all Python and client static checks. |
 | `make test` | Run Python and client coverage suites. |
 | `make check` | Run the normal backend and client quality gate. |
@@ -74,3 +75,4 @@ contains no deployment target.
 - [React client](docs/client.md)
 - [AWS deployment and recovery](docs/deployment.md)
 - [NAS collector](docs/collector.md)
+- [Production administration](docs/administration.md)
