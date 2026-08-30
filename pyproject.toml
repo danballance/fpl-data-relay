@@ -13,6 +13,7 @@ dependencies = [
 fpl-relay = "fpl_data_relay.bootstrap:app"
 fpl-collector = "fpl_data_relay.collector_cli:app"
 fpl-admin = "fpl_data_relay.admin_bootstrap:app"
+fpl-tui = "fpl_data_relay.tui_bootstrap:app"
 
 [dependency-groups]
 aws = [
@@ -32,6 +33,7 @@ collector = [
 ]
 admin = [
     "boto3>=1.42.0",
+    "textual>=8.2.8",
     "typer>=0.20.0",
 ]
 community = [
@@ -51,6 +53,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.0",
+    "textual>=8.2.8",
     "typer>=0.20.0",
     "trafilatura>=2.1.0",
     "ty>=0.0.1a23",

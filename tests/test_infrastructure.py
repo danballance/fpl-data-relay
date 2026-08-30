@@ -261,46 +261,22 @@ def test_nas_compose_is_hardened_and_uses_direct_immutable_identity() -> None:
     assert "source_profile" not in aws_config
 
 
-def test_administration_configuration_and_example_policy_are_nonsecret() -> None:
+def test_administration_configuration_is_nonsecret_and_externally_managed() -> None:
     example = (ROOT / ".admin.env.example").read_text()
-    policy_text = (ROOT / "deploy/admin-policy.example.json").read_text()
-    policy = json.loads(policy_text)
-    bootstrap = (
-        ROOT
-        / "src/fpl_data_relay/adapters/outbound/aws_profile_bootstrap.py"
-    ).read_text()
-    profile = (
-        ROOT / "src/fpl_data_relay/adapters/outbound/aws_profile.py"
-    ).read_text()
     guide = (ROOT / "docs/administration.md").read_text()
+    normalized_guide = " ".join(guide.split())
     helper = (
         ROOT / "src/fpl_data_relay/adapters/outbound/nas_admin.sh"
     ).read_text()
 
-    assert "FPL_ADMIN_AWS_PROFILE=fpl-relay-admin" in example
+    assert "FPL_ADMIN_AWS_PROFILE=default" in example
     assert "FPL_ADMIN_NAS_SSH_TARGET=fpl-nas" in example
+    assert "FPL_ADMIN_AWS_ACCOUNT_ID" not in example
     assert "SECRET_ACCESS_KEY" not in example
-    actions = {
-        action
-        for statement in policy["Statement"]
-        for action in (
-            statement["Action"]
-            if isinstance(statement["Action"], list)
-            else [statement["Action"]]
-        )
-    }
-    assert "cloudformation:DescribeStacks" in actions
-    assert "scheduler:UpdateSchedule" in actions
-    assert "signin:AuthorizeOAuth2Access" not in actions
-    assert "signin:CreateOAuth2Token" not in actions
-    assert "sqs:PurgeQueue" not in actions
-    assert "sqs:DeleteMessage" not in actions
-    assert "REPLACE_ACCOUNT_ID" not in policy_text
-    assert "757771412865" in policy_text
-    assert "SignInLocalDevelopmentAccess" in profile
-    assert "make aws-profile-onboard" in guide
-    assert "There are no account-ID placeholders to edit" in guide
-    assert "cannot grant" in bootstrap
+    assert not (ROOT / "deploy/admin-policy.example.json").exists()
+    assert "configured and authenticated externally" in normalized_guide
+    assert "never create, edit, log in to, log out of, or" in normalized_guide
+    assert "make aws-profile-" not in guide
     assert "COLLECTOR_IMAGE_TAG" in helper
     assert "backup" in helper
 
@@ -312,6 +288,7 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     assert ".DEFAULT_GOAL := help" in makefile
     for target in (
         "help",
+        "tui",
         "doctor",
         "install",
         "setup",
@@ -323,12 +300,6 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
         "local-down",
         "local-db-status",
         "local-db-migrate",
-        "aws-profile-bootstrap",
-        "aws-profile-setup",
-        "aws-profile-onboard",
-        "aws-profile-login",
-        "aws-profile-status",
-        "aws-profile-logout",
         "aws-doctor",
         "aws-status",
         "aws-app-revision",
@@ -380,6 +351,13 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
         "db-apply",
         "deploy",
         "deploy-status",
+        "aws-profile-bootstrap",
+        "aws-profile-setup",
+        "aws-profile-onboard",
+        "aws-profile-login",
+        "aws-profile-status",
+        "aws-profile-logout",
+        "prepare-admin-env",
     ):
         assert not re.search(
             rf"^{re.escape(removed_target)}:",
@@ -404,10 +382,17 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     assert "nas-*" in makefile
     assert "prod-*" in makefile
     assert "fpl-admin --config .admin.env" in makefile
-    assert "AWS CLI >= 2.32" in makefile
+    assert "AWS CLI" in makefile
+    assert "AWS CLI >= 2.32" not in makefile
     assert "uv run aws --version" in makefile
-    assert "created .admin.env from .admin.env.example" in makefile
-    assert "AWS administrator onboarding complete" in makefile
+    assert "aws-profile-" not in makefile
+    assert "prepare-admin-env" not in makefile
+    public_targets = re.findall(
+        r"^[a-zA-Z0-9_-]+:.*## ",
+        makefile,
+        re.MULTILINE,
+    )
+    assert len(public_targets) == 50
     assert "GitHub Actions" in makefile
     assert "gh workflow run" not in makefile
     assert "sam deploy" not in makefile
@@ -444,54 +429,36 @@ def test_makefile_separates_local_and_ci_control_surfaces() -> None:
     assert "docker build" not in workflow
 
 
-def test_aws_profile_setup_creates_but_never_overwrites_admin_config(
+def test_aws_commands_require_but_never_create_admin_config(
     tmp_path: Path,
 ) -> None:
-    example = "FPL_ADMIN_AWS_PROFILE=fpl-relay-admin\n"
-    (tmp_path / ".admin.env.example").write_text(example)
     command = [
         "make",
         "--file",
         str(ROOT / "Makefile"),
-        "aws-profile-setup",
+        "aws-doctor",
         "ADMIN=true",
     ]
 
-    first = subprocess.run(
+    missing = subprocess.run(
         command,
         cwd=tmp_path,
         text=True,
         capture_output=True,
         check=False,
     )
-    assert first.returncode == 0, first.stderr
-    assert (tmp_path / ".admin.env").read_text() == example
+    assert missing.returncode != 0
+    assert ".admin.env is required" in missing.stderr
+    assert not (tmp_path / ".admin.env").exists()
 
-    existing = "FPL_ADMIN_AWS_PROFILE=custom-admin\n"
+    existing = "FPL_ADMIN_AWS_PROFILE=default\n"
     (tmp_path / ".admin.env").write_text(existing)
-    second = subprocess.run(
+    configured = subprocess.run(
         command,
         cwd=tmp_path,
         text=True,
         capture_output=True,
         check=False,
     )
-    assert second.returncode == 0, second.stderr
-    assert (tmp_path / ".admin.env").read_text() == existing
-
-    onboard = subprocess.run(
-        [
-            "make",
-            "--file",
-            str(ROOT / "Makefile"),
-            "aws-profile-onboard",
-            "ADMIN=true",
-        ],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert onboard.returncode == 0, onboard.stderr
-    assert "AWS administrator onboarding complete" in onboard.stdout
+    assert configured.returncode == 0, configured.stderr
     assert (tmp_path / ".admin.env").read_text() == existing

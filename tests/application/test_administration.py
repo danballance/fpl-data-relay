@@ -9,6 +9,11 @@ from fpl_data_relay.application.administration import (
 )
 from fpl_data_relay.application.jobs import LiveJob
 from fpl_data_relay.application.ports.administration import (
+    AdministrationProgress,
+    AdministrationWorkflow,
+    AdministrationWorkflowProgress,
+    AdministrationWorkflowStep,
+    AdministrationWorkflowStepState,
     AwsAdministration,
     AwsIdentity,
     AwsResources,
@@ -19,6 +24,8 @@ from fpl_data_relay.application.ports.administration import (
     NasCollectorStatus,
     ProductionAdministrationDatabase,
     QueueDepth,
+    QueueDrainProgress,
+    QueueDrainStage,
     ScheduleSnapshot,
     ScheduleState,
     ScheduleTargetSnapshot,
@@ -416,8 +423,15 @@ def test_queue_drain_requires_stable_zero_and_times_out() -> None:
         database=FakeDatabase(),
         fake_time=fake_time,
     )
-    assert admin.drain_queues()[0].total == 0
+    events: list[AdministrationProgress] = []
+    assert admin.drain_queues_with_progress(
+        stage=QueueDrainStage.STANDALONE,
+        progress=events.append,
+    )[0].total == 0
     assert fake_time.value == 6
+    samples = [event for event in events if isinstance(event, QueueDrainProgress)]
+    assert [sample.stable_for_seconds for sample in samples] == [0, 0, 2, 4]
+    assert all(sample.stage is QueueDrainStage.STANDALONE for sample in samples)
 
     busy_aws = FakeAws()
     busy_aws.default_depths = [queue_depth(name="fetch", total=1)]
@@ -441,7 +455,7 @@ async def test_status_doctors_schema_and_strict_job_sends() -> None:
         database=database,
         fake_time=FakeTime(),
     )
-    admin.aws_doctor()
+    assert admin.aws_doctor().arn == "arn:operator"
     admin.nas_doctor()
     status = await admin.production_status()
     assert status.collector.running is True
@@ -472,12 +486,18 @@ async def test_maintenance_begin_and_end_restores_prior_state() -> None:
         database=database,
         fake_time=FakeTime(),
     )
-    active = await admin.begin_production_maintenance(reason="schema work")
+    events: list[AdministrationProgress] = []
+    active = await admin.begin_production_maintenance_with_progress(
+        reason="schema work",
+        progress=events.append,
+    )
     assert active.phase is MaintenancePhase.ACTIVE
     assert nas.actions == ["stop"]
     assert all(change[1] is ScheduleState.DISABLED for change in aws.state_changes)
 
-    closed = await admin.end_production_maintenance()
+    closed = await admin.end_production_maintenance_with_progress(
+        progress=events.append,
+    )
     assert closed.phase is MaintenancePhase.CLOSED
     assert nas.actions == ["stop", "start"]
     assert aws.fetch_messages
@@ -485,6 +505,47 @@ async def test_maintenance_begin_and_end_restores_prior_state() -> None:
         change for change in aws.state_changes if change[0].startswith("fpl-live-")
     )
     assert live_restore[1] is ScheduleState.DISABLED
+    steps = [
+        event for event in events if isinstance(event, AdministrationWorkflowProgress)
+    ]
+    assert any(
+        event.workflow is AdministrationWorkflow.BEGIN_MAINTENANCE
+        and event.step is AdministrationWorkflowStep.STOP_COLLECTOR
+        and event.state is AdministrationWorkflowStepState.COMPLETED
+        for event in steps
+    )
+    assert any(
+        event.workflow is AdministrationWorkflow.END_MAINTENANCE
+        and event.step is AdministrationWorkflowStep.RESTORE_SCHEDULES
+        and event.state is AdministrationWorkflowStepState.COMPLETED
+        for event in steps
+    )
+
+
+@pytest.mark.asyncio
+async def test_maintenance_progress_reports_failed_step() -> None:
+    aws = FakeAws()
+    aws.default_depths = [queue_depth(name="fetch-dead-letter", total=1)]
+    admin = service(
+        aws=aws,
+        nas=FakeNas(running=True),
+        database=FakeDatabase(),
+        fake_time=FakeTime(),
+    )
+    events: list[AdministrationProgress] = []
+    with pytest.raises(RuntimeError, match="require review"):
+        await admin.begin_production_maintenance_with_progress(
+            reason="schema work",
+            progress=events.append,
+        )
+    failure = next(
+        event
+        for event in events
+        if isinstance(event, AdministrationWorkflowProgress)
+        and event.state is AdministrationWorkflowStepState.FAILED
+    )
+    assert failure.step is AdministrationWorkflowStep.CHECK_DEAD_LETTERS
+    assert failure.detail is not None
 
 
 @pytest.mark.asyncio

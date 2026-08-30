@@ -8,13 +8,6 @@ from fpl_data_relay.adapters.inbound.cli.admin import create_admin_app
 from fpl_data_relay.adapters.outbound.aws_administration import (
     AwsBotoAdministration,
 )
-from fpl_data_relay.adapters.outbound.aws_profile import (
-    AwsConsoleProfileAdministration,
-    SubprocessAwsCliRunner,
-)
-from fpl_data_relay.adapters.outbound.aws_profile_bootstrap import (
-    AwsIamProfileBootstrapAdministration,
-)
 from fpl_data_relay.adapters.outbound.nas_administration import (
     NasSshAdministration,
 )
@@ -22,8 +15,6 @@ from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
 from fpl_data_relay.application.administration import AdministrationService
 from fpl_data_relay.application.ports.administration import (
     AwsAdministration,
-    AwsProfileAdministration,
-    AwsProfileBootstrapAdministration,
     NasAdministration,
     ProductionAdministrationDatabase,
 )
@@ -39,17 +30,6 @@ class ProductionAdminRuntime:
         settings: AdminSettings,
     ) -> None:
         self.settings = settings
-        runner = SubprocessAwsCliRunner()
-        self.profile: AwsProfileAdministration = AwsConsoleProfileAdministration(
-            settings=settings,
-            runner=runner,
-        )
-        self.profile_bootstrap: AwsProfileBootstrapAdministration = (
-            AwsIamProfileBootstrapAdministration(
-                settings=settings,
-                runner=runner,
-            )
-        )
         self._aws: AwsBotoAdministration | None = None
         self._nas: NasSshAdministration | None = None
         self._database: PostgresDatabase | None = None
@@ -57,7 +37,7 @@ class ProductionAdminRuntime:
 
     @property
     def aws(self) -> AwsAdministration:
-        """Construct AWS control-plane clients only after profile bootstrap."""
+        """Construct AWS control-plane clients from the configured profile."""
         return self._aws_adapter()
 
     @property

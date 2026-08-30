@@ -13,8 +13,8 @@ class SchemaUnavailableError(RuntimeError):
     """The database schema is missing or incompatible."""
 
 
-class AwsProfileError(RuntimeError):
-    """The local AWS CLI profile is missing, conflicting, or unauthenticated."""
+class AwsConnectionError(RuntimeError):
+    """The configured AWS profile cannot provide a usable connection."""
 
 
 class CommunityConfigurationError(RuntimeError):

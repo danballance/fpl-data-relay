@@ -16,7 +16,6 @@ def settings() -> AdminSettings:
         {
             "aws_profile": "admin",
             "aws_region": "eu-west-2",
-            "aws_account_id": "123456789012",
             "data_stack_name": "data",
             "app_stack_name": "app",
             "nas_ssh_target": "relay@nas",

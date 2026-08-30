@@ -3,98 +3,86 @@
 The root Makefile is the supported local control surface for production
 operations. Its prefixes describe where the effect occurs:
 
-- `aws-*` runs locally using the dedicated AWS profile and changes or inspects
-  AWS production resources.
+- `aws-*` runs locally using the profile configured in `.admin.env` and changes
+  or inspects AWS production resources.
 - `nas-*` runs locally and controls the collector on the NAS over SSH.
 - `prod-*` runs locally and coordinates both AWS and the NAS.
 - Deployment remains exclusively in the **Deploy production** GitHub Actions
   workflow. There are no Make deployment targets.
 
+## Interactive console
+
+Run the developer and production terminal interface from the repository root:
+
+```fish
+make tui
+```
+
+The console covers every operational target displayed by `make help`; `tui`
+itself is the launcher exemption. It presents
+typed AWS, database, queue, schedule, maintenance, and collector results as
+tables and detail views; local development and quality targets retain their
+native output in a managed task log. `Ctrl+P` searches by the exact Make target
+name, `r` refreshes the active remote page, `?` opens help, and `q` exits when
+no write or managed process is active. The minimum supported terminal is 80 by
+24; below 110 columns the sidebar collapses into a selector. Remote state is
+never polled automatically.
+
+Long-running `local-dev`, `local-client`, and `local-logs` processes remain
+active while navigating. **Stop** sends `SIGINT`; if the process remains alive
+for five seconds, a second explicit confirmation can send `SIGTERM`. The
+console never sends `SIGKILL` automatically.
+
+TUI mutations run directly after any required reason, revision, queue, or state
+file input has been collected. Only one write or local task can run at a time,
+and the application cannot exit while one is active. Make and Typer retain the
+literal `production` confirmation for production writes. A failed refresh
+preserves the last successful snapshot, labels it stale, and displays the exact
+failure without retrying.
+
+Raw console history is retained in rotating JSONL files under
+`.admin-state/tui/`. The directory and files are owner-only, but the content is
+still sensitive: it includes complete subprocess output, NAS log text, and DLQ
+message bodies. Five files of at most 10 MiB each are retained. Environment
+file contents, credentials not printed by an underlying command, keystrokes,
+and form input keystrokes are not recorded.
+
+Make and `fpl-admin` remain available for automation and recovery. The TUI does
+not expose deployment, hidden Make helpers, arbitrary shell commands, or the
+unwrapped server and collector entry points.
+
 ## Initial setup
 
-The toolkit uses AWS CLI console login, which provides temporary credentials
-through the browser without storing access keys. AWS CLI 2.32 or newer is
-required. Run the composed onboarding workflow:
+Copy the non-secret administration settings and select the AWS profile already
+configured on this machine:
 
 ```fish
-make aws-profile-onboard
+cp .admin.env.example .admin.env
 ```
 
-If `.admin.env` does not exist, this copies `.admin.env.example` once; an
-existing file is never overwritten. The command prints the one root-of-trust
-step it cannot perform, then asks for:
+`FPL_ADMIN_AWS_PROFILE` is explicit and defaults to `default` in the example.
+The AWS SDK resolves that profile through the normal shared AWS configuration
+and credentials files. Static credentials, IAM Identity Center, role-based
+profiles, and other supported AWS SDK mechanisms are all configured and
+authenticated externally.
 
-1. The name of a separately authenticated bootstrap AWS CLI profile.
-2. Whether the target console identity is an IAM `user`, `group`, or `role`.
-3. The target IAM principal name.
-4. The literal confirmation `production`.
+The administration CLI and TUI never create, edit, log in to, log out of, or
+delete AWS profiles. They never write credentials or create, attach, or update
+IAM policies. The selected identity and its required IAM permissions are
+assumed to have been provisioned already. `.admin.env` contains only non-secret
+application settings and is required for production operations.
 
-The bootstrap profile must already have permission to inspect the two relay
-stacks, create and version a customer-managed policy, and attach managed
-policies to the selected principal. An unauthenticated program cannot grant
-itself this initial authority. If no such profile exists, ask an AWS account
-administrator to grant those temporary bootstrap permissions through the
-approved console or infrastructure process, authenticate that identity under a
-separate named AWS CLI profile, and verify it with:
+Verify the live identity and access to the configured relay resources:
 
 ```fish
-aws sts get-caller-identity --profile PROFILE_NAME
-```
-
-The CLI prints the exact required IAM actions before prompting and repeats the
-instructions when bootstrap authentication or authorization fails. It verifies
-that the bootstrap caller is in account `757771412865`; no profile is selected
-implicitly. Entering `default` uses that profile only because the operator
-explicitly named it, and the toolkit never changes its configuration.
-
-The bootstrap operation attaches AWS's managed
-`SignInLocalDevelopmentAccess` policy. It also reads the deployed
-CloudFormation queue and database outputs, generates an account-specific
-`FplRelayAdministrator` policy, and attaches it idempotently. Fixed schedule
-identities and the bounded `fpl-live-*` schedule prefix are derived from the
-configured application stack name, matching the names declared by the relay
-template. The toolkit therefore does not depend on administrator-specific
-outputs having already been deployed. The generated policy is versioned only
-when its content changes. There are no account-ID placeholders to edit.
-
-After successful onboarding, the CLI reminds the operator to ask the account
-administrator to remove any IAM-management access that was granted to the
-bootstrap identity only for this operation. The toolkit cannot safely remove an
-unknown external grant itself.
-
-`deploy/admin-policy.example.json` is an illustrative review artifact only;
-the CLI-generated policy is the operational source of truth. The command does
-not read credentials, put credentials in `.admin.env`, or modify IAM Identity
-Center.
-
-After bootstrap, onboarding configures the dedicated `fpl-relay-admin` profile
-for `eu-west-2`, opens AWS console login in the local browser, verifies account
-`757771412865`, and runs the AWS doctor check. Review `.admin.env` after its
-first creation; it contains no credentials. NAS authentication remains in
-OpenSSH configuration.
-
-The individual onboarding primitives remain available:
-
-```fish
-make aws-profile-bootstrap
-make aws-profile-setup
 make aws-doctor
 ```
 
-Manage the temporary session with:
-
-```fish
-make aws-profile-status
-make aws-profile-login
-make aws-profile-logout
-```
-
-`aws-profile-setup` resumes a partial previous setup and refreshes an existing
-console-login profile. It refuses to overwrite access-key, IAM Identity Center,
-assume-role, web-identity, or credential-process profiles. If AWS login returns
-HTTP 400, run `make aws-profile-bootstrap`, confirm the selected console
-identity received AWS's `SignInLocalDevelopmentAccess` managed policy, then
-retry. Do not use `aws sso login` for this console-login profile.
+If validation fails, correct or authenticate the selected profile with your
+usual AWS tooling, then run the doctor again. The doctor reports the identity
+that AWS actually returns; the TUI shows the same live account and principal
+when production state is refreshed. NAS authentication remains in OpenSSH
+configuration.
 
 The NAS SSH target should be an alias in `~/.ssh/config`. The remote account
 must be able to run the configured Docker and Docker Compose executables without
@@ -103,7 +91,6 @@ an interactive prompt.
 Validate each boundary:
 
 ```fish
-make aws-profile-status
 make aws-doctor
 make nas-doctor
 make prod-doctor

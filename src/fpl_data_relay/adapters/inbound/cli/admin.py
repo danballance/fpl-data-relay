@@ -4,29 +4,29 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Protocol, cast
+from typing import Annotated, Protocol, assert_never, cast
 
 import typer
 
 from fpl_data_relay.application.administration import AdministrationService
-from fpl_data_relay.application.errors import AwsProfileError
+from fpl_data_relay.application.administration_facade import AdministrationFacade
 from fpl_data_relay.application.ports.administration import (
+    AdministrationProgress,
+    AdministrationReason,
+    AdministrationWorkflowProgress,
     AwsAdministration,
-    AwsIamPrincipalType,
-    AwsProfileAdministration,
-    AwsProfileBootstrapAdministration,
-    AwsProfileBootstrapStatus,
-    AwsProfileStatus,
+    DeadLetterPeekRequest,
+    DeadLetterQueueName,
+    GitShaRequest,
     MaintenanceWindow,
     NasAdministration,
+    NasLogsRequest,
     ProductionAdministrationDatabase,
     QueueDepth,
+    QueueDrainProgress,
     ScheduleSnapshot,
+    ScheduleStateFileRequest,
     SchemaStatus,
-)
-from fpl_data_relay.application.schedule_bootstrap import (
-    pause_schedules_to_snapshot,
-    restore_schedules_from_snapshot,
 )
 from fpl_data_relay.config import AdminSettings
 
@@ -38,14 +38,26 @@ class AdminRuntime(Protocol):
 
     settings: AdminSettings
     service: AdministrationService
-    profile: AwsProfileAdministration
-    profile_bootstrap: AwsProfileBootstrapAdministration
     aws: AwsAdministration
     nas: NasAdministration
     database: ProductionAdministrationDatabase
 
 
 type AdminRuntimeFactory = Callable[[Path], AdminRuntime]
+
+
+def build_administration_facade(*, runtime: AdminRuntime) -> AdministrationFacade:
+    """Build a presentation-neutral façade around one injected CLI runtime."""
+    return AdministrationFacade(
+        service_factory=lambda: runtime.service,
+        aws_factory=lambda: runtime.aws,
+        nas_factory=lambda: runtime.nas,
+        database_factory=lambda: runtime.database,
+        aws_profile=runtime.settings.aws_profile,
+        aws_region=runtime.settings.aws_region,
+        app_stack_name=runtime.settings.app_stack_name,
+        clock=lambda: datetime.now(tz=UTC),
+    )
 
 
 def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
@@ -71,107 +83,46 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         context.obj = runtime_factory(config)
 
-    @aws_app.command("profile-bootstrap")
-    def aws_profile_bootstrap(context: typer.Context) -> None:
-        """Generate and attach the sign-in and relay administration policies."""
-        runtime = admin_runtime(context=context)
-        typer.echo(runtime.profile_bootstrap.instructions())
-        typer.echo(
-            f"Configured target account: {runtime.settings.aws_account_id} "
-            f"({runtime.settings.aws_region})",
-        )
-        bootstrap_profile = typer.prompt(
-            "Existing authenticated bootstrap AWS profile",
-        ).strip()
-        raw_principal_type = typer.prompt(
-            "Target IAM principal type (user, group, or role)",
-        ).strip()
-        try:
-            principal_type = AwsIamPrincipalType(raw_principal_type)
-        except ValueError as error:
-            raise typer.BadParameter(
-                "IAM principal type must be user, group, or role.",
-                param_hint="principal type",
-            ) from error
-        principal_name = typer.prompt("Target IAM principal name").strip()
-        confirm = typer.prompt("Type 'production' to attach IAM policies").strip()
-        require_production_confirmation(confirm=confirm)
-        echo_aws_profile_bootstrap(
-            status=run_profile_operation(
-                operation=lambda: runtime.profile_bootstrap.bootstrap(
-                    bootstrap_profile=bootstrap_profile,
-                    principal_type=principal_type,
-                    principal_name=principal_name,
-                ),
-            ),
-        )
-
-    @aws_app.command("profile-setup")
-    def aws_profile_setup(context: typer.Context) -> None:
-        """Configure, authenticate, and verify the console-login profile."""
-        runtime = admin_runtime(context=context)
-        echo_aws_profile(
-            status=run_profile_operation(operation=runtime.profile.setup),
-        )
-
-    @aws_app.command("profile-login")
-    def aws_profile_login(context: typer.Context) -> None:
-        """Renew and verify the configured console-login profile."""
-        runtime = admin_runtime(context=context)
-        echo_aws_profile(
-            status=run_profile_operation(operation=runtime.profile.login),
-        )
-
-    @aws_app.command("profile-status")
-    def aws_profile_status(context: typer.Context) -> None:
-        """Show the configured profile's verified authentication state."""
-        runtime = admin_runtime(context=context)
-        echo_aws_profile(
-            status=run_profile_operation(operation=runtime.profile.status),
-        )
-
-    @aws_app.command("profile-logout")
-    def aws_profile_logout(context: typer.Context) -> None:
-        """Remove cached login credentials for only the configured profile."""
-        runtime = admin_runtime(context=context)
-        run_profile_operation(operation=runtime.profile.logout)
-        typer.echo(
-            f"profile={runtime.settings.aws_profile} authenticated=false",
-        )
-
     @aws_app.command("doctor")
     def aws_doctor(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.service.aws_doctor()
+        result = build_administration_facade(runtime=runtime).aws_doctor()
+        connection = result.connection
+        typer.echo(
+            f"profile={connection.profile_name} region={connection.region} "
+            f"account={connection.account_id} operator={connection.arn}",
+        )
         typer.echo("AWS administration checks passed")
 
     @aws_app.command("app-revision")
     def aws_app_revision(context: typer.Context) -> None:
         """Show the immutable revision exposed by the application stack."""
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        typer.echo(f"deployed_revision={runtime.aws.app_deployed_revision()}")
+        revision = build_administration_facade(runtime=runtime).deployed_revision()
+        typer.echo(f"deployed_revision={revision.revision}")
 
     @aws_app.command("status")
     def aws_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        identity = runtime.aws.identity()
-        typer.echo(f"account={identity.account_id} operator={identity.arn}")
-        runtime.aws.resources()
-        echo_schema(status=asyncio.run(runtime.database.schema_status()))
-        echo_maintenance(
-            window=asyncio.run(runtime.service.latest_maintenance()),
+        snapshot = asyncio.run(
+            build_administration_facade(runtime=runtime).aws_snapshot(),
         )
-        echo_queues(
-            depths=runtime.aws.queue_depths(include_dead_letters=True),
+        typer.echo(
+            f"profile={snapshot.connection.profile_name} "
+            f"region={snapshot.connection.region} "
+            f"account={snapshot.connection.account_id} "
+            f"operator={snapshot.connection.arn}",
         )
-        echo_schedules(schedules=runtime.aws.schedule_snapshots())
+        echo_schema(status=snapshot.schema_status)
+        echo_maintenance(window=snapshot.maintenance)
+        echo_queues(depths=snapshot.queues)
+        echo_schedules(schedules=snapshot.schedules)
 
     @aws_app.command("db-status")
     def aws_db_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        echo_schema(status=asyncio.run(runtime.database.schema_status()))
+        facade = build_administration_facade(runtime=runtime)
+        echo_schema(status=asyncio.run(facade.schema_status()))
 
     @aws_app.command("db-migrate")
     def aws_db_migrate(
@@ -180,87 +131,83 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        echo_schema(status=asyncio.run(runtime.service.apply_schema()))
+        facade = build_administration_facade(runtime=runtime)
+        echo_schema(status=asyncio.run(facade.apply_schema()))
 
     @aws_app.command("queues-status")
     def aws_queues_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
+        facade = build_administration_facade(runtime=runtime)
         echo_queues(
-            depths=runtime.aws.queue_depths(include_dead_letters=False),
+            depths=facade.queue_depths(include_dead_letters=False),
         )
 
     @aws_app.command("queues-drain")
     def aws_queues_drain(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        echo_queues(depths=runtime.service.drain_queues())
+        facade = build_administration_facade(runtime=runtime)
+        echo_queues(
+            depths=facade.drain_queues(progress=echo_administration_progress),
+        )
         typer.echo("working queues are stably empty")
 
     @aws_app.command("dlqs-status")
     def aws_dlqs_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        echo_queues(
-            depths=[
-                depth
-                for depth in runtime.aws.queue_depths(include_dead_letters=True)
-                if "dead-letter" in depth.name
-            ],
-        )
+        facade = build_administration_facade(runtime=runtime)
+        echo_queues(depths=facade.dead_letter_depths())
 
     @aws_app.command("dlq-peek")
     def aws_dlq_peek(
         context: typer.Context,
-        queue: Annotated[str, typer.Option("--queue")],
+        queue: Annotated[DeadLetterQueueName, typer.Option("--queue")],
         max_messages: Annotated[
             int,
             typer.Option("--max-messages", min=1, max=10),
         ],
     ) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        messages = runtime.aws.peek_dead_letters(
-            queue_name=queue,
-            max_messages=max_messages,
+        facade = build_administration_facade(runtime=runtime)
+        result = facade.peek_dead_letters(
+            request=DeadLetterPeekRequest(
+                queue=queue,
+                max_messages=max_messages,
+            ),
         )
-        if not messages:
+        if not result.messages:
             typer.echo("no messages")
-        for index, body in enumerate(messages, start=1):
-            typer.echo(f"message[{index}]={body}")
+        for message in result.messages:
+            typer.echo(f"message[{message.position}]={message.body}")
 
     @aws_app.command("send-reference")
     def aws_send_reference(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        message_id = asyncio.run(
-            runtime.service.send_reference(allow_maintenance=False),
+        result = asyncio.run(
+            build_administration_facade(runtime=runtime).send_reference(),
         )
-        typer.echo(f"reference sent message_id={message_id}")
+        typer.echo(f"reference sent message_id={result.message_id}")
 
     @aws_app.command("send-live")
     def aws_send_live(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        message_id = asyncio.run(
-            runtime.service.send_current_live(allow_maintenance=False),
+        result = asyncio.run(
+            build_administration_facade(runtime=runtime).send_current_live(),
         )
-        typer.echo(f"live sent message_id={message_id}")
+        typer.echo(f"live sent message_id={result.message_id}")
 
     @aws_app.command("send-community")
     def aws_send_community(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        message_id = asyncio.run(
-            runtime.service.send_community(allow_maintenance=False),
+        result = asyncio.run(
+            build_administration_facade(runtime=runtime).send_community(),
         )
-        typer.echo(f"community dispatch sent message_id={message_id}")
+        typer.echo(f"community dispatch sent message_id={result.message_id}")
 
     @aws_app.command("schedules-status")
     def aws_schedules_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
-        echo_schedules(schedules=runtime.aws.schedule_snapshots())
+        facade = build_administration_facade(runtime=runtime)
+        echo_schedules(schedules=facade.schedule_snapshots())
 
     @aws_app.command("schedules-bootstrap-pause")
     def aws_schedules_bootstrap_pause(
@@ -271,12 +218,9 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
         """Snapshot and disable schedules before migration 0005 exists."""
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        snapshot = pause_schedules_to_snapshot(
-            aws=runtime.aws,
-            snapshot_path=state_file,
-            aws_region=runtime.settings.aws_region,
-            app_stack_name=runtime.settings.app_stack_name,
-            captured_at=datetime.now(tz=UTC),
+        facade = build_administration_facade(runtime=runtime)
+        snapshot = facade.pause_schedules_to_state_file(
+            request=ScheduleStateFileRequest(path=state_file),
         )
         typer.echo(
             f"schedule_snapshot={state_file} schedules={len(snapshot.schedules)} "
@@ -292,12 +236,9 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
         """Restore schedules captured by the migration 0005 bootstrap."""
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        snapshot = restore_schedules_from_snapshot(
-            aws=runtime.aws,
-            snapshot_path=state_file,
-            aws_region=runtime.settings.aws_region,
-            app_stack_name=runtime.settings.app_stack_name,
-            restored_at=datetime.now(tz=UTC),
+        facade = build_administration_facade(runtime=runtime)
+        snapshot = facade.restore_schedules_from_state_file(
+            request=ScheduleStateFileRequest(path=state_file),
         )
         typer.echo(
             f"schedule_snapshot={state_file} schedules={len(snapshot.schedules)} "
@@ -307,9 +248,9 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     @aws_app.command("maintenance-status")
     def aws_maintenance_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.aws.identity()
+        facade = build_administration_facade(runtime=runtime)
         echo_maintenance(
-            window=asyncio.run(runtime.service.latest_maintenance()),
+            window=asyncio.run(facade.latest_maintenance()),
         )
 
     @aws_app.command("schedules-pause")
@@ -320,10 +261,10 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         window = asyncio.run(
-            runtime.service.pause_schedules(
-                reason=reason,
-                collector_was_running=None,
+            facade.pause_schedules(
+                reason=AdministrationReason(reason=reason),
             ),
         )
         echo_maintenance(window=window)
@@ -335,8 +276,9 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         echo_maintenance(
-            window=asyncio.run(runtime.service.restore_schedules()),
+            window=asyncio.run(facade.restore_schedules()),
         )
 
     @aws_app.command("rebaseline-current")
@@ -347,10 +289,12 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         result = asyncio.run(
-            runtime.service.rebaseline_current(
-                reason=reason,
+            facade.rebaseline_current(
+                reason=AdministrationReason(reason=reason),
                 refresh_normalized_data=False,
+                progress=echo_administration_progress,
             ),
         )
         typer.echo(
@@ -363,13 +307,14 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     @nas_app.command("doctor")
     def nas_doctor(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.service.nas_doctor()
+        build_administration_facade(runtime=runtime).nas_doctor()
         typer.echo("NAS administration checks passed")
 
     @nas_app.command("status")
     def nas_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        echo_collector(status=runtime.nas.status())
+        facade = build_administration_facade(runtime=runtime)
+        echo_collector(status=facade.collector_status())
 
     @nas_app.command("start")
     def nas_start(
@@ -378,7 +323,8 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        echo_collector(status=runtime.nas.start())
+        facade = build_administration_facade(runtime=runtime)
+        echo_collector(status=facade.collector_start())
 
     @nas_app.command("stop")
     def nas_stop(
@@ -387,16 +333,19 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        echo_collector(status=runtime.nas.stop())
+        facade = build_administration_facade(runtime=runtime)
+        echo_collector(status=facade.collector_stop())
 
     @nas_app.command("logs")
     def nas_logs(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        typer.echo(
-            runtime.nas.logs(
+        facade = build_administration_facade(runtime=runtime)
+        result = facade.nas_logs(
+            request=NasLogsRequest(
                 tail_lines=runtime.settings.nas_log_tail_lines,
             ),
         )
+        typer.echo(result.output)
 
     @nas_app.command("update")
     def nas_update(
@@ -406,7 +355,10 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        echo_collector(status=runtime.nas.update(image_tag=f"sha-{sha}"))
+        facade = build_administration_facade(runtime=runtime)
+        echo_collector(
+            status=facade.collector_update(request=GitShaRequest(sha=sha)),
+        )
 
     @nas_app.command("rollback")
     def nas_rollback(
@@ -416,20 +368,23 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
-        echo_collector(status=runtime.nas.update(image_tag=f"sha-{sha}"))
+        facade = build_administration_facade(runtime=runtime)
+        echo_collector(
+            status=facade.collector_update(request=GitShaRequest(sha=sha)),
+        )
 
     @prod_app.command("doctor")
     def prod_doctor(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        runtime.service.aws_doctor()
-        runtime.service.nas_doctor()
-        asyncio.run(runtime.database.schema_status())
+        facade = build_administration_facade(runtime=runtime)
+        asyncio.run(facade.production_doctor())
         typer.echo("production administration checks passed")
 
     @prod_app.command("status")
     def prod_status(context: typer.Context) -> None:
         runtime = admin_runtime(context=context)
-        status = asyncio.run(runtime.service.production_status())
+        facade = build_administration_facade(runtime=runtime)
+        status = asyncio.run(facade.production_status())
         echo_schema(status=status.schema_status)
         echo_maintenance(window=status.maintenance)
         echo_queues(depths=status.queues)
@@ -444,9 +399,13 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         echo_maintenance(
             window=asyncio.run(
-                runtime.service.begin_production_maintenance(reason=reason),
+                facade.begin_production_maintenance(
+                    reason=AdministrationReason(reason=reason),
+                    progress=echo_administration_progress,
+                ),
             ),
         )
 
@@ -457,8 +416,13 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         echo_maintenance(
-            window=asyncio.run(runtime.service.end_production_maintenance()),
+            window=asyncio.run(
+                facade.end_production_maintenance(
+                    progress=echo_administration_progress,
+                ),
+            ),
         )
 
     @prod_app.command("rebaseline-current")
@@ -469,10 +433,12 @@ def create_admin_app(*, runtime_factory: AdminRuntimeFactory) -> typer.Typer:
     ) -> None:
         require_production_confirmation(confirm=confirm)
         runtime = admin_runtime(context=context)
+        facade = build_administration_facade(runtime=runtime)
         result = asyncio.run(
-            runtime.service.rebaseline_current(
-                reason=reason,
+            facade.rebaseline_current(
+                reason=AdministrationReason(reason=reason),
                 refresh_normalized_data=True,
+                progress=echo_administration_progress,
             ),
         )
         typer.echo(
@@ -501,46 +467,28 @@ def require_production_confirmation(*, confirm: str) -> None:
         )
 
 
-def run_profile_operation[Result](
-    *,
-    operation: Callable[[], Result],
-) -> Result:
-    """Render expected local profile failures without a Python traceback."""
-    try:
-        return operation()
-    except AwsProfileError as error:
-        typer.echo(str(error), err=True)
-        raise typer.Exit(code=1) from error
-
-
-def echo_aws_profile(*, status: AwsProfileStatus) -> None:
-    """Print verified profile state without credential material."""
-    typer.echo(
-        f"profile={status.profile_name} region={status.region} "
-        f"authentication={status.authentication} "
-        f"authenticated={str(status.authenticated).lower()} "
-        f"account={status.account_id} operator={status.arn}",
-    )
-
-
-def echo_aws_profile_bootstrap(*, status: AwsProfileBootstrapStatus) -> None:
-    """Print policy attachment state without credential material."""
-    typer.echo(
-        f"bootstrap_profile={status.bootstrap_profile} "
-        f"bootstrap_operator={status.bootstrap_arn}",
-    )
-    typer.echo(
-        f"target={status.principal_type.value}/{status.principal_name} "
-        f"sign_in_policy={status.sign_in_policy_arn}",
-    )
-    typer.echo(
-        f"relay_policy={status.relay_policy_arn} "
-        f"relay_policy_state={status.relay_policy_state.value}",
-    )
-    typer.echo(
-        "If the bootstrap identity received temporary IAM-management access, "
-        "ask the account administrator to remove that temporary grant now.",
-    )
+def echo_administration_progress(progress: AdministrationProgress) -> None:
+    """Render typed workflow and queue-drain progress for CLI operators."""
+    if isinstance(progress, AdministrationWorkflowProgress):
+        detail = "" if progress.detail is None else f" detail={progress.detail!r}"
+        typer.echo(
+            f"workflow={progress.workflow.value} step={progress.step.value} "
+            f"state={progress.state.value}{detail}",
+        )
+        return
+    if isinstance(progress, QueueDrainProgress):
+        queues = ",".join(
+            f"{depth.name}={depth.total}" for depth in progress.queues
+        )
+        typer.echo(
+            f"queue_drain_stage={progress.stage.value} "
+            f"elapsed_seconds={progress.elapsed_seconds:g} "
+            f"stable_for_seconds={progress.stable_for_seconds:g} "
+            f"required_stable_seconds={progress.required_stable_seconds} "
+            f"queues=[{queues}]",
+        )
+        return
+    assert_never(progress)
 
 
 def echo_schema(*, status: SchemaStatus) -> None:

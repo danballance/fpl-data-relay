@@ -151,7 +151,6 @@ def test_load_admin_settings_requires_one_strict_explicit_file(
                 "# non-secret production administration",
                 "FPL_ADMIN_AWS_PROFILE=admin",
                 "FPL_ADMIN_AWS_REGION=eu-west-2",
-                "FPL_ADMIN_AWS_ACCOUNT_ID=123456789012",
                 "FPL_ADMIN_DATA_STACK_NAME=data",
                 "FPL_ADMIN_APP_STACK_NAME=app",
                 "FPL_ADMIN_NAS_SSH_TARGET=relay@nas",

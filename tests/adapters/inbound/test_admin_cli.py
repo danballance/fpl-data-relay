@@ -10,21 +10,25 @@ from typer.testing import CliRunner
 from fpl_data_relay.adapters.inbound.cli.admin import (
     AdminRuntime,
     admin_runtime,
+    build_administration_facade,
     create_admin_app,
 )
 from fpl_data_relay.application.administration import ProductionStatus
 from fpl_data_relay.application.ports.administration import (
-    AwsIamPrincipalType,
+    AdministrationProgressReporter,
+    AdministrationWorkflow,
+    AdministrationWorkflowProgress,
+    AdministrationWorkflowStep,
+    AdministrationWorkflowStepState,
     AwsIdentity,
-    AwsManagedPolicyState,
-    AwsProfileBootstrapStatus,
-    AwsProfileStatus,
     AwsResources,
     ChangeFeedRebaselineResult,
     MaintenancePhase,
     MaintenanceWindow,
     NasCollectorStatus,
     QueueDepth,
+    QueueDrainProgress,
+    QueueDrainStage,
     ScheduleSnapshot,
     ScheduleState,
     ScheduleTargetSnapshot,
@@ -40,7 +44,6 @@ def admin_settings() -> AdminSettings:
         {
             "aws_profile": "admin",
             "aws_region": "eu-west-2",
-            "aws_account_id": "123456789012",
             "data_stack_name": "data",
             "app_stack_name": "app",
             "nas_ssh_target": "nas",
@@ -187,60 +190,6 @@ class FakeAws:
         return ["failure"]
 
 
-class FakeProfile:
-    def __init__(self) -> None:
-        self.actions: list[str] = []
-
-    def setup(self) -> AwsProfileStatus:
-        return self._status(action="setup")
-
-    def login(self) -> AwsProfileStatus:
-        return self._status(action="login")
-
-    def status(self) -> AwsProfileStatus:
-        return self._status(action="status")
-
-    def logout(self) -> None:
-        self.actions.append("logout")
-
-    def _status(self, *, action: str) -> AwsProfileStatus:
-        self.actions.append(action)
-        return AwsProfileStatus(
-            profile_name="admin",
-            region="eu-west-2",
-            authentication="console-login",
-            authenticated=True,
-            account_id="123456789012",
-            arn="arn:operator",
-        )
-
-
-class FakeProfileBootstrap:
-    def __init__(self) -> None:
-        self.requests: list[tuple[str, AwsIamPrincipalType, str]] = []
-
-    def instructions(self) -> str:
-        return "The CLI cannot create its own initial AWS authority."
-
-    def bootstrap(
-        self,
-        *,
-        bootstrap_profile: str,
-        principal_type: AwsIamPrincipalType,
-        principal_name: str,
-    ) -> AwsProfileBootstrapStatus:
-        self.requests.append((bootstrap_profile, principal_type, principal_name))
-        return AwsProfileBootstrapStatus(
-            bootstrap_profile=bootstrap_profile,
-            bootstrap_arn="arn:bootstrap",
-            principal_type=principal_type,
-            principal_name=principal_name,
-            sign_in_policy_arn="arn:sign-in",
-            relay_policy_arn="arn:relay",
-            relay_policy_state=AwsManagedPolicyState.CREATED,
-        )
-
-
 class FakeNas:
     def status(self) -> NasCollectorStatus:
         return NasCollectorStatus(running=True, health="healthy", image="image")
@@ -265,8 +214,8 @@ class FakeDatabase:
 
 
 class FakeService:
-    def aws_doctor(self) -> None:
-        return None
+    def aws_doctor(self) -> AwsIdentity:
+        return AwsIdentity(account_id="123456789012", arn="arn:operator")
 
     def nas_doctor(self) -> None:
         return None
@@ -279,6 +228,25 @@ class FakeService:
 
     def drain_queues(self) -> list[QueueDepth]:
         return [depth(name="fetch")]
+
+    def drain_queues_with_progress(
+        self,
+        *,
+        stage: QueueDrainStage,
+        progress: AdministrationProgressReporter,
+    ) -> list[QueueDepth]:
+        depths = self.drain_queues()
+        progress(
+            QueueDrainProgress(
+                stage=stage,
+                queues=depths,
+                elapsed_seconds=0,
+                stable_for_seconds=4,
+                required_stable_seconds=4,
+                sampled_at=NOW,
+            ),
+        )
+        return depths
 
     async def send_reference(self, *, allow_maintenance: bool) -> str:
         assert allow_maintenance is False
@@ -316,6 +284,22 @@ class FakeService:
             update={"reason": f"refresh={refresh_normalized_data}"},
         )
 
+    async def rebaseline_current_with_progress(
+        self,
+        *,
+        reason: str,
+        refresh_normalized_data: bool,
+        progress: AdministrationProgressReporter,
+    ) -> ChangeFeedRebaselineResult:
+        self._report_progress(
+            workflow=AdministrationWorkflow.REBASELINE,
+            progress=progress,
+        )
+        return await self.rebaseline_current(
+            reason=reason,
+            refresh_normalized_data=refresh_normalized_data,
+        )
+
     async def production_status(self) -> ProductionStatus:
         return ProductionStatus(
             schema_status=SchemaStatus(applied_versions=[5], pending_versions=[]),
@@ -333,19 +317,92 @@ class FakeService:
         assert reason == "work"
         return window(phase=MaintenancePhase.ACTIVE)
 
+    async def begin_production_maintenance_with_progress(
+        self,
+        *,
+        reason: str,
+        progress: AdministrationProgressReporter,
+    ) -> MaintenanceWindow:
+        self._report_progress(
+            workflow=AdministrationWorkflow.BEGIN_MAINTENANCE,
+            progress=progress,
+        )
+        return await self.begin_production_maintenance(reason=reason)
+
     async def end_production_maintenance(self) -> MaintenanceWindow:
         return window(phase=MaintenancePhase.CLOSED)
+
+    async def end_production_maintenance_with_progress(
+        self,
+        *,
+        progress: AdministrationProgressReporter,
+    ) -> MaintenanceWindow:
+        self._report_progress(
+            workflow=AdministrationWorkflow.END_MAINTENANCE,
+            progress=progress,
+        )
+        return await self.end_production_maintenance()
+
+    def _report_progress(
+        self,
+        *,
+        workflow: AdministrationWorkflow,
+        progress: AdministrationProgressReporter,
+    ) -> None:
+        progress(
+            AdministrationWorkflowProgress(
+                workflow=workflow,
+                step=AdministrationWorkflowStep.CHECK_MAINTENANCE,
+                state=AdministrationWorkflowStepState.COMPLETED,
+                occurred_at=NOW,
+                detail=None,
+            ),
+        )
 
 
 class FakeRuntime:
     def __init__(self) -> None:
         self.settings = admin_settings()
-        self.profile = FakeProfile()
-        self.profile_bootstrap = FakeProfileBootstrap()
         self.aws = FakeAws()
         self.nas = FakeNas()
         self.database = FakeDatabase()
         self.service = FakeService()
+
+
+def test_admin_cli_facade_keeps_remote_runtime_properties_lazy() -> None:
+    eager = FakeRuntime()
+
+    class LazyRuntime:
+        def __init__(self) -> None:
+            self.settings = eager.settings
+            self.resolved: list[str] = []
+
+        @property
+        def service(self) -> FakeService:
+            self.resolved.append("service")
+            return eager.service
+
+        @property
+        def aws(self) -> FakeAws:
+            self.resolved.append("aws")
+            return eager.aws
+
+        @property
+        def nas(self) -> FakeNas:
+            self.resolved.append("nas")
+            return eager.nas
+
+        @property
+        def database(self) -> FakeDatabase:
+            self.resolved.append("database")
+            return eager.database
+
+    runtime = LazyRuntime()
+    facade = build_administration_facade(runtime=cast("AdminRuntime", runtime))
+
+    assert runtime.resolved == []
+    assert facade.collector_status().running is True
+    assert runtime.resolved == ["nas"]
 
 
 def invoke(
@@ -417,75 +474,18 @@ def test_admin_cli_exposes_all_aws_commands(tmp_path: Path) -> None:
     outputs = [
         invoke(runner=runner, app=app, arguments=command) for command in commands
     ]
+    assert "profile=admin region=eu-west-2" in outputs[0]
+    assert "account=123456789012 operator=arn:operator" in outputs[0]
     assert "AWS administration checks passed" in outputs[0]
     assert "deployed_revision=" + "a" * 40 in outputs[1]
     assert "account=123456789012 operator=arn:operator" in outputs[2]
+    assert "queue_drain_stage=standalone" in outputs[6]
     assert "message[1]=failure" in outputs[8]
     assert "reference sent" in outputs[9]
     assert "state=disabled" in outputs[13]
     assert "state=restored" in outputs[14]
+    assert "workflow=rebaseline" in outputs[-1]
     assert "rebaseline_id=2" in outputs[-1]
-
-
-def test_admin_cli_exposes_local_aws_profile_commands() -> None:
-    runtime = FakeRuntime()
-    app = create_admin_app(
-        runtime_factory=lambda path: cast("AdminRuntime", runtime),
-    )
-    runner = CliRunner()
-    outputs = [
-        invoke(runner=runner, app=app, arguments=["aws", command])
-        for command in (
-            "profile-setup",
-            "profile-login",
-            "profile-status",
-            "profile-logout",
-        )
-    ]
-    assert "authentication=console-login" in outputs[0]
-    assert "authenticated=true" in outputs[2]
-    assert "authenticated=false" in outputs[3]
-    assert runtime.profile.actions == ["setup", "login", "status", "logout"]
-
-
-def test_admin_cli_bootstraps_profile_with_interactive_principal_details() -> None:
-    runtime = FakeRuntime()
-    app = create_admin_app(
-        runtime_factory=lambda path: cast("AdminRuntime", runtime),
-    )
-
-    invocation = CliRunner().invoke(
-        app,
-        ["--config", "/config", "aws", "profile-bootstrap"],
-        input="existing-admin\nuser\nrelay-operator\nproduction\n",
-    )
-
-    assert invocation.exit_code == 0, invocation.output
-    assert "cannot create its own initial AWS authority" in invocation.output
-    assert "Configured target account: 123456789012" in invocation.output
-    assert "relay_policy_state=created" in invocation.output
-    assert "remove that temporary grant" in invocation.output
-    assert runtime.profile_bootstrap.requests == [
-        ("existing-admin", AwsIamPrincipalType.USER, "relay-operator"),
-    ]
-
-
-def test_admin_cli_rejects_invalid_bootstrap_principal_type() -> None:
-    runtime = FakeRuntime()
-    app = create_admin_app(
-        runtime_factory=lambda path: cast("AdminRuntime", runtime),
-    )
-
-    invocation = CliRunner().invoke(
-        app,
-        ["--config", "/config", "aws", "profile-bootstrap"],
-        input="existing-admin\nservice\n",
-    )
-
-    assert invocation.exit_code != 0
-    assert "IAM principal type must be user, group" in invocation.output
-    assert "role." in invocation.output
-    assert runtime.profile_bootstrap.requests == []
 
 
 def test_admin_cli_exposes_all_nas_and_prod_commands() -> None:
@@ -530,6 +530,9 @@ def test_admin_cli_exposes_all_nas_and_prod_commands() -> None:
     assert "collector_running=true" in outputs[1]
     assert "logs=10" in outputs[4]
     assert "production administration checks passed" in outputs[7]
+    assert "workflow=begin_maintenance" in outputs[9]
+    assert "workflow=end_maintenance" in outputs[10]
+    assert "workflow=rebaseline" in outputs[11]
     assert "maintenance_id=1" in outputs[9]
 
 
@@ -578,20 +581,8 @@ def test_admin_bootstrap_builds_explicit_runtime(
         "NasSshAdministration",
         lambda *, settings: construction.append("nas") or runtime.nas,
     )
-    monkeypatch.setattr(
-        admin_bootstrap,
-        "AwsConsoleProfileAdministration",
-        lambda *, settings, runner: runtime.profile,
-    )
-    monkeypatch.setattr(
-        admin_bootstrap,
-        "AwsIamProfileBootstrapAdministration",
-        lambda *, settings, runner: runtime.profile_bootstrap,
-    )
     built = admin_bootstrap.build_admin_runtime(Path("/config"))
     assert built.settings.aws_profile == "admin"
-    assert built.profile is runtime.profile
-    assert built.profile_bootstrap is runtime.profile_bootstrap
     assert construction == []
     assert built.aws is aws
     assert construction == ["aws"]

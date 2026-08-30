@@ -31,6 +31,22 @@ make setup
 `setup` never overwrites `.env` or `client/.env.local`. If those files already
 exist, refresh only the dependencies with `make install`.
 
+Launch the interactive developer and production console with:
+
+```fish
+make tui
+```
+
+The TUI exposes every operational command shown by `make help` (`tui` itself is
+the launcher exemption), while Make and the Typer CLIs remain the supported
+scriptable interfaces. Production data is refreshed only on request. TUI
+mutations run directly after collecting their required inputs; Make and Typer
+retain their explicit `production` confirmation for production writes.
+
+Production administration uses the exact AWS profile named in `.admin.env`.
+Copy `.admin.env.example` to `.admin.env` and edit it if needed; credentials and
+IAM permissions are managed with standard AWS tooling outside this project.
+
 Start PostgreSQL and the API, apply pending migrations, and run the Vite client:
 
 ```fish
@@ -51,11 +67,12 @@ Run `make` or `make help` for the complete command list. The main workflows are:
 
 | Command | Purpose |
 | --- | --- |
+| `make tui` | Open the interactive local and production operations console. |
 | `make local-up` | Build and start the local database and API, including migrations. |
 | `make local-client` | Run only the local Vite development client. |
 | `make local-logs` | Follow local API and PostgreSQL logs. |
 | `make local-db-status` | Show applied and pending local migrations. |
-| `make aws-profile-onboard` | Bootstrap, authenticate, and verify the production AWS administrator profile. |
+| `make aws-doctor` | Verify the configured AWS profile and production resources. |
 | `make lint` | Run all Python and client static checks. |
 | `make test` | Run Python and client coverage suites. |
 | `make check` | Run the normal backend and client quality gate. |

@@ -139,7 +139,6 @@ class AdminSettings(BaseSettings):
 
     aws_profile: str = Field(min_length=1)
     aws_region: str = Field(min_length=1)
-    aws_account_id: str = Field(pattern=r"^\d{12}$")
     data_stack_name: str = Field(min_length=1)
     app_stack_name: str = Field(min_length=1)
     nas_ssh_target: str = Field(pattern=r"^[A-Za-z0-9_.@-]+$")

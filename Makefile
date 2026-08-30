@@ -9,6 +9,12 @@ PYTHON_ARTIFACTS := $(ARTIFACTS_DIR)
 COMPOSE := uv run docker compose --env-file .env
 CLIENT_DEV := uv run npm --prefix client run dev
 ADMIN := uv run --group admin fpl-admin --config .admin.env
+TUI := uv run --group admin fpl-tui \
+	--project-root "$(CURDIR)" \
+	--admin-config "$(CURDIR)/.admin.env" \
+	--log-path "$(CURDIR)/.admin-state/tui/fpl-tui.jsonl" \
+	--log-max-bytes 10485760 \
+	--log-file-count 5
 
 export REASON CONFIRM SHA DLQ STATE_FILE
 
@@ -19,11 +25,9 @@ uv run npm --prefix client ci
 endef
 
 .PHONY: \
-	help doctor install setup \
+	help tui doctor install setup \
 	local-dev local-up local-client local-logs local-ps local-down \
 	local-db-status local-db-migrate \
-	aws-profile-bootstrap aws-profile-setup aws-profile-onboard \
-	aws-profile-login aws-profile-status aws-profile-logout \
 	aws-doctor aws-status aws-app-revision aws-db-status aws-db-migrate \
 	aws-queues-status aws-queues-drain aws-dlqs-status aws-dlq-peek \
 	aws-send-reference aws-send-live aws-send-community \
@@ -35,7 +39,7 @@ endef
 	prod-rebaseline-current \
 	lint lint-python lint-client test test-python test-client \
 	check check-python check-client infra images ci \
-	require-local-env require-client-env require-admin-env prepare-admin-env \
+	require-local-env require-client-env require-admin-env \
 	require-production-confirm require-reason require-sha require-dlq \
 	require-state-file \
 	prepare-local-database \
@@ -50,9 +54,12 @@ help: ## Show this help and the required developer tools.
 	printf '  prod-*     Run locally and coordinate AWS plus the NAS.\n'
 	printf '  unprefixed Repository setup, quality, and build tasks only.\n'
 	printf '  deployment Run and inspect production deployment in GitHub Actions.\n\n'
-	printf 'Required tools: uv, Node.js 24, npm, Docker Compose, AWS CLI >= 2.32, AWS SAM CLI\n\n'
+	printf 'Required tools: uv, Node.js 24, npm, Docker Compose, AWS CLI, AWS SAM CLI\n\n'
 	printf 'Targets:\n'
 	awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_-]+:.*## / { printf "  %-22s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+tui: ## Launch the interactive developer and production console.
+	@$(TUI)
 
 doctor: ## Verify the complete local development and CI toolchain.
 	@command -v uv >/dev/null || { printf 'uv is required: https://docs.astral.sh/uv/\n' >&2; exit 1; }
@@ -100,32 +107,6 @@ local-db-status: prepare-local-database ## Show applied and pending local migrat
 
 local-db-migrate: prepare-local-database ## Apply all pending local migrations.
 	@$(COMPOSE) run --rm app fpl-relay db apply
-
-prepare-admin-env:
-	@if test -e .admin.env; then \
-		printf 'using existing .admin.env\n'; \
-	else \
-		cp .admin.env.example .admin.env; \
-		printf 'created .admin.env from .admin.env.example\n'; \
-	fi
-
-aws-profile-bootstrap: prepare-admin-env ## Generate and attach AWS login and relay policies.
-	@$(ADMIN) aws profile-bootstrap
-
-aws-profile-setup: prepare-admin-env ## Configure and authenticate the console-login profile.
-	$(ADMIN) aws profile-setup
-
-aws-profile-onboard: aws-profile-bootstrap aws-profile-setup aws-doctor ## Bootstrap IAM, log in, and verify AWS administration.
-	@printf 'AWS administrator onboarding complete\n'
-
-aws-profile-login: require-admin-env ## Renew the admin profile's console login.
-	@$(ADMIN) aws profile-login
-
-aws-profile-status: require-admin-env ## Verify the admin profile and AWS identity.
-	@$(ADMIN) aws profile-status
-
-aws-profile-logout: require-admin-env ## Log out only the configured admin profile.
-	@$(ADMIN) aws profile-logout
 
 aws-doctor: require-admin-env ## Validate the local AWS administration connection.
 	@$(ADMIN) aws doctor

@@ -4,6 +4,7 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError, NoCredentialsError, ProfileNotFound
 
 from fpl_data_relay.adapters.outbound.aws_administration import (
     AwsBotoAdministration,
@@ -14,6 +15,7 @@ from fpl_data_relay.adapters.outbound.aws_administration import (
     require_output,
     require_string,
 )
+from fpl_data_relay.application.errors import AwsConnectionError
 from fpl_data_relay.application.jobs import LiveJob
 from fpl_data_relay.application.ports.administration import ScheduleState
 from fpl_data_relay.config import AdminSettings
@@ -24,7 +26,6 @@ def settings() -> AdminSettings:
         {
             "aws_profile": "admin",
             "aws_region": "eu-west-2",
-            "aws_account_id": "123456789012",
             "data_stack_name": "data",
             "app_stack_name": "app",
             "nas_ssh_target": "nas",
@@ -56,8 +57,11 @@ def app_outputs() -> dict[str, str]:
 
 class FakeSts:
     account = "123456789012"
+    error: Exception | None = None
 
     def get_caller_identity(self) -> dict[str, object]:
+        if self.error is not None:
+            raise self.error
         return {"Account": self.account, "Arn": "arn:operator"}
 
 
@@ -233,8 +237,7 @@ def test_aws_adapter_resolves_identity_resources_queues_and_database(
     assert set(urls) == {"fetch", "result", "schedule", "community"}
 
     session.sts.account = "999999999999"
-    with pytest.raises(RuntimeError, match="account mismatch"):
-        administration.identity()
+    assert administration.identity().account_id == "999999999999"
 
     session.cloudformation.revision = "not-a-revision"
     with pytest.raises(RuntimeError, match="full lowercase Git SHA"):
@@ -314,6 +317,48 @@ def test_aws_adapter_rejects_invalid_stack_and_sdk_shapes(
     session.sqs.messages = [cast_mapping({"Body": 1})]
     with pytest.raises(RuntimeError, match="string body"):
         administration.peek_dead_letters(queue_name="fetch", max_messages=1)
+
+
+def test_aws_adapter_reports_missing_profile_concisely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_profile(**parameters: object) -> FakeSession:
+        del parameters
+        raise ProfileNotFound(profile="missing")
+
+    monkeypatch.setattr(boto3, "Session", missing_profile)
+    invalid = settings().model_copy(update={"aws_profile": "missing"})
+
+    with pytest.raises(
+        AwsConnectionError,
+        match="AWS profile 'missing' does not exist",
+    ):
+        AwsBotoAdministration(settings=invalid)
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (NoCredentialsError(), "has no usable credentials"),
+        (
+            ClientError(
+                {"Error": {"Code": "ExpiredToken", "Message": "expired"}},
+                "GetCallerIdentity",
+            ),
+            r"could not access STS \(ExpiredToken\)",
+        ),
+    ],
+)
+def test_aws_adapter_reports_unusable_sts_connection_concisely(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    message: str,
+) -> None:
+    administration, session = adapter(monkeypatch=monkeypatch)
+    session.sts.error = error
+
+    with pytest.raises(AwsConnectionError, match=message):
+        administration.identity()
 
 
 def cast_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:

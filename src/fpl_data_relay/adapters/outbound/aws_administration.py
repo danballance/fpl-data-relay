@@ -6,10 +6,19 @@ from typing import Protocol, cast
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    CredentialRetrievalError,
+    NoCredentialsError,
+    PartialCredentialsError,
+    ProfileNotFound,
+)
 
 from fpl_data_relay.adapters.outbound.postgres.connection import PoolProtocol
 from fpl_data_relay.adapters.outbound.postgres.database import PostgresDatabase
 from fpl_data_relay.adapters.outbound.rds_data import RdsDataClient, RdsDataPool
+from fpl_data_relay.application.errors import AwsConnectionError
 from fpl_data_relay.application.ports.administration import (
     AwsIdentity,
     AwsResources,
@@ -50,39 +59,76 @@ class AwsBotoAdministration:
 
     def __init__(self, *, settings: AdminSettings) -> None:
         self._settings = settings
-        self._session = boto3.Session(
-            profile_name=settings.aws_profile,
-            region_name=settings.aws_region,
-        )
-        retry_config = Config(
-            retries={"mode": "standard", "total_max_attempts": 3},
-        )
-        self._sts = cast("StsClient", self._session.client("sts", config=retry_config))
-        self._cloudformation = cast(
-            "CloudFormationClient",
-            self._session.client("cloudformation", config=retry_config),
-        )
-        self._sqs = cast("SqsClient", self._session.client("sqs", config=retry_config))
-        self._scheduler = cast(
-            "SchedulerClient",
-            self._session.client("scheduler", config=retry_config),
-        )
-        self._rds_data = cast(
-            "RdsDataClient",
-            self._session.client("rds-data", config=retry_config),
-        )
+        try:
+            self._session = boto3.Session(
+                profile_name=settings.aws_profile,
+                region_name=settings.aws_region,
+            )
+            retry_config = Config(
+                retries={"mode": "standard", "total_max_attempts": 3},
+            )
+            self._sts = cast(
+                "StsClient",
+                self._session.client("sts", config=retry_config),
+            )
+            self._cloudformation = cast(
+                "CloudFormationClient",
+                self._session.client("cloudformation", config=retry_config),
+            )
+            self._sqs = cast(
+                "SqsClient",
+                self._session.client("sqs", config=retry_config),
+            )
+            self._scheduler = cast(
+                "SchedulerClient",
+                self._session.client("scheduler", config=retry_config),
+            )
+            self._rds_data = cast(
+                "RdsDataClient",
+                self._session.client("rds-data", config=retry_config),
+            )
+        except ProfileNotFound as error:
+            raise AwsConnectionError(
+                f"AWS profile {settings.aws_profile!r} does not exist.",
+            ) from error
+        except (
+            CredentialRetrievalError,
+            NoCredentialsError,
+            PartialCredentialsError,
+        ) as error:
+            raise AwsConnectionError(
+                f"AWS profile {settings.aws_profile!r} has no usable credentials.",
+            ) from error
+        except BotoCoreError as error:
+            raise AwsConnectionError(
+                f"AWS profile {settings.aws_profile!r} could not be loaded.",
+            ) from error
         self._resources: AwsResources | None = None
 
     def identity(self) -> AwsIdentity:
-        """Validate the active profile against the configured account."""
-        response = self._sts.get_caller_identity()
+        """Return the identity reached through the exact configured profile."""
+        try:
+            response = self._sts.get_caller_identity()
+        except (
+            CredentialRetrievalError,
+            NoCredentialsError,
+            PartialCredentialsError,
+        ) as error:
+            raise AwsConnectionError(
+                f"AWS profile {self._settings.aws_profile!r} "
+                "has no usable credentials.",
+            ) from error
+        except ClientError as error:
+            raise AwsConnectionError(
+                f"AWS profile {self._settings.aws_profile!r} could not access "
+                f"STS ({client_error_code(error=error)}).",
+            ) from error
+        except BotoCoreError as error:
+            raise AwsConnectionError(
+                f"AWS profile {self._settings.aws_profile!r} could not access STS.",
+            ) from error
         account_id = require_string(response=response, key="Account")
         arn = require_string(response=response, key="Arn")
-        if account_id != self._settings.aws_account_id:
-            raise RuntimeError(
-                "AWS account mismatch: "
-                f"expected {self._settings.aws_account_id}, found {account_id}.",
-            )
         return AwsIdentity(account_id=account_id, arn=arn)
 
     def resources(self) -> AwsResources:
@@ -426,6 +472,16 @@ class AwsBotoAdministration:
             MessageBody=message_body,
         )
         return require_string(response=response, key="MessageId")
+
+
+def client_error_code(*, error: ClientError) -> str:
+    """Return a bounded AWS error code without exposing response details."""
+    response_error = error.response.get("Error")
+    if isinstance(response_error, Mapping):
+        code = response_error.get("Code")
+        if isinstance(code, str) and code:
+            return code
+    return "unknown"
 
 
 def dead_letter_urls(*, resources: AwsResources) -> dict[str, str]:
