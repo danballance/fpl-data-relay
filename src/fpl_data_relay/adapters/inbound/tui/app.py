@@ -251,8 +251,10 @@ class FplDataRelayTui(App[None]):
         color: $text;
         text-style: bold;
     }
+    #workspace-layout { width: 100%; height: 1fr; layout: horizontal; }
+    #control-pane { width: 3fr; height: 1fr; }
     #narrow-nav { display: none; margin: 0 1; }
-    #body { height: 1fr; }
+    #body { width: 100%; height: 1fr; }
     #sidebar { width: 22; padding: 1; border-right: solid $primary-darken-1; }
     #sidebar Button { width: 100%; margin-bottom: 1; }
     #content-switcher { width: 1fr; height: 1fr; }
@@ -286,7 +288,11 @@ class FplDataRelayTui(App[None]):
     .summary-card { height: 6; padding: 1; border: round $primary-darken-1; }
     #queue-table { height: 10; margin-bottom: 1; }
     #schedule-table { height: 1fr; min-height: 8; }
-    #task-drawer { height: 13; border-top: heavy $primary; }
+    #task-drawer {
+        width: 2fr;
+        height: 1fr;
+        border-left: heavy $primary;
+    }
     #task-header { height: 3; padding: 1; background: $surface-lighten-1; }
     #task-status { width: 1fr; }
     #stop-task { width: 18; display: none; }
@@ -309,6 +315,14 @@ class FplDataRelayTui(App[None]):
     .narrow #sidebar { display: none; }
     .narrow #narrow-nav { display: block; }
     .narrow #overview-cards { grid-size: 1; }
+    .stacked #workspace-layout { layout: vertical; }
+    .stacked #control-pane { width: 100%; height: 1fr; }
+    .stacked #task-drawer {
+        width: 100%;
+        height: 13;
+        border: none;
+        border-top: heavy $primary;
+    }
     """
 
     def __init__(
@@ -347,47 +361,64 @@ class FplDataRelayTui(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(self._header_text(), id="topbar", markup=False)
-        yield Select(
-            ((label, page_id) for page_id, label in NAVIGATION),
-            allow_blank=False,
-            value="overview",
-            id="narrow-nav",
-        )
-        with Horizontal(id="body"):
-            with VerticalScroll(id="sidebar"):
-                for page_id, label in NAVIGATION:
-                    yield Button(label, id=f"nav--{page_id}")
-            with ContentSwitcher(initial="overview", id="content-switcher"):
-                yield self._overview_page()
-                yield CommandGroupPanel(
-                    group=CommandGroup.WORKSPACE,
-                    title="Workspace setup and tooling",
+        with Container(id="workspace-layout"):
+            with Vertical(id="control-pane"):
+                yield Select(
+                    ((label, page_id) for page_id, label in NAVIGATION),
+                    allow_blank=False,
+                    value="overview",
+                    id="narrow-nav",
                 )
-                yield CommandGroupPanel(
-                    group=CommandGroup.LOCAL_SERVICES,
-                    title="Local services",
+                with Horizontal(id="body"):
+                    with VerticalScroll(id="sidebar"):
+                        for page_id, label in NAVIGATION:
+                            yield Button(label, id=f"nav--{page_id}")
+                    with ContentSwitcher(
+                        initial="overview",
+                        id="content-switcher",
+                    ):
+                        yield self._overview_page()
+                        yield CommandGroupPanel(
+                            group=CommandGroup.WORKSPACE,
+                            title="Workspace setup and tooling",
+                        )
+                        yield CommandGroupPanel(
+                            group=CommandGroup.LOCAL_SERVICES,
+                            title="Local services",
+                        )
+                        yield CommandGroupPanel(
+                            group=CommandGroup.AWS,
+                            title="AWS",
+                        )
+                        yield CommandGroupPanel(
+                            group=CommandGroup.NAS_COLLECTOR,
+                            title="NAS collector",
+                        )
+                        yield CommandGroupPanel(
+                            group=CommandGroup.PRODUCTION,
+                            title="Production workflows",
+                        )
+                        yield CommandGroupPanel(
+                            group=CommandGroup.QUALITY,
+                            title="Quality and build gates",
+                        )
+                        yield self._history_page()
+                        yield self._help_page()
+            with Vertical(id="task-drawer"):
+                with Horizontal(id="task-header"):
+                    yield Static(
+                        "Active task: idle",
+                        id="task-status",
+                        markup=False,
+                    )
+                    yield Button("Stop", id="stop-task", variant="warning")
+                yield DataTable(id="progress-table", zebra_stripes=True)
+                yield RichLog(
+                    id="task-log",
+                    highlight=False,
+                    markup=False,
+                    wrap=True,
                 )
-                yield CommandGroupPanel(group=CommandGroup.AWS, title="AWS")
-                yield CommandGroupPanel(
-                    group=CommandGroup.NAS_COLLECTOR,
-                    title="NAS collector",
-                )
-                yield CommandGroupPanel(
-                    group=CommandGroup.PRODUCTION,
-                    title="Production workflows",
-                )
-                yield CommandGroupPanel(
-                    group=CommandGroup.QUALITY,
-                    title="Quality and build gates",
-                )
-                yield self._history_page()
-                yield self._help_page()
-        with Vertical(id="task-drawer"):
-            with Horizontal(id="task-header"):
-                yield Static("Active task: idle", id="task-status", markup=False)
-                yield Button("Stop", id="stop-task", variant="warning")
-            yield DataTable(id="progress-table", zebra_stripes=True)
-            yield RichLog(id="task-log", highlight=False, markup=False, wrap=True)
         yield Static("", id="size-warning", markup=False)
         yield Footer()
 
@@ -1796,7 +1827,8 @@ class FplDataRelayTui(App[None]):
 
     def _update_size_warning(self, *, width: int, height: int) -> None:
         warning = self.query_one("#size-warning", Static)
-        self.screen.set_class(width < 110, "narrow")
+        self.screen.set_class(width < 110, "stacked")
+        self.screen.set_class(width < 140, "narrow")
         too_small = width < 80 or height < 24
         warning.display = too_small
         if too_small:

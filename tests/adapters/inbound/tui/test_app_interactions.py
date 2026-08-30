@@ -304,6 +304,10 @@ def app_parameter(*, command: str, form: FormSubmission) -> CommandParameters:
     )
 
 
+def rich_log_text(log: RichLog) -> str:
+    return "\n".join(line.text for line in log.lines)
+
+
 async def test_typed_workflow_and_queue_progress_use_live_table(
     tmp_path: Path,
 ) -> None:
@@ -311,7 +315,7 @@ async def test_typed_workflow_and_queue_progress_use_live_table(
     app, _settings = app_with_facade(tmp_path=tmp_path, facade=facade)
     now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
 
-    async with app.run_test(size=(110, 30)):
+    async with app.run_test(size=(110, 30)) as pilot:
         app._render_progress(
             AdministrationWorkflowProgress(
                 workflow=AdministrationWorkflow.BEGIN_MAINTENANCE,
@@ -324,6 +328,14 @@ async def test_typed_workflow_and_queue_progress_use_live_table(
         progress_table = app.query_one("#progress-table", DataTable)
         assert progress_table.display is True
         assert progress_table.row_count == 1
+        await pilot.pause()
+
+        task_drawer = app.query_one("#task-drawer")
+        task_log = app.query_one("#task-log", RichLog)
+        assert progress_table.region.height == 7
+        assert task_log.region.height >= 10
+        assert progress_table.region.bottom <= task_log.region.y
+        assert task_log.region.bottom <= task_drawer.region.bottom
 
         app._render_progress(
             QueueDrainProgress(
@@ -535,10 +547,25 @@ async def test_make_task_lifecycle_and_two_stage_stop_are_visible(
     async with app.run_test(size=(110, 30)) as pilot:
         await app._run_make_command(command=command_for_target(target="lint"))
         await app._run_make_command(command=command_for_target(target="test"))
+        await pilot.pause()
 
         assert runner.started_targets == ["lint", "test"]
         assert app._active_process is None
         assert "idle" in str(app.query_one("#task-status", Static).content)
+        task_log = app.query_one("#task-log", RichLog)
+        assert "output from lint" in rich_log_text(task_log)
+        assert "output from test" in rich_log_text(task_log)
+
+        line_count = len(task_log.lines)
+        app._switch_page(page_id="workspace")
+        await pilot.pause()
+        assert app.query_one("#content-switcher", ContentSwitcher).current == (
+            "workspace"
+        )
+        assert app.query_one("#task-log", RichLog) is task_log
+        assert len(task_log.lines) == line_count
+        assert "output from lint" in rich_log_text(task_log)
+        assert "output from test" in rich_log_text(task_log)
 
         await app._stop_active_process()
 
@@ -661,6 +688,11 @@ async def test_history_navigation_actions_and_raw_progress_logging(
     )
 
     async with app.run_test(size=(110, 30)) as pilot:
+        app.query_one("#overview-details").scroll_visible(
+            animate=False,
+            immediate=True,
+        )
+        await pilot.pause()
         await pilot.click("#overview-details")
         await pilot.click("#stop-task")
         app._log_output_event(
@@ -750,6 +782,11 @@ async def test_palette_provider_and_dispatch_cancellation_paths(
 
         app._last_snapshot = administration_snapshot()
         app._switch_page(page_id="overview")
+        await pilot.pause()
+        app.query_one("#overview-details").scroll_visible(
+            animate=False,
+            immediate=True,
+        )
         await pilot.pause()
         await pilot.click("#overview-details")
         await pilot.pause()

@@ -22,11 +22,14 @@ The console covers every operational target displayed by `make help`; `tui`
 itself is the launcher exemption. It presents
 typed AWS, database, queue, schedule, maintenance, and collector results as
 tables and detail views; local development and quality targets retain their
-native output in a managed task log. `Ctrl+P` searches by the exact Make target
-name, `r` refreshes the active remote page, `?` opens help, and `q` exits when
-no write or managed process is active. The minimum supported terminal is 80 by
-24; below 110 columns the sidebar collapses into a selector. Remote state is
-never polled automatically.
+native output in a managed task log. The main workspace uses a 60/40 split,
+with navigation and command pages on the left and live task status, progress,
+and console output on the right. Below 110 columns the task pane stacks beneath
+the controls, and below 140 columns the sidebar collapses into a selector. The
+minimum supported terminal remains 80 by 24. `Ctrl+P` searches by the exact
+Make target name, `r` refreshes the active remote page, `?` opens help, and `q`
+exits when no write or managed process is active. Remote state is never polled
+automatically.
 
 Long-running `local-dev`, `local-client`, and `local-logs` processes remain
 active while navigating. **Stop** sends `SIGINT`; if the process remains alive

@@ -45,7 +45,7 @@ async def test_tui_startup_and_navigation_make_no_remote_calls(
         facade_factory=cast("AdministrationFacadeFactory", facade_factory),
     )
 
-    async with app.run_test(size=(110, 30)) as pilot:
+    async with app.run_test(size=(140, 30)) as pilot:
         await pilot.pause()
         assert facade_requests == []
         assert app.query_one("#size-warning", Static).display is False
@@ -90,15 +90,90 @@ async def test_tui_uses_exact_responsive_boundaries(tmp_path: Path) -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         assert app.query_one("#size-warning", Static).display is False
+        assert app.screen.has_class("stacked")
         assert app.screen.has_class("narrow")
 
         await pilot.resize_terminal(109, 24)
         await pilot.pause()
+        assert app.screen.has_class("stacked")
         assert app.screen.has_class("narrow")
 
         await pilot.resize_terminal(110, 24)
         await pilot.pause()
+        assert not app.screen.has_class("stacked")
+        assert app.screen.has_class("narrow")
+
+        await pilot.resize_terminal(139, 24)
+        await pilot.pause()
+        assert not app.screen.has_class("stacked")
+        assert app.screen.has_class("narrow")
+        assert app.query_one("#sidebar").display is False
+        assert app.query_one("#narrow-nav").display is True
+
+        await pilot.resize_terminal(140, 24)
+        await pilot.pause()
+        assert not app.screen.has_class("stacked")
         assert not app.screen.has_class("narrow")
+        assert app.query_one("#sidebar").display is True
+        assert app.query_one("#narrow-nav").display is False
+
+
+async def test_tui_uses_side_by_side_workspace_at_split_boundary(
+    tmp_path: Path,
+) -> None:
+    launch_settings = project_settings(tmp_path=tmp_path)
+    app = build_tui(
+        settings=launch_settings,
+        facade_factory=cast(
+            "AdministrationFacadeFactory",
+            lambda _path: NoRemoteFacade(),
+        ),
+    )
+
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+
+        workspace = app.query_one("#workspace-layout")
+        control_pane = app.query_one("#control-pane")
+        task_drawer = app.query_one("#task-drawer")
+
+        assert control_pane.region.x == workspace.region.x
+        assert control_pane.region.y == task_drawer.region.y == workspace.region.y
+        assert control_pane.region.height == workspace.region.height
+        assert task_drawer.region.height == workspace.region.height
+        assert task_drawer.region.x == control_pane.region.right
+        assert task_drawer.region.right == workspace.region.right
+        assert control_pane.region.width == 66
+        assert task_drawer.region.width == 44
+
+
+async def test_tui_stacks_task_drawer_below_controls_at_109_columns(
+    tmp_path: Path,
+) -> None:
+    launch_settings = project_settings(tmp_path=tmp_path)
+    app = build_tui(
+        settings=launch_settings,
+        facade_factory=cast(
+            "AdministrationFacadeFactory",
+            lambda _path: NoRemoteFacade(),
+        ),
+    )
+
+    async with app.run_test(size=(109, 30)) as pilot:
+        await pilot.pause()
+
+        workspace = app.query_one("#workspace-layout")
+        control_pane = app.query_one("#control-pane")
+        task_drawer = app.query_one("#task-drawer")
+
+        assert app.screen.has_class("stacked")
+        assert control_pane.region.x == task_drawer.region.x == workspace.region.x
+        assert control_pane.region.width == workspace.region.width
+        assert task_drawer.region.width == workspace.region.width
+        assert control_pane.region.y == workspace.region.y
+        assert task_drawer.region.y == control_pane.region.bottom
+        assert task_drawer.region.bottom == workspace.region.bottom
+        assert task_drawer.region.height == 13
 
 
 async def test_tui_command_palette_opens_with_catalogue_provider(
