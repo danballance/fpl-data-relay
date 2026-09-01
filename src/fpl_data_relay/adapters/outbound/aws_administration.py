@@ -173,7 +173,7 @@ class AwsBotoAdministration:
                 f"{self._settings.app_stack_name}-reference"
             ),
             reference_schedule_name=(
-                f"{self._settings.app_stack_name}-reference-quarter-hour"
+                f"{self._settings.app_stack_name}-reference-hourly"
             ),
             live_schedule_group_name=f"{self._settings.app_stack_name}-live",
             community_schedule_group_name=(

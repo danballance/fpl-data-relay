@@ -408,7 +408,7 @@ class AdministrationService:
             operation=lambda: self._restore_window(window=window),
         )
         if closed.collector_was_running and any(
-            schedule.name.endswith("-reference-quarter-hour")
+            schedule.name.endswith("-reference-hourly")
             and schedule.state is ScheduleState.ENABLED
             for schedule in closed.schedules
         ):

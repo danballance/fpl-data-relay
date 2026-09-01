@@ -56,7 +56,7 @@ application = create_app(
     ),
     schema_manager=PostgresSchemaManager(database=DATABASE),
     ingestion_service=None,
-    reference_poll_seconds=900,
+    reference_poll_seconds=3600,
     live_poll_seconds=15,
     idle_poll_seconds=60,
     start_scheduler=False,

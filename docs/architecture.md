@@ -57,13 +57,14 @@ advisory locks make concurrent ingestion exit cleanly; payload hashes and
 database constraints make repeated SQS delivery idempotent.
 
 Schema version 5 stores canonical current snapshots for every normalized
-family. A pure entity diff compares stable keys and top-level values, then an
-atomic persistence operation writes normalized rows, source freshness,
-snapshots, family summaries, and child entity changes together. Bootstrap and
-full fixtures are authoritative for structural data; current-gameweek polling
-owns dynamic fixture fields during the four-hour live window and cannot imply a
-deletion. Older source timestamps are rejected, and equal timestamps must have
-equal payload hashes. Explicit nulls overwrite stored values, and authoritative
+family. A pure entity diff compares stable keys and top-level values. The atomic
+persistence operation writes normalized rows and canonical snapshots only for
+baseline, created, or updated keys while retaining complete source freshness,
+family summaries, and child entity changes. Bootstrap and full fixtures are
+authoritative for structural data; current-gameweek polling owns dynamic
+fixture fields during the four-hour live window and cannot imply a deletion.
+Older source timestamps are rejected, and equal timestamps must have equal
+payload hashes. Explicit nulls overwrite stored values, and authoritative
 missing entities are deleted in foreign-key-safe order.
 
 Migration 5 replaces the obsolete event-status `leagues_updated` field with

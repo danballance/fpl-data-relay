@@ -152,7 +152,7 @@ class FakeScheduler:
             "ScheduleExpression": (
                 "at(2026-08-24T11:00:00)"
                 if live
-                else "cron(0/15 * * * ? *)"
+                else "cron(0 * * * ? *)"
             ),
             "ScheduleExpressionTimezone": "UTC",
             "FlexibleTimeWindow": {"Mode": "OFF"},
@@ -221,7 +221,7 @@ def test_aws_adapter_resolves_identity_resources_queues_and_database(
     resources = administration.resources()
     assert resources.database_name == "relay"
     assert resources.reference_schedule_group_name == "app-reference"
-    assert resources.reference_schedule_name == "app-reference-quarter-hour"
+    assert resources.reference_schedule_name == "app-reference-hourly"
     assert resources.live_schedule_group_name == "app-live"
     assert resources.community_schedule_group_name == "app-community"
     assert resources.community_schedule_name == "app-community-daily"

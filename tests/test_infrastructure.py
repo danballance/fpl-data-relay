@@ -76,6 +76,7 @@ def test_collector_user_policy_is_exact_and_resource_scoped() -> None:
 
 def test_application_template_keeps_operational_protections_and_outputs() -> None:
     template = (ROOT / "template-app.yaml").read_text()
+    lambda_api = (ROOT / "src/fpl_data_relay/lambda_api.py").read_text()
 
     for alarm in (
         "FetchDeadLetterAlarm:",
@@ -106,15 +107,23 @@ def test_application_template_keeps_operational_protections_and_outputs() -> Non
     assert "SqsManagedSseEnabled: true" in template
     assert "BucketOwnerEnforced" in template
     assert "BlockPublicPolicy: true" in template
-    assert "ScheduleExpression: cron(0/15 * * * ? *)" in template
+    assert 'Name: !Sub "${AWS::StackName}-reference-hourly"' in template
+    assert "ScheduleExpression: cron(0 * * * ? *)" in template
     assert "State: !Ref ReferenceScheduleState" in template
     assert "ReferenceScheduleGroupName:" in template
     assert "LiveScheduleGroupName:" in template
     assert "DeployedRevision:" in template
     assert "MaximumEventAgeInSeconds: 900" in template
     assert "MaximumRetryAttempts: 3" in template
+    assert "scheduler:GetSchedule" in template
     assert "DeadLetterConfig:" in template
     assert "MetricName: InvocationDroppedCount" in template
+    missed_alarm = template.split("ReferenceScheduleMissedAlarm:", maxsplit=1)[
+        1
+    ].split("ReferenceScheduleErrorAlarm:", maxsplit=1)[0]
+    assert "Period: 3600" in missed_alarm
+    assert "EvaluationPeriods: 2" in missed_alarm
+    assert "reference_poll_seconds=3600" in lambda_api
 
 
 def test_application_template_has_disabled_isolated_community_runtime() -> None:
@@ -161,6 +170,9 @@ def test_application_template_has_disabled_isolated_community_runtime() -> None:
     assert '"ReferenceScheduleState=${REFERENCE_SCHEDULE_STATE}"' in workflow
     assert '"DeployedRevision=${GITHUB_SHA}"' in workflow
     assert "Preserve operational schedule states" in workflow
+    assert "ReferenceScheduleGroupName" in workflow
+    assert "ReferenceScheduleName" in workflow
+    assert "reference-quarter-hour" not in workflow
     assert "--group community" in makefile
 
 

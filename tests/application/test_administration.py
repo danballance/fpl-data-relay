@@ -74,7 +74,7 @@ def schedule(
     *,
     name: str,
     state: ScheduleState = ScheduleState.ENABLED,
-    expression: str = "cron(0/15 * * * ? *)",
+    expression: str = "cron(0 * * * ? *)",
 ) -> ScheduleSnapshot:
     live = name.startswith("fpl-live-")
     return ScheduleSnapshot(
@@ -99,7 +99,7 @@ class FakeAws:
             queue_depth(name="community", total=0),
         ]
         self.schedules = [
-            schedule(name="fpl-relay-app-reference-quarter-hour"),
+            schedule(name="fpl-relay-app-reference-hourly"),
             schedule(
                 name="fpl-relay-app-community-daily",
                 state=ScheduleState.DISABLED,

@@ -247,10 +247,10 @@ Resources:
   ReferenceSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
-      Name: !Sub "${AWS::StackName}-reference-quarter-hour"
+      Name: !Sub "${AWS::StackName}-reference-hourly"
       GroupName: !Ref ReferenceScheduleGroup
-      Description: Refresh FPL reference data every 15 minutes.
-      ScheduleExpression: cron(0/15 * * * ? *)
+      Description: Refresh FPL reference data every hour.
+      ScheduleExpression: cron(0 * * * ? *)
       ScheduleExpressionTimezone: UTC
       FlexibleTimeWindow:
         Mode: "OFF"
@@ -339,6 +339,7 @@ Resources:
               Action:
                 - scheduler:CreateSchedule
                 - scheduler:DeleteSchedule
+                - scheduler:GetSchedule
                 - scheduler:UpdateSchedule
               Resource:
                 - !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/${LiveScheduleGroup}/fpl-live-*"
@@ -515,14 +516,14 @@ Resources:
   ReferenceScheduleMissedAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmDescription: Reference scheduler made no attempt for 30 minutes.
+      AlarmDescription: Reference scheduler made no attempt for two hours.
       Namespace: AWS/Scheduler
       MetricName: InvocationAttemptCount
       Dimensions:
         - Name: ScheduleGroup
           Value: !Ref ReferenceScheduleGroup
       Statistic: Sum
-      Period: 900
+      Period: 3600
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
       Threshold: 1

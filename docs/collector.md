@@ -97,13 +97,17 @@ control this Compose service over the configured SSH alias.
 The health check requires a current SQS polling heartbeat. A failed job is not
 acknowledged: it becomes visible after 240 seconds and reaches the fetch DLQ
 after three receives. AWS alarms report queue messages older than five minutes,
-queue and Scheduler DLQ contents, missed 15-minute reference invocations,
+queue and Scheduler DLQ contents, missed hourly reference invocations,
 Scheduler delivery errors or dropped invocations, and repeated ingestion
 Lambda failures. Reference jobs collect bootstrap, fixtures, and event status
-every 15 minutes. Live schedules span ten minutes before kickoff through four
-hours after, polling every 15 seconds while active and 60 seconds while idle.
+at the top of every hour. Live schedules span ten minutes before kickoff through
+four hours after, polling every 15 seconds while active and 60 seconds while idle.
 Each live window keeps a stable retained Scheduler identity while active, so
 reference reconciliation cannot restart an already-fired polling chain.
+Future schedules are updated only when their complete target definition drifts.
+When Aurora is resuming, ingestion waits 15 seconds and retries persistence once
+with the already collected bundle; a second failure uses the result queue's
+normal retry and DLQ policy.
 
 Collected S3 bundles and their result messages use strict payload contract v2
 and are stored under the `v2` prefix. Fetch jobs remain the separately versioned

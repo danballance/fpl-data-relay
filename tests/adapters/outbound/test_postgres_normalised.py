@@ -1,6 +1,6 @@
 import json
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -40,6 +40,8 @@ class NormalisedTransaction:
 
 class NormalisedConnection:
     def __init__(self) -> None:
+        self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.fetches: list[tuple[str, tuple[object, ...]]] = []
         self.sources: dict[tuple[str, str, int | None], dict[str, object]] = {}
         self.tables: dict[str, dict[object, dict[str, object]]] = {
             "fpl_seasons": {},
@@ -72,6 +74,7 @@ class NormalisedConnection:
         return NormalisedTransaction()
 
     async def execute(self, query: str, *arguments: object) -> str:
+        self.executions.append((" ".join(query.split()), arguments))
         if "DELETE FROM relay_change_events WHERE season_id" in query:
             removed_ids = {
                 cast("int", event["id"])
@@ -214,36 +217,58 @@ class NormalisedConnection:
             return "INSERT 0 1"
         if "DELETE FROM fpl_event_live_elements" in query:
             season_id = arguments[0]
-            target_id = arguments[1]
-            target_column = (
-                "element_id" if "element_id = $2" in query else "event_id"
-            )
+            if "event_id = $2 AND element_id = $3" in " ".join(query.split()):
+                event_id = arguments[1]
+                element_id = arguments[2]
+
+                def matches(row: dict[str, object]) -> bool:
+                    return (
+                        row["season_id"] == season_id
+                        and row["event_id"] == event_id
+                        and row["element_id"] == element_id
+                    )
+            else:
+                target_id = arguments[1]
+                target_column = (
+                    "element_id" if "element_id = $2" in query else "event_id"
+                )
+
+                def matches(row: dict[str, object]) -> bool:
+                    return (
+                        row["season_id"] == season_id
+                        and row[target_column] == target_id
+                    )
             self.tables["fpl_event_live_elements"] = {
                 key: row
                 for key, row in self.tables["fpl_event_live_elements"].items()
-                if not (
-                    row["season_id"] == season_id
-                    and row[target_column] == target_id
-                )
+                if not matches(row)
             }
             self.live_explain_stats = [
                 row
                 for row in self.live_explain_stats
-                if not (
-                    row["season_id"] == season_id
-                    and row[target_column] == target_id
-                )
+                if not matches(row)
             ]
             return "DELETE"
         if "DELETE FROM fpl_event_live_explain_stats" in query:
-            self.live_explain_stats = [
-                row
-                for row in self.live_explain_stats
-                if not (
-                    row["season_id"] == arguments[0]
-                    and row["fixture_id"] == arguments[1]
-                )
-            ]
+            if "element_id = $3" in query:
+                self.live_explain_stats = [
+                    row
+                    for row in self.live_explain_stats
+                    if not (
+                        row["season_id"] == arguments[0]
+                        and row["event_id"] == arguments[1]
+                        and row["element_id"] == arguments[2]
+                    )
+                ]
+            else:
+                self.live_explain_stats = [
+                    row
+                    for row in self.live_explain_stats
+                    if not (
+                        row["season_id"] == arguments[0]
+                        and row["fixture_id"] == arguments[1]
+                    )
+                ]
             return "DELETE"
         if "INSERT INTO fpl_event_live_explain_stats" in query:
             self.live_explain_stats.append(
@@ -360,6 +385,7 @@ class NormalisedConnection:
         return None
 
     async def fetch(self, query: str, *arguments: object) -> list[object]:
+        self.fetches.append((" ".join(query.split()), arguments))
         compact_query = " ".join(query.split())
         if compact_query == "SELECT * FROM fpl_seasons WHERE is_current = true":
             return [
@@ -428,11 +454,22 @@ class NormalisedConnection:
             ]
         if "FROM fpl_fixtures" in query and "id = ANY($2)" in query:
             fixture_ids = cast("list[int]", arguments[1])
-            return [
+            rows = [
                 row
                 for row in self.tables["fpl_fixtures"].values()
                 if row["season_id"] == arguments[0]
                 and row["id"] in fixture_ids
+            ]
+            if "started = true" not in query:
+                return cast("list[object]", rows)
+            fetched_at = cast("datetime", arguments[2])
+            return [
+                row
+                for row in rows
+                if row["started"] is True
+                and isinstance(row["kickoff_time"], datetime)
+                and fetched_at
+                < row["kickoff_time"] + timedelta(hours=4)
             ]
         if "FROM fpl_fixtures" in query and "ORDER BY id" in query:
             return [
@@ -889,6 +926,225 @@ async def test_postgres_store_normalised_upsert_and_read_paths() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fixture_persistence_writes_only_the_changed_fixture() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    fixtures = [
+        Fixture(
+            id=fixture_id,
+            event=1,
+            team_h=1,
+            team_a=2,
+            started=False,
+            finished=False,
+        )
+        for fixture_id in (1, 2)
+    ]
+    await store.upsert_fixtures(
+        fixtures=fixtures,
+        metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+            hash_seed="fixtures-baseline",
+        ),
+    )
+    updated = [
+        fixtures[0].model_copy(update={"team_h_score": 1}),
+        fixtures[1],
+    ]
+    pool.connection.executions.clear()
+    outcome = await store.upsert_fixtures(
+        fixtures=updated,
+        metadata=metadata(
+            source_key=IngestionSourceKey.FIXTURES,
+            event_id=None,
+            hash_seed="fixtures-updated",
+            fetched_minute=1,
+        ),
+    )
+
+    queries = [query for query, _arguments in pool.connection.executions]
+    fixture_upserts = [
+        arguments
+        for query, arguments in pool.connection.executions
+        if "INSERT INTO fpl_fixtures" in query
+    ]
+    assert outcome.change_events[0].updated_count == 1
+    assert len(fixture_upserts) == 1
+    assert fixture_upserts[0][1] == 1
+    assert sum(
+        "DELETE FROM fpl_fixture_stat_entries" in query for query in queries
+    ) == 1
+    assert sum(
+        "INSERT INTO relay_entity_snapshots" in query for query in queries
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_persistence_rewrites_only_changed_element_children() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    initial = EventLiveResponse.model_validate(
+        {
+            "elements": [
+                {
+                    "id": element_id,
+                    "stats": {"total_points": element_id},
+                    "explain": [
+                        {
+                            "fixture": element_id,
+                            "stats": [
+                                {
+                                    "identifier": "minutes",
+                                    "points": element_id,
+                                    "value": 90,
+                                },
+                            ],
+                        },
+                    ],
+                }
+                for element_id in (1, 2)
+            ],
+        },
+    )
+    pool.connection.tables["fpl_event_live_elements"][("2025-26", 1, 99)] = {
+        "season_id": "2025-26",
+        "event_id": 1,
+        "element_id": 99,
+    }
+    await store.upsert_event_live(
+        event_id=1,
+        live=initial,
+        metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_LIVE,
+            event_id=1,
+            hash_seed="live-baseline",
+        ),
+    )
+    assert ("2025-26", 1, 99) not in pool.connection.tables[
+        "fpl_event_live_elements"
+    ]
+    changed = initial.model_copy(
+        update={
+            "elements": [
+                initial.elements[0].model_copy(
+                    update={
+                        "stats": initial.elements[0].stats.model_copy(
+                            update={"total_points": 10},
+                        ),
+                    },
+                ),
+                initial.elements[1],
+            ],
+        },
+    )
+    pool.connection.executions.clear()
+    outcome = await store.upsert_event_live(
+        event_id=1,
+        live=changed,
+        metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_LIVE,
+            event_id=1,
+            hash_seed="live-updated",
+            fetched_minute=1,
+        ),
+    )
+
+    live_upserts = [
+        arguments
+        for query, arguments in pool.connection.executions
+        if "INSERT INTO fpl_event_live_elements" in query
+    ]
+    explain_deletes = [
+        arguments
+        for query, arguments in pool.connection.executions
+        if "DELETE FROM fpl_event_live_explain_stats" in query
+        and "element_id = $3" in query
+    ]
+    snapshot_upserts = [
+        arguments
+        for query, arguments in pool.connection.executions
+        if "INSERT INTO relay_entity_snapshots" in query
+    ]
+    assert outcome.change_events[0].updated_count == 1
+    assert len(live_upserts) == 1
+    assert explain_deletes == [("2025-26", 1, 1)]
+    assert len(snapshot_upserts) == 1
+    assert pool.connection.tables["fpl_event_live_elements"][
+        ("2025-26", 1, 1)
+    ]["total_points"] == 10
+    assert any(row["element_id"] == 2 for row in pool.connection.live_explain_stats)
+
+
+@pytest.mark.asyncio
+async def test_status_hash_change_without_entity_diff_updates_only_source() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    status = EventStatusResponse(status=[])
+    await store.upsert_event_status(
+        status=status,
+        metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+            hash_seed="status-baseline",
+        ),
+    )
+    pool.connection.executions.clear()
+    outcome = await store.upsert_event_status(
+        status=status,
+        metadata=metadata(
+            source_key=IngestionSourceKey.EVENT_STATUS,
+            event_id=1,
+            hash_seed="status-new-envelope",
+            fetched_minute=1,
+        ),
+    )
+
+    queries = [query for query, _arguments in pool.connection.executions]
+    assert outcome.changed is True
+    assert outcome.change_events == []
+    assert not any("INSERT INTO fpl_event_status" in query for query in queries)
+    assert not any("DELETE FROM fpl_event_status_days" in query for query in queries)
+    assert not any("INSERT INTO relay_entity_snapshots" in query for query in queries)
+    source = pool.connection.sources[("2025-26", "event-status", 1)]
+    assert source["checked_at"] == datetime(2026, 6, 20, 0, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_baseline_fully_reconciles_preexisting_rows() -> None:
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
+    client = FakeClient()
+    bootstrap = await client.fetch_bootstrap_static()
+    season = derive_season(bootstrap=bootstrap)
+    pool.connection.tables["fpl_phases"][(season.id, 999)] = {
+        "season_id": season.id,
+        "id": 999,
+        "name": "Stale phase",
+        "start_event": 1,
+        "stop_event": 1,
+    }
+
+    outcome = await store.upsert_bootstrap(
+        season=season,
+        bootstrap=bootstrap,
+        metadata=metadata(
+            source_key=IngestionSourceKey.BOOTSTRAP,
+            event_id=None,
+            hash_seed="bootstrap-baseline",
+        ),
+        delete_missing=True,
+    )
+
+    assert outcome.changed is True
+    assert (season.id, 999) not in pool.connection.tables["fpl_phases"]
+    assert any(
+        query == "SELECT id FROM fpl_phases WHERE season_id = $1"
+        for query, _arguments in pool.connection.fetches
+    )
+
+
+@pytest.mark.asyncio
 async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> None:
     pool = NormalisedPool()
     store = PostgresDatabase(pool=pool)
@@ -940,6 +1196,8 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
             ],
         },
     )
+    pool.connection.executions.clear()
+    pool.connection.fetches.clear()
     update = await store.upsert_bootstrap(
         season=season,
         bootstrap=changed,
@@ -950,6 +1208,22 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
                 fetched_minute=1,
         ),
         delete_missing=True,
+    )
+
+    executed_queries = [query for query, _arguments in pool.connection.executions]
+    assert sum("INSERT INTO fpl_elements" in query for query in executed_queries) == 1
+    assert not any("INSERT INTO fpl_events" in query for query in executed_queries)
+    assert not any("INSERT INTO fpl_teams" in query for query in executed_queries)
+    assert not any(
+        "INSERT INTO fpl_element_types" in query for query in executed_queries
+    )
+    assert sum(
+        "INSERT INTO relay_entity_snapshots" in query for query in executed_queries
+    ) == 1
+    assert not any(
+        query.startswith("SELECT id FROM fpl_")
+        or query.startswith("SELECT name FROM fpl_element_stat_definitions")
+        for query, _arguments in pool.connection.fetches
     )
 
     assert baseline.change_events == []
@@ -996,6 +1270,7 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
         },
     )
     removed = changed.model_copy(update={"elements": []})
+    pool.connection.executions.clear()
     deletion = await store.upsert_bootstrap(
         season=season,
         bootstrap=removed,
@@ -1012,6 +1287,22 @@ async def test_postgres_store_emits_only_real_player_fields_and_deletions() -> N
     assert pool.connection.fixture_stat_entries == []
     assert pool.connection.tables["fpl_event_live_elements"] == {}
     assert pool.connection.live_explain_stats == []
+    queries = [query for query, _arguments in pool.connection.executions]
+    element_delete_index = next(
+        index
+        for index, query in enumerate(queries)
+        if query.startswith("DELETE FROM fpl_elements")
+    )
+    assert next(
+        index
+        for index, query in enumerate(queries)
+        if query.startswith("DELETE FROM fpl_fixture_stat_entries")
+    ) < element_delete_index
+    assert next(
+        index
+        for index, query in enumerate(queries)
+        if query.startswith("DELETE FROM fpl_event_live_elements")
+    ) < element_delete_index
 
 
 @pytest.mark.asyncio
@@ -1166,7 +1457,8 @@ async def test_source_freshness_rejects_older_and_conflicting_payloads() -> None
 
 @pytest.mark.asyncio
 async def test_full_fixtures_cannot_regress_live_owned_fields() -> None:
-    store = PostgresDatabase(pool=NormalisedPool())
+    pool = NormalisedPool()
+    store = PostgresDatabase(pool=pool)
     kickoff = datetime(2026, 6, 20, tzinfo=UTC)
     live_fixture = Fixture(
         id=1,
@@ -1212,6 +1504,18 @@ async def test_full_fixtures_cannot_regress_live_owned_fields() -> None:
     assert stored.finished_provisional is True
     assert stored.minutes == 90
     assert stored.team_h_score == 3
+    ownership_query = next(
+        (query, arguments)
+        for query, arguments in pool.connection.fetches
+        if "FROM fpl_fixtures" in query and "started = true" in query
+    )
+    assert "kickoff_time + INTERVAL '4 hours'" in ownership_query[0]
+    stats_query = next(
+        (query, arguments)
+        for query, arguments in pool.connection.fetches
+        if "FROM fpl_fixture_stat_entries" in query and "ANY($2)" in query
+    )
+    assert stats_query[1][1] == [1]
 
 
 @pytest.mark.asyncio

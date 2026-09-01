@@ -106,16 +106,20 @@ jobs:
             printf '%s\n' "${app_stack}" >&2
             exit 1
           fi
+          reference_group="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "ReferenceScheduleGroupName") | .OutputValue' "${RUNNER_TEMP}/app-stack.json")"
+          reference_name="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "ReferenceScheduleName") | .OutputValue' "${RUNNER_TEMP}/app-stack.json")"
+          community_group="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "CommunityScheduleGroupName") | .OutputValue' "${RUNNER_TEMP}/app-stack.json")"
+          community_name="$(jq -er '.Stacks[0].Outputs[] | select(.OutputKey == "CommunityScheduleName") | .OutputValue' "${RUNNER_TEMP}/app-stack.json")"
           aws scheduler get-schedule \
-            --group-name "${APP_STACK_NAME}-reference" \
-            --name "${APP_STACK_NAME}-reference-quarter-hour" \
+            --group-name "${reference_group}" \
+            --name "${reference_name}" \
             > "${RUNNER_TEMP}/reference-schedule.json"
           state="$(jq -r '.State' "${RUNNER_TEMP}/reference-schedule.json")"
           case "${state}" in ENABLED|DISABLED) ;; *) exit 1 ;; esac
           echo "REFERENCE_SCHEDULE_STATE=${state}" >> "${GITHUB_ENV}"
           aws scheduler get-schedule \
-            --group-name "${APP_STACK_NAME}-community" \
-            --name "${APP_STACK_NAME}-community-daily" \
+            --group-name "${community_group}" \
+            --name "${community_name}" \
             > "${RUNNER_TEMP}/community-schedule.json"
           state="$(jq -r '.State' "${RUNNER_TEMP}/community-schedule.json")"
           case "${state}" in ENABLED|DISABLED) ;; *) exit 1 ;; esac

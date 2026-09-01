@@ -60,7 +60,7 @@ def schedule(
         schedule_expression=(
             "at(2026-08-24T11:00:00)"
             if live
-            else "cron(0/15 * * * ? *)"
+            else "cron(0 * * * ? *)"
         ),
         schedule_expression_timezone="UTC",
         flexible_window_mode="OFF",

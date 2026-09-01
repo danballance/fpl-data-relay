@@ -19,7 +19,6 @@ WINDOW_BEFORE_KICKOFF = timedelta(minutes=10)
 WINDOW_CATCHUP_DELAY = timedelta(minutes=1)
 LIVE_ACTIVE_DELAY_SECONDS = 15
 LIVE_IDLE_DELAY_SECONDS = 60
-DATABASE_WAKING_DELAY_SECONDS = 15
 
 
 class Job(BaseModel):
@@ -107,20 +106,13 @@ def next_live_delay(
     *,
     job: LiveJob,
     now: datetime,
-    has_active_fixture: bool | None,
-    database_waking: bool,
+    has_active_fixture: bool,
 ) -> int | None:
     """Return the next SQS delay or stop after the final window poll."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware.")
     if now >= job.window_end:
         return None
-    if database_waking:
-        return DATABASE_WAKING_DELAY_SECONDS
-    if has_active_fixture is None:
-        raise ValueError(
-            "has_active_fixture is required after a successful live poll.",
-        )
     return (
         LIVE_ACTIVE_DELAY_SECONDS
         if has_active_fixture

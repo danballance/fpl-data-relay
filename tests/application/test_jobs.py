@@ -144,30 +144,20 @@ def test_live_requeue_delays_and_window_termination() -> None:
         job=job,
         now=now,
         has_active_fixture=True,
-        database_waking=False,
     ) == 15
     assert next_live_delay(
         job=job,
         now=now,
         has_active_fixture=False,
-        database_waking=False,
     ) == 60
-    assert next_live_delay(
-        job=job,
-        now=now,
-        has_active_fixture=None,
-        database_waking=True,
-    ) == 15
     assert next_live_delay(
         job=job,
         now=job.window_end,
         has_active_fixture=True,
-        database_waking=False,
     ) is None
-    with pytest.raises(ValueError, match="has_active_fixture"):
+    with pytest.raises(ValueError, match="timezone-aware"):
         next_live_delay(
             job=job,
-            now=now,
-            has_active_fixture=None,
-            database_waking=False,
+            now=now.replace(tzinfo=None),
+            has_active_fixture=False,
         )

@@ -4,6 +4,7 @@ from fpl_data_relay.domain.changes import (
     ChangeKind,
     EntitySnapshot,
     diff_entity_snapshots,
+    entity_keys_to_upsert,
 )
 
 
@@ -87,7 +88,33 @@ def test_entity_diff_suppresses_initial_baseline() -> None:
         authoritative=True,
         baseline=True,
     )
+    assert diff.baseline is True
     assert diff.changes == []
+    assert entity_keys_to_upsert(
+        diff=diff,
+        current=[snapshot(key="1", label="Initial", data={"id": 1})],
+    ) == {"1"}
+
+
+def test_entity_diff_selects_only_created_and_updated_current_keys() -> None:
+    current = [
+        snapshot(key="1", label="Unchanged", data={"id": 1, "value": 1}),
+        snapshot(key="2", label="Updated", data={"id": 2, "value": 2}),
+        snapshot(key="4", label="Created", data={"id": 4, "value": 1}),
+    ]
+    diff = diff_entity_snapshots(
+        previous=[
+            snapshot(key="1", label="Unchanged", data={"id": 1, "value": 1}),
+            snapshot(key="2", label="Updated", data={"id": 2, "value": 1}),
+            snapshot(key="3", label="Deleted", data={"id": 3, "value": 1}),
+        ],
+        current=current,
+        authoritative=True,
+        baseline=False,
+    )
+
+    assert diff.baseline is False
+    assert entity_keys_to_upsert(diff=diff, current=current) == {"2", "4"}
 
 
 def test_entity_diff_rejects_duplicate_keys() -> None:

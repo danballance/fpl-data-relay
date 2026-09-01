@@ -76,7 +76,7 @@ def schedule() -> ScheduleSnapshot:
         name="reference",
         group_name="reference",
         state=ScheduleState.ENABLED,
-        schedule_expression="cron(0/15 * * * ? *)",
+        schedule_expression="cron(0 * * * ? *)",
         schedule_expression_timezone="UTC",
         flexible_window_mode="OFF",
         action_after_completion=None,

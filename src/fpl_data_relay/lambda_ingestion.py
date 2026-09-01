@@ -6,11 +6,12 @@ import hmac
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict, cast
 
 import boto3
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fpl_data_relay.adapters.outbound.fpl.validation import (
     validate_fpl_model,
@@ -50,6 +51,7 @@ from fpl_data_relay.domain.reference import BootstrapStatic
 
 LOGGER = logging.getLogger(__name__)
 PAGE_SIZE = 200
+DATABASE_RESUME_DELAY_SECONDS = 15
 
 
 class SqsClient(Protocol):
@@ -74,6 +76,8 @@ class SchedulerClient(Protocol):
     """EventBridge Scheduler operations required by fixture planning."""
 
     def list_schedules(self, **parameters: object) -> dict[str, object]: ...
+
+    def get_schedule(self, **parameters: object) -> dict[str, object]: ...
 
     def create_schedule(self, **parameters: object) -> dict[str, object]: ...
 
@@ -173,11 +177,17 @@ async def process_collected_payload(
             model=EventStatusResponse,
             payload=bundle.event_status,
         )
-        result = await ingestion.ingest_reference_payload(
-            bootstrap=bootstrap,
-            fixtures=fixtures,
-            event_status=event_status,
-            fetched_at=bundle.fetched_at,
+        async def persist_reference() -> IngestionResult:
+            return await ingestion.ingest_reference_payload(
+                bootstrap=bootstrap,
+                fixtures=fixtures,
+                event_status=event_status,
+                fetched_at=bundle.fetched_at,
+            )
+
+        result = await persist_with_database_resume(
+            operation=persist_reference,
+            job_kind=bundle.job.kind,
         )
         maintenance_active = await REPOSITORY.maintenance_active()
         schedule_result = ScheduleReconciliationResult(
@@ -233,8 +243,8 @@ async def process_collected_payload(
         model=EventLiveResponse,
         payload=bundle.event_live,
     )
-    try:
-        result = await ingestion.ingest_live_payload(
+    async def persist_live() -> IngestionResult:
+        return await ingestion.ingest_live_payload(
             season_id=bundle.job.season_id,
             event_id=bundle.job.event_id,
             event_status=event_status,
@@ -242,16 +252,11 @@ async def process_collected_payload(
             event_live=event_live,
             fetched_at=bundle.fetched_at,
         )
-    except DatabaseWakingError:
-        delay = next_live_delay(
-            job=bundle.job,
-            now=now,
-            has_active_fixture=None,
-            database_waking=True,
-        )
-        if delay is not None:
-            await requeue_live_job(job=bundle.job, delay_seconds=delay)
-        return {"status": "database_waking", "job_kind": bundle.job.kind}
+
+    result = await persist_with_database_resume(
+        operation=persist_live,
+        job_kind=bundle.job.kind,
+    )
     maintenance_active = await REPOSITORY.maintenance_active()
     delay = (
         None
@@ -260,7 +265,6 @@ async def process_collected_payload(
             job=bundle.job,
             now=now,
             has_active_fixture=result.has_active_fixture,
-            database_waking=False,
         )
     )
     if delay is not None:
@@ -289,6 +293,26 @@ async def process_collected_payload(
         },
     )
     return {"status": "live_ingested", "job_kind": bundle.job.kind}
+
+
+async def persist_with_database_resume(
+    *,
+    operation: Callable[[], Awaitable[IngestionResult]],
+    job_kind: str,
+) -> IngestionResult:
+    """Retry persistence once after Aurora reports that it is resuming."""
+    try:
+        return await operation()
+    except DatabaseWakingError:
+        LOGGER.info(
+            "database_resume_wait",
+            extra={
+                "job_kind": job_kind,
+                "delay_seconds": DATABASE_RESUME_DELAY_SECONDS,
+            },
+        )
+        await asyncio.sleep(DATABASE_RESUME_DELAY_SECONDS)
+        return await operation()
 
 
 def changed_entity_counts(*, result: IngestionResult) -> dict[str, dict[str, int]]:
@@ -396,6 +420,74 @@ class ScheduleReconciliationResult(BaseModel):
     deleted_count: int
 
 
+class ScheduleDeadLetterDefinition(BaseModel):
+    """Comparable dead-letter subset of an EventBridge target."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    arn: str = Field(alias="Arn", min_length=1)
+
+
+class ScheduleRetryDefinition(BaseModel):
+    """Comparable retry subset of an EventBridge target."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    maximum_event_age_seconds: int = Field(
+        alias="MaximumEventAgeInSeconds",
+        ge=60,
+        le=86_400,
+    )
+    maximum_retry_attempts: int = Field(
+        alias="MaximumRetryAttempts",
+        ge=0,
+        le=185,
+    )
+
+
+class ScheduleTargetDefinition(BaseModel):
+    """Comparable target subset of an EventBridge schedule."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    arn: str = Field(alias="Arn", min_length=1)
+    role_arn: str = Field(alias="RoleArn", min_length=1)
+    input: str = Field(alias="Input", min_length=1)
+    dead_letter: ScheduleDeadLetterDefinition = Field(alias="DeadLetterConfig")
+    retry: ScheduleRetryDefinition = Field(alias="RetryPolicy")
+
+
+class ScheduleFlexibleWindowDefinition(BaseModel):
+    """Comparable flexible-window subset of an EventBridge schedule."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    mode: str = Field(alias="Mode", min_length=1)
+
+
+class LiveScheduleDefinition(BaseModel):
+    """Complete mutable definition used for idempotent reconciliation."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    name: str = Field(alias="Name", min_length=1)
+    group_name: str = Field(alias="GroupName", min_length=1)
+    schedule_expression: str = Field(alias="ScheduleExpression", min_length=1)
+    schedule_expression_timezone: str = Field(
+        alias="ScheduleExpressionTimezone",
+        min_length=1,
+    )
+    flexible_time_window: ScheduleFlexibleWindowDefinition = Field(
+        alias="FlexibleTimeWindow",
+    )
+    action_after_completion: str = Field(
+        alias="ActionAfterCompletion",
+        min_length=1,
+    )
+    state: str = Field(alias="State", min_length=1)
+    target: ScheduleTargetDefinition = Field(alias="Target")
+
+
 async def reconcile_schedules(
     *,
     windows: list[MatchWindow],
@@ -416,13 +508,25 @@ async def reconcile_schedules(
         if name in existing and window.start <= now:
             continue
         parameters = schedule_parameters(window=window, now=now)
-        operation = (
-            SCHEDULER.update_schedule if name in existing else SCHEDULER.create_schedule
-        )
-        operation(**parameters)
         if name in existing:
+            response = SCHEDULER.get_schedule(
+                GroupName=SCHEDULE_GROUP_NAME,
+                Name=name,
+            )
+            actual = parse_schedule_definition(
+                values=response,
+                context=f"existing schedule {name}",
+            )
+            desired_definition = parse_schedule_definition(
+                values=parameters,
+                context=f"desired schedule {name}",
+            )
+            if actual == desired_definition:
+                continue
+            SCHEDULER.update_schedule(**parameters)
             updated_count += 1
         else:
+            SCHEDULER.create_schedule(**parameters)
             created_count += 1
     return ScheduleReconciliationResult(
         created_count=created_count,
@@ -447,16 +551,31 @@ async def list_live_schedule_names() -> set[str]:
         if not isinstance(schedules, list):
             raise RuntimeError("Scheduler returned an invalid schedule list.")
         for schedule in schedules:
-            if isinstance(schedule, dict):
-                name = schedule.get("Name")
-                if isinstance(name, str):
-                    names.add(name)
+            if not isinstance(schedule, dict):
+                raise RuntimeError("Scheduler returned an invalid schedule entry.")
+            name = schedule.get("Name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError("Scheduler returned a schedule without a name.")
+            names.add(name)
         raw_token = response.get("NextToken")
         if raw_token is None:
             return names
         if not isinstance(raw_token, str):
             raise RuntimeError("Scheduler returned an invalid pagination token.")
         next_token = raw_token
+
+
+def parse_schedule_definition(
+    *,
+    values: dict[str, object],
+    context: str,
+) -> LiveScheduleDefinition:
+    """Validate the mutable schedule fields required for exact comparison."""
+    try:
+        return LiveScheduleDefinition.model_validate(values)
+    except ValidationError as error:
+        message = f"Scheduler returned an invalid {context} definition."
+        raise RuntimeError(message) from error
 
 
 def schedule_parameters(*, window: MatchWindow, now: datetime) -> dict[str, object]:

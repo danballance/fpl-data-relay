@@ -119,6 +119,7 @@ class EntityFamilyDiff(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    baseline: bool
     changes: list[EntityChangeDraft] = Field(default_factory=list)
 
     @property
@@ -231,7 +232,30 @@ def diff_entity_snapshots(
                     fields=fields,
                 ),
             )
-    return EntityFamilyDiff(changes=changes)
+    return EntityFamilyDiff(baseline=baseline, changes=changes)
+
+
+def entity_keys_to_upsert(
+    *,
+    diff: EntityFamilyDiff,
+    current: list[EntitySnapshot],
+) -> set[str]:
+    """Return current entity keys that require normalized persistence."""
+    current_by_key = snapshots_by_key(snapshots=current)
+    if diff.baseline:
+        return set(current_by_key)
+    keys = {
+        change.entity_key
+        for change in diff.changes
+        if change.kind in {ChangeKind.CREATED, ChangeKind.UPDATED}
+    }
+    missing = keys - current_by_key.keys()
+    if missing:
+        raise RuntimeError(
+            "Entity diff selected keys absent from the current snapshot: "
+            f"{sorted(missing)!r}.",
+        )
+    return keys
 
 
 def snapshots_by_key(

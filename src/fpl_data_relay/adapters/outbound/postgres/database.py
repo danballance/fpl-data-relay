@@ -41,6 +41,7 @@ from fpl_data_relay.domain.changes import (
     IngestionSourceStatus,
     UpsertOutcome,
     diff_entity_snapshots,
+    entity_keys_to_upsert,
 )
 from fpl_data_relay.domain.fixtures import (
     Fixture,
@@ -74,6 +75,15 @@ type StatScalar = int | float | str | bool | None
 FIELD_CHANGES_ADAPTER = TypeAdapter(list[FieldChange])
 SCHEDULE_SNAPSHOTS_ADAPTER = TypeAdapter(list[ScheduleSnapshot])
 QUEUE_DEPTHS_ADAPTER = TypeAdapter(list[QueueDepth])
+
+
+class BootstrapPersistenceResult(BaseModel):
+    """Bootstrap outcome plus diffs needed for deferred authoritative deletes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: UpsertOutcome
+    diffs: dict[EntityFamily, EntityFamilyDiff]
 
 
 class IngestionLockError(RuntimeError):
@@ -396,11 +406,11 @@ class PostgresDatabase(_PostgresOperations):
         """Persist a complete reference bundle in one physical transaction."""
         async with self._pool.acquire() as connection, connection.transaction():
             bound = PostgresDatabase(pool=BoundPool(connection=connection))
-            bootstrap_outcome = await bound.upsert_bootstrap(
+            bootstrap_result = await persist_bootstrap_source(
+                connection=connection,
                 season=season,
                 bootstrap=bootstrap,
                 metadata=bootstrap_metadata,
-                delete_missing=False,
             )
             fixtures_outcome = await bound.upsert_fixtures(
                 fixtures=fixtures,
@@ -410,12 +420,14 @@ class PostgresDatabase(_PostgresOperations):
                 status=status,
                 metadata=status_metadata,
             )
-            await delete_bootstrap_rows_missing_from_snapshot(
-                connection=connection,
-                season_id=season.id,
-                bootstrap=bootstrap,
-            )
-        return [bootstrap_outcome, fixtures_outcome, status_outcome]
+            if bootstrap_result.outcome.changed:
+                await reconcile_removed_bootstrap_rows(
+                    connection=connection,
+                    season_id=season.id,
+                    bootstrap=bootstrap,
+                    diffs=bootstrap_result.diffs,
+                )
+        return [bootstrap_result.outcome, fixtures_outcome, status_outcome]
 
     async def upsert_live_snapshot(
         self,
@@ -726,117 +738,21 @@ class PostgresDatabase(_PostgresOperations):
         delete_missing: bool,
     ) -> UpsertOutcome:
         """Upsert bootstrap/reference rows and emit entity-family events."""
-        snapshots = bootstrap_snapshots(bootstrap=bootstrap)
         async with self._pool.acquire() as connection, connection.transaction():
-            comparison = await compare_source(
+            result = await persist_bootstrap_source(
                 connection=connection,
+                season=season,
+                bootstrap=bootstrap,
                 metadata=metadata,
             )
-            if comparison.unchanged:
-                return UpsertOutcome(changed=False, change_events=[])
-            if season.id != metadata.season_id:
-                raise ValueError("Season id does not match ingestion metadata.")
-            diffs = await compare_snapshot_families(
-                connection=connection,
-                season_id=metadata.season_id,
-                source_event_id=metadata.event_id,
-                snapshots=snapshots,
-                authoritative=True,
-                source_exists=comparison.exists,
-            )
-            await connection.execute(
-                """
-                UPDATE fpl_seasons
-                SET is_current = false, row_hash = '', updated_at = now()
-                WHERE id != $1 AND is_current = true
-                """,
-                season.id,
-            )
-            await upsert_model_row(
-                connection=connection,
-                table="fpl_seasons",
-                key_columns=["id"],
-                values=season.model_dump(),
-            )
-            for event in bootstrap.events:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_events",
-                    key_columns=["season_id", "id"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=event.model_dump(),
-                    ),
-                )
-            for phase in bootstrap.phases:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_phases",
-                    key_columns=["season_id", "id"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=phase.model_dump(),
-                    ),
-                )
-            for team in bootstrap.teams:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_teams",
-                    key_columns=["season_id", "id"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=team.model_dump(),
-                    ),
-                )
-            for element_type in bootstrap.element_types:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_element_types",
-                    key_columns=["season_id", "id"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=element_type.model_dump(),
-                    ),
-                )
-            for stat in bootstrap.element_stats:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_element_stat_definitions",
-                    key_columns=["season_id", "name"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=stat.model_dump(),
-                    ),
-                )
-            for element in bootstrap.elements:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_elements",
-                    key_columns=["season_id", "id"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=element.model_dump(),
-                    ),
-                )
-            if delete_missing:
-                await delete_removed_bootstrap_rows(
+            if delete_missing and result.outcome.changed:
+                await reconcile_removed_bootstrap_rows(
                     connection=connection,
                     season_id=metadata.season_id,
-                    diffs=diffs,
+                    bootstrap=bootstrap,
+                    diffs=result.diffs,
                 )
-            events = await persist_snapshot_diffs(
-                connection=connection,
-                snapshots=snapshots,
-                diffs=diffs,
-                metadata=metadata,
-                authoritative=True,
-            )
-            await upsert_source_metadata(
-                connection=connection,
-                metadata=metadata,
-                logically_changed=bool(events),
-            )
-            return UpsertOutcome(changed=True, change_events=events)
+            return result.outcome
 
     async def upsert_fixtures(
         self,
@@ -871,7 +787,15 @@ class PostgresDatabase(_PostgresOperations):
                 authoritative=authoritative,
                 source_exists=comparison.exists,
             )
-            for fixture in fixtures:
+            fixture_diff = diffs[EntityFamily.FIXTURES]
+            write_keys = entity_keys_to_upsert(
+                diff=fixture_diff,
+                current=snapshots[EntityFamily.FIXTURES],
+            )
+            fixtures_to_write = [
+                fixture for fixture in fixtures if str(fixture.id) in write_keys
+            ]
+            for fixture in fixtures_to_write:
                 fixture_values = values_for_season(
                     season_id=metadata.season_id,
                     values=fixture.model_dump(exclude={"stats"}),
@@ -882,6 +806,7 @@ class PostgresDatabase(_PostgresOperations):
                     key_columns=["season_id", "id"],
                     values=fixture_values,
                 )
+            for fixture in fixtures_to_write:
                 await connection.execute(
                     """
                     DELETE FROM fpl_fixture_stat_entries
@@ -890,17 +815,25 @@ class PostgresDatabase(_PostgresOperations):
                     metadata.season_id,
                     fixture.id,
                 )
+            for fixture in fixtures_to_write:
                 await insert_fixture_stat_entries(
                     connection=connection,
                     season_id=metadata.season_id,
                     fixture=fixture,
                 )
             if authoritative:
-                await delete_removed_fixture_rows(
-                    connection=connection,
-                    season_id=metadata.season_id,
-                    diff=diffs[EntityFamily.FIXTURES],
-                )
+                if fixture_diff.baseline:
+                    await delete_fixture_rows_missing_from_snapshot(
+                        connection=connection,
+                        season_id=metadata.season_id,
+                        fixtures=fixtures,
+                    )
+                else:
+                    await delete_removed_fixture_rows(
+                        connection=connection,
+                        season_id=metadata.season_id,
+                        diff=fixture_diff,
+                    )
             events = await persist_snapshot_diffs(
                 connection=connection,
                 snapshots=snapshots,
@@ -942,40 +875,46 @@ class PostgresDatabase(_PostgresOperations):
                 authoritative=True,
                 source_exists=comparison.exists,
             )
-            await connection.execute(
-                """
-                INSERT INTO fpl_event_status (
-                    season_id, leagues, payload_hash, fetched_at, checked_at
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (season_id)
-                DO UPDATE SET
-                    leagues = EXCLUDED.leagues,
-                    payload_hash = EXCLUDED.payload_hash,
-                    fetched_at = EXCLUDED.fetched_at,
-                    checked_at = EXCLUDED.checked_at,
-                    updated_at = now()
-                """,
-                metadata.season_id,
-                status.leagues,
-                metadata.payload_hash,
-                metadata.fetched_at,
-                metadata.checked_at,
+            status_diff = diffs[EntityFamily.EVENT_STATUS]
+            write_keys = entity_keys_to_upsert(
+                diff=status_diff,
+                current=snapshots[EntityFamily.EVENT_STATUS],
             )
-            await connection.execute(
-                "DELETE FROM fpl_event_status_days WHERE season_id = $1",
-                metadata.season_id,
-            )
-            for day in status.status:
-                await upsert_model_row(
-                    connection=connection,
-                    table="fpl_event_status_days",
-                    key_columns=["season_id", "event", "date"],
-                    values=values_for_season(
-                        season_id=metadata.season_id,
-                        values=day.model_dump(),
-                    ),
+            if write_keys:
+                await connection.execute(
+                    """
+                    INSERT INTO fpl_event_status (
+                        season_id, leagues, payload_hash, fetched_at, checked_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (season_id)
+                    DO UPDATE SET
+                        leagues = EXCLUDED.leagues,
+                        payload_hash = EXCLUDED.payload_hash,
+                        fetched_at = EXCLUDED.fetched_at,
+                        checked_at = EXCLUDED.checked_at,
+                        updated_at = now()
+                    """,
+                    metadata.season_id,
+                    status.leagues,
+                    metadata.payload_hash,
+                    metadata.fetched_at,
+                    metadata.checked_at,
                 )
+                await connection.execute(
+                    "DELETE FROM fpl_event_status_days WHERE season_id = $1",
+                    metadata.season_id,
+                )
+                for day in status.status:
+                    await upsert_model_row(
+                        connection=connection,
+                        table="fpl_event_status_days",
+                        key_columns=["season_id", "event", "date"],
+                        values=values_for_season(
+                            season_id=metadata.season_id,
+                            values=day.model_dump(),
+                        ),
+                    )
             events = await persist_snapshot_diffs(
                 connection=connection,
                 snapshots=snapshots,
@@ -1022,15 +961,47 @@ class PostgresDatabase(_PostgresOperations):
                 authoritative=True,
                 source_exists=comparison.exists,
             )
-            await connection.execute(
-                """
-                DELETE FROM fpl_event_live_elements
-                WHERE season_id = $1 AND event_id = $2
-                """,
-                metadata.season_id,
-                event_id,
+            live_diff = diffs[EntityFamily.EVENT_LIVE]
+            write_keys = entity_keys_to_upsert(
+                diff=live_diff,
+                current=snapshots[EntityFamily.EVENT_LIVE],
             )
-            for live_element in live.elements:
+            elements_to_write = [
+                live_element
+                for live_element in live.elements
+                if f"{event_id}:{live_element.id}" in write_keys
+            ]
+            removed_element_ids = await live_element_ids_to_delete(
+                connection=connection,
+                season_id=metadata.season_id,
+                event_id=event_id,
+                current=live.elements,
+                diff=live_diff,
+            )
+            reset_element_ids = sorted(
+                {element.id for element in elements_to_write} | removed_element_ids,
+            )
+            for element_id in reset_element_ids:
+                await connection.execute(
+                    """
+                    DELETE FROM fpl_event_live_explain_stats
+                    WHERE season_id = $1 AND event_id = $2 AND element_id = $3
+                    """,
+                    metadata.season_id,
+                    event_id,
+                    element_id,
+                )
+            for element_id in sorted(removed_element_ids):
+                await connection.execute(
+                    """
+                    DELETE FROM fpl_event_live_elements
+                    WHERE season_id = $1 AND event_id = $2 AND element_id = $3
+                    """,
+                    metadata.season_id,
+                    event_id,
+                    element_id,
+                )
+            for live_element in elements_to_write:
                 values = live_element.stats.model_dump()
                 values["season_id"] = metadata.season_id
                 values["event_id"] = event_id
@@ -1041,6 +1012,7 @@ class PostgresDatabase(_PostgresOperations):
                     key_columns=["season_id", "event_id", "element_id"],
                     values=values,
                 )
+            for live_element in elements_to_write:
                 await insert_live_explain_stats(
                     connection=connection,
                     season_id=metadata.season_id,
@@ -1635,6 +1607,139 @@ async def build_normalized_baselines(
     return baselines
 
 
+async def persist_bootstrap_source(
+    *,
+    connection: ConnectionProtocol,
+    season: Season,
+    bootstrap: BootstrapStatic,
+    metadata: IngestionMetadata,
+) -> BootstrapPersistenceResult:
+    """Persist bootstrap rows while returning diffs for deferred deletion."""
+    snapshots = bootstrap_snapshots(bootstrap=bootstrap)
+    comparison = await compare_source(connection=connection, metadata=metadata)
+    if comparison.unchanged:
+        return BootstrapPersistenceResult(
+            outcome=UpsertOutcome(changed=False, change_events=[]),
+            diffs={},
+        )
+    if season.id != metadata.season_id:
+        raise ValueError("Season id does not match ingestion metadata.")
+    diffs = await compare_snapshot_families(
+        connection=connection,
+        season_id=metadata.season_id,
+        source_event_id=metadata.event_id,
+        snapshots=snapshots,
+        authoritative=True,
+        source_exists=comparison.exists,
+    )
+    write_keys = {
+        family: entity_keys_to_upsert(diff=diffs[family], current=current)
+        for family, current in snapshots.items()
+    }
+    await connection.execute(
+        """
+        UPDATE fpl_seasons
+        SET is_current = false, row_hash = '', updated_at = now()
+        WHERE id != $1 AND is_current = true
+        """,
+        season.id,
+    )
+    await upsert_model_row(
+        connection=connection,
+        table="fpl_seasons",
+        key_columns=["id"],
+        values=season.model_dump(),
+    )
+    for event in bootstrap.events:
+        if str(event.id) not in write_keys[EntityFamily.EVENTS]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_events",
+            key_columns=["season_id", "id"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=event.model_dump(),
+            ),
+        )
+    for phase in bootstrap.phases:
+        if str(phase.id) not in write_keys[EntityFamily.PHASES]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_phases",
+            key_columns=["season_id", "id"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=phase.model_dump(),
+            ),
+        )
+    for team in bootstrap.teams:
+        if str(team.id) not in write_keys[EntityFamily.TEAMS]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_teams",
+            key_columns=["season_id", "id"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=team.model_dump(),
+            ),
+        )
+    for element_type in bootstrap.element_types:
+        if str(element_type.id) not in write_keys[EntityFamily.ELEMENT_TYPES]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_element_types",
+            key_columns=["season_id", "id"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=element_type.model_dump(),
+            ),
+        )
+    for stat in bootstrap.element_stats:
+        if stat.name not in write_keys[EntityFamily.ELEMENT_STATS]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_element_stat_definitions",
+            key_columns=["season_id", "name"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=stat.model_dump(),
+            ),
+        )
+    for element in bootstrap.elements:
+        if str(element.id) not in write_keys[EntityFamily.ELEMENTS]:
+            continue
+        await upsert_model_row(
+            connection=connection,
+            table="fpl_elements",
+            key_columns=["season_id", "id"],
+            values=values_for_season(
+                season_id=metadata.season_id,
+                values=element.model_dump(),
+            ),
+        )
+    events = await persist_snapshot_diffs(
+        connection=connection,
+        snapshots=snapshots,
+        diffs=diffs,
+        metadata=metadata,
+        authoritative=True,
+    )
+    await upsert_source_metadata(
+        connection=connection,
+        metadata=metadata,
+        logically_changed=bool(events),
+    )
+    return BootstrapPersistenceResult(
+        outcome=UpsertOutcome(changed=True, change_events=events),
+        diffs=diffs,
+    )
+
+
 async def compare_source(
     *,
     connection: ConnectionProtocol,
@@ -1767,6 +1872,7 @@ async def persist_snapshot_diffs(
     events: list[ChangeEvent] = []
     for family, current in snapshots.items():
         diff = diffs[family]
+        write_keys = entity_keys_to_upsert(diff=diff, current=current)
         event = await insert_change_event(
             connection=connection,
             family=family,
@@ -1781,6 +1887,8 @@ async def persist_snapshot_diffs(
             )
             events.append(event)
         for snapshot in current:
+            if snapshot.entity_key not in write_keys:
+                continue
             await upsert_entity_snapshot(
                 connection=connection,
                 season_id=metadata.season_id,
@@ -1992,6 +2100,28 @@ async def delete_removed_bootstrap_rows(
             )
 
 
+async def reconcile_removed_bootstrap_rows(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    bootstrap: BootstrapStatic,
+    diffs: dict[EntityFamily, EntityFamilyDiff],
+) -> None:
+    """Use diffs normally and a full scan only for a canonical baseline."""
+    if any(diff.baseline for diff in diffs.values()):
+        await delete_bootstrap_rows_missing_from_snapshot(
+            connection=connection,
+            season_id=season_id,
+            bootstrap=bootstrap,
+        )
+        return
+    await delete_removed_bootstrap_rows(
+        connection=connection,
+        season_id=season_id,
+        diffs=diffs,
+    )
+
+
 async def delete_bootstrap_rows_missing_from_snapshot(
     *,
     connection: ConnectionProtocol,
@@ -2065,6 +2195,7 @@ async def delete_bootstrap_dependents(
             season_id,
             element_id,
         )
+    for element_id in sorted(removed_element_ids):
         await connection.execute(
             """
             DELETE FROM fpl_event_live_elements
@@ -2082,6 +2213,7 @@ async def delete_bootstrap_dependents(
             season_id,
             event_id,
         )
+    for event_id in sorted(removed_event_ids):
         await connection.execute(
             """
             DELETE FROM fpl_event_live_elements
@@ -2099,21 +2231,97 @@ async def delete_removed_fixture_rows(
     diff: EntityFamilyDiff,
 ) -> None:
     """Remove fixtures absent from the authoritative full fixture snapshot."""
+    removed_ids = {
+        int(change.entity_key)
+        for change in diff.changes
+        if change.kind is ChangeKind.DELETED
+    }
+    await delete_fixture_ids(
+        connection=connection,
+        season_id=season_id,
+        fixture_ids=removed_ids,
+    )
+
+
+async def delete_fixture_rows_missing_from_snapshot(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    fixtures: list[Fixture],
+) -> None:
+    """Fully reconcile fixture rows when canonical state is a baseline."""
+    rows = await connection.fetch(
+        "SELECT id FROM fpl_fixtures WHERE season_id = $1",
+        season_id,
+    )
+    existing_ids = {
+        require_int(values=row_values(row=row), key="id") for row in rows
+    }
+    await delete_fixture_ids(
+        connection=connection,
+        season_id=season_id,
+        fixture_ids=existing_ids - {fixture.id for fixture in fixtures},
+    )
+
+
+async def delete_fixture_ids(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    fixture_ids: set[int],
+) -> None:
+    """Delete fixture dependants and rows in batched statement order."""
+    for fixture_id in sorted(fixture_ids):
+        await connection.execute(
+            """
+            DELETE FROM fpl_event_live_explain_stats
+            WHERE season_id = $1 AND fixture_id = $2
+            """,
+            season_id,
+            fixture_id,
+        )
+    for fixture_id in sorted(fixture_ids):
+        await connection.execute(
+            "DELETE FROM fpl_fixtures WHERE season_id = $1 AND id = $2",
+            season_id,
+            fixture_id,
+        )
+
+
+async def live_element_ids_to_delete(
+    *,
+    connection: ConnectionProtocol,
+    season_id: str,
+    event_id: int,
+    current: list[LiveElement],
+    diff: EntityFamilyDiff,
+) -> set[int]:
+    """Return removed live element ids, scanning only on a baseline."""
+    if diff.baseline:
+        rows = await connection.fetch(
+            """
+            SELECT element_id FROM fpl_event_live_elements
+            WHERE season_id = $1 AND event_id = $2
+            """,
+            season_id,
+            event_id,
+        )
+        existing_ids = {
+            require_int(values=row_values(row=row), key="element_id")
+            for row in rows
+        }
+        return existing_ids - {element.id for element in current}
+    removed_ids: set[int] = set()
     for change in diff.changes:
-        if change.kind is ChangeKind.DELETED:
-            await connection.execute(
-                """
-                DELETE FROM fpl_event_live_explain_stats
-                WHERE season_id = $1 AND fixture_id = $2
-                """,
-                season_id,
-                int(change.entity_key),
+        if change.kind is not ChangeKind.DELETED:
+            continue
+        event_key, separator, element_key = change.entity_key.partition(":")
+        if separator != ":" or event_key != str(event_id) or not element_key.isdigit():
+            raise RuntimeError(
+                f"Invalid event-live entity key {change.entity_key!r}.",
             )
-            await connection.execute(
-                "DELETE FROM fpl_fixtures WHERE season_id = $1 AND id = $2",
-                season_id,
-                int(change.entity_key),
-            )
+        removed_ids.add(int(element_key))
+    return removed_ids
 
 
 def bootstrap_snapshots(
@@ -2476,14 +2684,21 @@ async def fixtures_with_live_ownership(
         """
         SELECT * FROM fpl_fixtures
         WHERE season_id = $1 AND id = ANY($2)
+          AND started = true
+          AND kickoff_time IS NOT NULL
+          AND $3 < kickoff_time + INTERVAL '4 hours'
         """,
         metadata.season_id,
         fixture_ids,
+        metadata.fetched_at,
     )
+    owned_fixture_ids = [
+        require_int(values=row_values(row=row), key="id") for row in rows
+    ]
     stats_by_fixture = await fetch_fixture_stats_for_ids(
         connection=connection,
         season_id=metadata.season_id,
-        fixture_ids=fixture_ids,
+        fixture_ids=owned_fixture_ids,
     )
     existing_by_id: dict[int, Fixture] = {}
     for row in rows:

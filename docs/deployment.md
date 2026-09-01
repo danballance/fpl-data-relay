@@ -213,12 +213,14 @@ After that bootstrap, use the durable `prod-maintenance-*` and
 guide. The lower-level `fpl-relay change-feed rebaseline-current` command remains
 an implementation primitive rather than the normal production runbook.
 
-The reference Scheduler sends a collection job every 15 minutes. Scheduler
-targets retry for up to 15 minutes with three attempts and route exhausted
+The reference Scheduler sends a collection job at the top of every hour.
+Scheduler targets retry for up to 15 minutes with three attempts and route exhausted
 deliveries to the Scheduler DLQ. Operational alarms cover Scheduler target
 errors, dropped invocations, Scheduler DLQ messages, and two missed reference
 periods, in addition to queue age, queue DLQs, and repeated Lambda failures.
 Dynamic live schedules use the same target retry and DLQ contract.
+Ingestion handles the known Aurora resume signal by waiting 15 seconds and
+retrying persistence once without fetching or enqueuing the payload again.
 
 The separate community queue has its own encrypted DLQ and invokes the generic
 community Lambda with batch size one, an 840-second timeout, reserved concurrency

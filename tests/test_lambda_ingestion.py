@@ -16,7 +16,10 @@ from fpl_data_relay.application.bundles import (
     payload_sha256_bytes,
 )
 from fpl_data_relay.application.errors import DatabaseWakingError
-from fpl_data_relay.application.ingestion.service import IngestionService
+from fpl_data_relay.application.ingestion.service import (
+    IngestionResult,
+    IngestionService,
+)
 from fpl_data_relay.application.jobs import LiveJob, MatchWindow, ReferenceJob
 from fpl_data_relay.domain.types import JsonValue
 from tests.conftest import FakeClient, InMemoryStore, bootstrap_payload, fixture_payload
@@ -25,9 +28,11 @@ from tests.conftest import FakeClient, InMemoryStore, bootstrap_payload, fixture
 class FakeAwsClient:
     def __init__(self) -> None:
         self.payload = b""
+        self.get_object_calls = 0
 
     def get_object(self, **parameters: object) -> dict[str, object]:
         del parameters
+        self.get_object_calls += 1
         return {"Body": io.BytesIO(self.payload)}
 
 
@@ -129,6 +134,175 @@ async def test_reconcile_does_not_restart_retained_active_schedule(
         "deleted_count": 0,
     }
     assert scheduler.mutations == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_leaves_identical_future_schedule_unchanged(
+    lambda_module: Any,
+) -> None:
+    now = datetime(2026, 8, 21, 12, tzinfo=UTC)
+    window = MatchWindow(
+        season_id="2026-27",
+        event_id=1,
+        start=now + timedelta(hours=2),
+        end=now + timedelta(hours=6),
+    )
+    definition = lambda_module.schedule_parameters(window=window, now=now)
+
+    class IdenticalScheduler:
+        def __init__(self) -> None:
+            self.mutations: list[str] = []
+
+        def list_schedules(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Schedules": [{"Name": window.schedule_name}]}
+
+        def get_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return definition
+
+        def create_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            self.mutations.append("create")
+            return {}
+
+        def update_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            self.mutations.append("update")
+            return {}
+
+        def delete_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            self.mutations.append("delete")
+            return {}
+
+    scheduler = IdenticalScheduler()
+    lambda_module.SCHEDULER = scheduler
+    result = await lambda_module.reconcile_schedules(windows=[window], now=now)
+    assert result.updated_count == 0
+    assert scheduler.mutations == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_updates_only_a_drifted_future_schedule(
+    lambda_module: Any,
+) -> None:
+    now = datetime(2026, 8, 21, 12, tzinfo=UTC)
+    window = MatchWindow(
+        season_id="2026-27",
+        event_id=1,
+        start=now + timedelta(hours=2),
+        end=now + timedelta(hours=6),
+    )
+    definition = {
+        **lambda_module.schedule_parameters(window=window, now=now),
+        "State": "DISABLED",
+    }
+
+    class DriftedScheduler:
+        def __init__(self) -> None:
+            self.updated: list[dict[str, object]] = []
+
+        def list_schedules(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Schedules": [{"Name": window.schedule_name}]}
+
+        def get_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return definition
+
+        def update_schedule(self, **parameters: object) -> dict[str, object]:
+            self.updated.append(parameters)
+            return {}
+
+        def create_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            raise AssertionError("existing schedule must not be created")
+
+        def delete_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            raise AssertionError("desired schedule must not be deleted")
+
+    scheduler = DriftedScheduler()
+    lambda_module.SCHEDULER = scheduler
+    result = await lambda_module.reconcile_schedules(windows=[window], now=now)
+    assert result.updated_count == 1
+    assert scheduler.updated[0]["State"] == "ENABLED"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_creates_missing_and_deletes_obsolete_schedules(
+    lambda_module: Any,
+) -> None:
+    now = datetime(2026, 8, 21, 12, tzinfo=UTC)
+    window = MatchWindow(
+        season_id="2026-27",
+        event_id=1,
+        start=now + timedelta(hours=2),
+        end=now + timedelta(hours=6),
+    )
+
+    class ChangedSetScheduler:
+        def __init__(self) -> None:
+            self.created: list[str] = []
+            self.deleted: list[str] = []
+
+        def list_schedules(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Schedules": [{"Name": "fpl-live-obsolete"}]}
+
+        def create_schedule(self, **parameters: object) -> dict[str, object]:
+            self.created.append(cast("str", parameters["Name"]))
+            return {}
+
+        def delete_schedule(self, **parameters: object) -> dict[str, object]:
+            self.deleted.append(cast("str", parameters["Name"]))
+            return {}
+
+        def get_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            raise AssertionError("missing schedule has no definition")
+
+        def update_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            raise AssertionError("missing schedule must be created")
+
+    scheduler = ChangedSetScheduler()
+    lambda_module.SCHEDULER = scheduler
+    result = await lambda_module.reconcile_schedules(windows=[window], now=now)
+    assert result.model_dump() == {
+        "created_count": 1,
+        "updated_count": 0,
+        "deleted_count": 1,
+    }
+    assert scheduler.created == [window.schedule_name]
+    assert scheduler.deleted == ["fpl-live-obsolete"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_rejects_malformed_schedule_definitions(
+    lambda_module: Any,
+) -> None:
+    now = datetime(2026, 8, 21, 12, tzinfo=UTC)
+    window = MatchWindow(
+        season_id="2026-27",
+        event_id=1,
+        start=now + timedelta(hours=2),
+        end=now + timedelta(hours=6),
+    )
+
+    class MalformedScheduler:
+        def list_schedules(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Schedules": [{"Name": window.schedule_name}]}
+
+        def get_schedule(self, **parameters: object) -> dict[str, object]:
+            del parameters
+            return {"Name": window.schedule_name}
+
+    lambda_module.SCHEDULER = MalformedScheduler()
+    with pytest.raises(RuntimeError, match="invalid existing schedule"):
+        await lambda_module.reconcile_schedules(windows=[window], now=now)
 
 
 def reference_bundle() -> ReferencePayloadBundle:
@@ -396,7 +570,7 @@ async def test_live_maintenance_persists_without_enqueuing_continuation(
 
 
 @pytest.mark.asyncio
-async def test_lambda_requeues_live_job_while_aurora_wakes(
+async def test_lambda_waits_and_retries_loaded_live_payload_while_aurora_wakes(
     lambda_module: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -420,28 +594,74 @@ async def test_lambda_requeues_live_job_while_aurora_wakes(
     )
     message, payload = collected_message(bundle=bundle)
     lambda_module.S3.payload = payload
-    delays: list[int] = []
+    calls: list[int] = []
+    sleeps: list[float] = []
 
     class WakingIngestion:
         def __init__(self, **parameters: object) -> None:
             del parameters
 
-        async def ingest_live_payload(self, **parameters: object) -> None:
-            del parameters
-            raise DatabaseWakingError("waking")
+        async def ingest_live_payload(self, **parameters: object) -> object:
+            calls.append(id(parameters["event_live"]))
+            if len(calls) == 1:
+                raise DatabaseWakingError("waking")
+            return IngestionResult(
+                changed_count=0,
+                unchanged_count=3,
+                season_id="2025-26",
+                current_event_id=1,
+                has_active_fixture=False,
+                entity_change_counts={},
+            )
 
-    async def requeue_live_job(*, job: object, delay_seconds: int) -> None:
-        del job
-        delays.append(delay_seconds)
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async def unexpected_requeue(**parameters: object) -> None:
+        del parameters
+        raise AssertionError("maintenance suppresses the normal continuation")
 
     monkeypatch.setattr(lambda_module, "IngestionService", WakingIngestion)
-    monkeypatch.setattr(lambda_module, "requeue_live_job", requeue_live_job)
+    monkeypatch.setattr(lambda_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(lambda_module, "requeue_live_job", unexpected_requeue)
+    store = InMemoryStore()
+    store.is_maintenance_active = True
+    lambda_module.REPOSITORY = store
     result = await lambda_module.process_collected_payload(
         message=message,
         now=now,
     )
-    assert result == {"status": "database_waking", "job_kind": "live"}
-    assert delays == [15]
+    assert result == {"status": "live_ingested", "job_kind": "live"}
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert sleeps == [15]
+    assert lambda_module.S3.get_object_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_database_resume_retry_propagates_a_second_failure(
+    lambda_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    async def persist() -> IngestionResult:
+        nonlocal calls
+        calls += 1
+        raise DatabaseWakingError("still waking")
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(lambda_module.asyncio, "sleep", sleep)
+    with pytest.raises(DatabaseWakingError, match="still waking"):
+        await lambda_module.persist_with_database_resume(
+            operation=persist,
+            job_kind="reference",
+        )
+    assert calls == 2
+    assert sleeps == [15]
 
 
 @pytest.mark.asyncio
