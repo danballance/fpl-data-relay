@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 import fpl_data_relay.tui_bootstrap as tui_bootstrap
@@ -23,20 +24,21 @@ class FakeTui:
 
 def test_tui_help_documents_every_explicit_launch_option() -> None:
     result = CliRunner().invoke(tui_bootstrap.app, ["--help"])
+    output = unstyle(result.stdout)
 
     assert result.exit_code == 0
-    assert "--project-root" in result.stdout
-    assert "--admin-config" in result.stdout
-    assert "--log-path" in result.stdout
-    assert "--log-max-bytes" in result.stdout
-    assert "--log-file-count" in result.stdout
+    assert "--project-root" in output
+    assert "--admin-config" in output
+    assert "--log-path" in output
+    assert "--log-max-bytes" in output
+    assert "--log-file-count" in output
 
 
 def test_tui_launch_requires_every_explicit_option() -> None:
     result = CliRunner().invoke(tui_bootstrap.app, [])
 
     assert result.exit_code == 2
-    assert "Missing option '--project-root'" in result.stderr
+    assert "Missing option '--project-root'" in unstyle(result.stderr)
 
 
 def test_tui_launch_builds_dependencies_and_runs_application(
